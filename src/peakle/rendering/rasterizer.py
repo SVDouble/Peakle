@@ -102,6 +102,22 @@ class SyntheticRenderer:
             stride=stride,
         ).skyline_profile
 
+    def visible_mask(
+        self,
+        terrain: TerrainMap,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        stride: int = 1,
+    ) -> NDArray[np.bool_]:
+        """Rasterizes visible terrain and returns its boolean coverage mask."""
+
+        return self._rasterize_visible_terrain(
+            terrain,
+            intrinsics,
+            extrinsics,
+            stride=stride,
+        ).terrain_mask
+
     def _rasterize_visible_terrain(
         self,
         terrain: TerrainMap,

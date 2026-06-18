@@ -1,0 +1,55 @@
+"use strict";
+
+// Entry point: build the dockview layout, wire each panel to its host element,
+// then load the scene. Panels subscribe to the store in their setup, so they are
+// wired before `store.init()` emits.
+
+import { buildLayout } from "./layout.js";
+import { store } from "./store.js";
+import { setupCameraPanel } from "./panels/camera-image.js";
+import { setupConfigPanel } from "./panels/config.js";
+import { setupMapPanel } from "./panels/map/viewer.js";
+import { setupSolvePanel } from "./panels/solve.js";
+import { setupViewsPanel } from "./panels/views.js";
+
+const PANEL_SETUP = {
+  map: setupMapPanel,
+  config: setupConfigPanel,
+  views: setupViewsPanel,
+  camera: setupCameraPanel,
+  solve: setupSolvePanel,
+};
+
+main().catch((error) => {
+  const root = document.getElementById("layoutRoot");
+  root.innerHTML = `<div class="boot-error">Failed to load workbench: ${error.message}</div>`;
+  // eslint-disable-next-line no-console
+  console.error(error);
+});
+
+async function main() {
+  const layout = buildLayout(document.getElementById("layoutRoot"));
+  for (const [name, setup] of Object.entries(PANEL_SETUP)) {
+    wirePanel(layout, name, setup);
+  }
+  await store.init();
+}
+
+function wirePanel(layout, name, setup) {
+  const rootId = `${name}Panel`;
+  let mounted = false;
+  const tryMount = () => {
+    if (mounted) {
+      return;
+    }
+    const element = document.getElementById(rootId);
+    if (!element) {
+      return;
+    }
+    mounted = true;
+    setup(store, element);
+  };
+  layout.onDidLayoutChange(tryMount);
+  layout.onDidActivePanelChange(tryMount);
+  tryMount();
+}

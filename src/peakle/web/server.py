@@ -1,34 +1,31 @@
-"""Static artifact web server."""
+"""Live viewer server.
+
+Builds the in-memory scene from settings and serves the FastAPI viewer with
+uvicorn. Views and alignment solves are computed on demand; nothing is read
+from precomputed artifacts.
+"""
 
 from __future__ import annotations
 
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+import uvicorn
+
+from peakle.config import AppSettings
+from peakle.scene.scene import Scene
+from peakle.web.app import create_app
 
 
-def serve_artifacts(artifact_dir: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
-    """Serves generated artifacts with Python's standard library server.
+def serve(settings: AppSettings, host: str = "127.0.0.1", port: int = 8765) -> None:
+    """Serves the workbench.
 
     Args:
-        artifact_dir: Directory containing `index.html` and generated artifacts.
+        settings: Application settings used to build the initial scene.
         host: Interface to bind.
         port: TCP port to bind.
     """
 
-    directory = artifact_dir.resolve()
-    if not (directory / "index.html").exists():
-        msg = f"{directory} does not contain index.html; run `peakle demo run` first"
-        raise FileNotFoundError(msg)
-
-    handler = partial(SimpleHTTPRequestHandler, directory=str(directory))
-    server = ThreadingHTTPServer((host, port), handler)
+    scene = Scene.from_settings(settings)
+    app = create_app(scene)
     url = f"http://{host}:{port}/"
-    print(f"Serving Peakle viewer at {url}")
-    print(f"Artifact directory: {directory}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping server")
-    finally:
-        server.server_close()
+    print(f"Serving Peakle workbench at {url}")
+    print(f"Scene: {len(scene.peaks)} peaks, seed {scene.config.seed} (place cameras to create views)")
+    uvicorn.run(app, host=host, port=port, log_level=settings.log_level.lower())

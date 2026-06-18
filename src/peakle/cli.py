@@ -7,7 +7,7 @@ from pathlib import Path
 
 from peakle.config import AppSettings, load_settings
 from peakle.demo.pipeline import DemoOptions, run_demo
-from peakle.web.server import serve_artifacts
+from peakle.web.server import serve
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,9 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         result = run_demo(options)
         print(f"Artifacts: {result.output_dir.resolve()}")
-        print(f"Viewer: {result.viewer_path.resolve()}")
-        print(f"Primary render: {result.primary_render_path.resolve()}")
-        print(f"Primary annotated: {result.primary_annotated_path.resolve()}")
+        print(f"Scene: {result.scene_path.resolve()}")
         print(f"Position error: {_format_optional(result.position_error_m, 'm')}")
         print(f"Yaw error: {_format_optional(result.yaw_error_deg, 'deg')}")
         print(f"Contour MAE: {result.contour_mae_px:.2f} px")
@@ -48,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "web" and args.web_command == "serve":
-        serve_artifacts(args.artifact_dir, host=args.host, port=args.port)
+        serve(settings, host=args.host, port=args.port)
         return 0
 
     parser.print_help()
@@ -77,8 +75,7 @@ def _build_parser(settings: AppSettings) -> argparse.ArgumentParser:
 
     web_parser = subparsers.add_parser("web", help="Browser viewer commands")
     web_subparsers = web_parser.add_subparsers(dest="web_command")
-    serve_parser = web_subparsers.add_parser("serve", help="Serve generated artifacts")
-    serve_parser.add_argument("--artifact-dir", type=Path, default=settings.artifact_dir)
+    serve_parser = web_subparsers.add_parser("serve", help="Serve the live viewer (computes views on demand)")
     serve_parser.add_argument("--host", default=settings.web.host)
     serve_parser.add_argument("--port", type=int, default=settings.web.port)
 

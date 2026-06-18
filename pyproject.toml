@@ -9,11 +9,13 @@ description = "Synthetic mountain peak annotation demo."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+  "fastapi",
   "numpy",
   "pillow",
   "pydantic",
   "pydantic-settings[yaml]",
   "scipy",
+  "uvicorn[standard]",
 ]
 
 [project.scripts]
@@ -21,6 +23,7 @@ peakle = "peakle.cli:main"
 
 [dependency-groups]
 dev = [
+  "httpx",
   "pytest",
   "ruff",
   "ty",

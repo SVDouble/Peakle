@@ -1,4 +1,4 @@
-"""Synthetic demo integration tests."""
+"""Synthetic demo pipeline integration tests."""
 
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ from peakle.config import load_settings
 from peakle.demo.pipeline import DemoOptions, run_demo
 
 
-def test_demo_pipeline_writes_browser_artifacts(tmp_path: Path) -> None:
+def test_demo_pipeline_writes_scene_artifacts(tmp_path: Path) -> None:
     settings = load_settings()
     result = run_demo(
         DemoOptions.from_settings(
@@ -22,30 +22,17 @@ def test_demo_pipeline_writes_browser_artifacts(tmp_path: Path) -> None:
         )
     )
 
-    expected = [
-        "terrain.npz",
-        "terrain.json",
-        "peaks.json",
-        "scene.json",
-        "viewer-data.json",
-        "index.html",
-        "app.js",
-        "styles.css",
-        "views/view-01/render.png",
-        "views/view-01/terrain_mask.png",
-        "views/view-01/contour.json",
-        "views/view-01/pose_estimate.json",
-        "views/view-01/annotations.json",
-        "views/view-01/annotated.png",
-    ]
-    for filename in expected:
+    for filename in ("terrain.npz", "terrain.json", "peaks.json", "scene.json"):
         assert (tmp_path / filename).exists()
 
-    viewer_data = json.loads((tmp_path / "viewer-data.json").read_text(encoding="utf-8"))
-    assert set(viewer_data) == {"peaks", "scene", "terrain", "views"}
-    assert viewer_data["views"]
-    assert not (tmp_path / "render.png").exists()
-    assert not (tmp_path / "annotated.png").exists()
+    # Views are computed on the fly by the live server; the demo no longer
+    # precomputes per-view artifacts or static viewer assets.
+    assert not (tmp_path / "viewer-data.json").exists()
+    assert not (tmp_path / "app.js").exists()
+    assert not (tmp_path / "views").exists()
+
+    scene = json.loads((tmp_path / "scene.json").read_text(encoding="utf-8"))
+    assert {"terrain_spec", "intrinsics", "true_camera", "pose_prior", "peaks"} <= set(scene)
 
     assert result.visible_labels >= 1
     assert result.position_error_m is not None

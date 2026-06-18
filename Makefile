@@ -17,9 +17,9 @@ sync: ## Install project and development dependencies with uv.
 demo: ## Generate the full synthetic demo artifacts.
 	$(UV) run peakle $(CONFIG_FLAG) demo run
 
-run: demo serve ## Generate artifacts, then serve the browser viewer.
+run: serve ## Serve the live browser viewer (computes views on demand).
 
-serve: ## Serve generated artifacts in the browser.
+serve: ## Serve the live browser viewer (computes views on demand).
 	$(UV) run peakle $(CONFIG_FLAG) web serve
 
 quick-demo: ## Generate a smaller, faster demo for smoke testing.
