@@ -1,0 +1,38 @@
+[build-system]
+requires = ["uv_build>=0.11.21,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "peakle"
+version = "0.1.0"
+description = "Synthetic mountain peak annotation demo."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "numpy",
+  "pillow",
+  "pydantic",
+  "pydantic-settings[yaml]",
+  "scipy",
+]
+
+[project.scripts]
+peakle = "peakle.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "ruff",
+  "ty",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

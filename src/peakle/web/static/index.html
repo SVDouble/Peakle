@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Peakle Demo</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="terrain-stage" aria-label="Terrain visualization">
+        <canvas id="terrainCanvas"></canvas>
+        <div class="topbar">
+          <div>
+            <h1>Peakle</h1>
+            <p id="summary">Loading synthetic scene</p>
+          </div>
+          <div class="segmented" aria-label="Image view">
+            <button id="showRender" class="active" type="button">Render</button>
+            <button id="showAnnotated" type="button">Annotated</button>
+            <button id="showContours" type="button">Contours</button>
+          </div>
+        </div>
+        <div class="camera-hud" aria-label="Camera mode">
+          <div>
+            <span class="hud-title">Camera</span>
+            <strong id="selectedCamera">Compare</strong>
+          </div>
+          <div class="camera-actions">
+            <button class="active" data-camera-mode="compare" type="button">Compare</button>
+            <button data-camera-mode="true" type="button">True POV</button>
+            <button data-camera-mode="estimated" type="button">Estimated POV</button>
+            <button data-camera-mode="orbit" type="button">Orbit</button>
+          </div>
+          <p id="selectedCameraDescription">Blue is true camera coverage; amber is estimated camera coverage.</p>
+        </div>
+        <div class="map-scale-hud" aria-label="Map scale">
+          <div id="scaleBar" class="scale-bar"></div>
+          <div id="scaleLabel" class="scale-label">-</div>
+        </div>
+        <div id="webglStatus" class="status" hidden></div>
+      </section>
+
+      <aside class="inspector">
+        <section class="image-panel">
+          <img id="sceneImage" alt="Synthetic mountain view" />
+          <div id="imageContourLegend" class="image-contour-legend" hidden>
+            <span><i class="true-contour"></i>True contour</span>
+            <span><i class="estimated-contour"></i>Estimated contour</span>
+          </div>
+        </section>
+
+        <section class="metrics">
+          <h2>Pose Fit</h2>
+          <dl>
+            <div>
+              <dt>Position Error</dt>
+              <dd id="positionError">-</dd>
+            </div>
+            <div>
+              <dt>Yaw Error</dt>
+              <dd id="yawError">-</dd>
+            </div>
+            <div>
+              <dt>Contour MAE</dt>
+              <dd id="contourMae">-</dd>
+            </div>
+            <div>
+              <dt>Labels</dt>
+              <dd id="labelCount">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="camera-compare">
+          <h2>Camera Compare</h2>
+          <div class="camera-legend">
+            <span><i class="true-swatch"></i>True</span>
+            <span><i class="estimated-swatch"></i>Estimated</span>
+          </div>
+          <dl>
+            <div>
+              <dt>Position Delta</dt>
+              <dd id="comparePositionDelta">-</dd>
+            </div>
+            <div>
+              <dt>Yaw Delta</dt>
+              <dd id="compareYawDelta">-</dd>
+            </div>
+            <div>
+              <dt>Pitch Delta</dt>
+              <dd id="comparePitchDelta">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="peaks">
+          <h2>Visible Peaks</h2>
+          <ol id="peakList"></ol>
+        </section>
+      </aside>
+    </main>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

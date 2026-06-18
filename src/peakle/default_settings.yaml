@@ -1,0 +1,52 @@
+artifact_dir: data/demo
+random_seed: 42
+log_level: INFO
+
+terrain:
+  origin:
+    latitude_deg: 46.85
+    longitude_deg: 10.25
+    elevation_m: 0.0
+  width_m: 14000.0
+  height_m: 10000.0
+  grid_width: 180
+  grid_height: 140
+  min_elevation_m: 900.0
+  max_elevation_m: 3200.0
+  seed: 42
+
+peak_detection:
+  neighborhood_px: 9
+  prominence_radius_px: 12
+  min_prominence_m: 80.0
+  max_peaks: 18
+
+render:
+  image_width: 960
+  image_height: 540
+  horizontal_fov_deg: 55.0
+
+optimization:
+  max_iterations: 80
+  objective_terrain_stride: 6
+
+camera:
+  east_offset_fraction: 0.12
+  north_offset_fraction: 0.04
+  overlook_height_m: 800.0
+  view_count: 4
+  view_spacing_fraction: 0.18
+
+pose_noise:
+  horizontal_noise_m: 70.0
+  vertical_noise_m: 5.0
+  yaw_noise_deg: 2.4
+  pitch_noise_deg: 1.0
+  horizontal_sigma_m: 130.0
+  vertical_sigma_m: 12.0
+  yaw_sigma_deg: 5.0
+  pitch_sigma_deg: 2.5
+
+web:
+  host: 127.0.0.1
+  port: 8765

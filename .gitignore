@@ -1,0 +1,51 @@
+# Python bytecode and caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.ty/
+.hypothesis/
+.nox/
+.tox/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Generated demo artifacts
+data/demo/
+
+# Local environment and logs
+.env
+.env.*
+*.log
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code local state and extension caches; keep shared project tasks/settings.
+.vscode/*
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json

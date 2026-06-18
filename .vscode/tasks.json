@@ -1,0 +1,95 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Peakle: Sync",
+      "type": "shell",
+      "command": "make sync",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Demo",
+      "type": "shell",
+      "command": "make demo",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Quick Demo",
+      "type": "shell",
+      "command": "make quick-demo",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Serve",
+      "type": "shell",
+      "command": "make serve",
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Run",
+      "type": "shell",
+      "command": "make run",
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Check",
+      "type": "shell",
+      "command": "make check",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Test",
+      "type": "shell",
+      "command": "make test",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Lint",
+      "type": "shell",
+      "command": "make lint",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Format",
+      "type": "shell",
+      "command": "make format",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Typecheck",
+      "type": "shell",
+      "command": "make typecheck",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Build",
+      "type": "shell",
+      "command": "make build",
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Peakle: Clean",
+      "type": "shell",
+      "command": "make clean",
+      "problemMatcher": []
+    }
+  ]
+}
