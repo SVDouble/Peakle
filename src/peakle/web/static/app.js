@@ -1,6 +1,7 @@
 "use strict";
 
 import * as THREE from "three";
+import { createDockview, themeAbyss } from "dockview-core";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 
@@ -16,35 +17,103 @@ const LABEL_VIEW_PADDING = 1.08;
 const CAMERA_PICK_MAX_DRAG_PX = 5;
 const FOV_OVERLAY_VERTICAL_OFFSET = 0.011;
 const PREDICTED_CAMERA_COMPACT_THRESHOLD_M = 180;
-const ISOLINE_CORE_WIDTH = 0.0028;
-const ISOLINE_HALO_WIDTH = 0.008;
 const ISOLINE_INTERVAL_M = 250;
-const ISOLINE_VERTICAL_OFFSET = 0.006;
+const ISOLINE_VERTICAL_OFFSET = 0.0014;
 const RASTER_EPSILON = 1e-8;
 const SCALE_CANDIDATES_M = [100, 200, 500, 1000, 2000, 5000, 10000];
 const SCALE_MIN_WIDTH_PX = 64;
 const SCALE_MAX_WIDTH_PX = 150;
-const VISIBILITY_RASTER_MAX_WIDTH = 520;
+const VISIBILITY_RASTER_MAX_WIDTH = 820;
+const FOV_TRUE_COLOR = 0x3b82f6;
+const FOV_ESTIMATED_COLOR = 0xff3b30;
 
+// The viewport is either the free-orbit "Map" or a locked "Camera POV". The POV
+// embodies one camera role (true or estimated). These replace the former
+// Compare/Orbit/True/Estimated set, which had two redundant free-orbit modes.
 const CAMERA_MODES = {
-  orbit: "orbit",
+  map: "map",
+  pov: "pov",
+};
+const CAMERA_ROLES = {
   true: "true",
   estimated: "estimated",
-  compare: "compare",
 };
+
+const PANEL_TEMPLATES = {
+  map: "tpl-map",
+  camera: "tpl-camera",
+  controls: "tpl-controls",
+  peaks: "tpl-peaks",
+  alignment: "tpl-alignment",
+};
+
+const layout = buildLayout();
 
 const canvas = document.getElementById("terrainCanvas");
 const statusBox = document.getElementById("webglStatus");
-const sceneImage = document.getElementById("sceneImage");
-const showRender = document.getElementById("showRender");
-const showAnnotated = document.getElementById("showAnnotated");
-const showContours = document.getElementById("showContours");
-const imageContourLegend = document.getElementById("imageContourLegend");
+const cameraCanvas = document.getElementById("cameraCanvas");
+const cameraOverlay = document.getElementById("cameraOverlay");
 
 main().catch((error) => {
   statusBox.hidden = false;
   statusBox.textContent = `Viewer failed to load: ${error.message}`;
 });
+
+function buildLayout() {
+  const root = document.getElementById("layoutRoot");
+  const dockview = createDockview(root, {
+    theme: themeAbyss,
+    // Keep every panel mounted so background renderers (the camera image, the
+    // alignment lab) keep running and keep their DOM/handlers when not focused.
+    defaultRenderer: "always",
+    createComponent: (options) => {
+      const element = document.createElement("div");
+      element.className = "panel-host";
+      return {
+        element,
+        init: () => element.append(document.getElementById(PANEL_TEMPLATES[options.name]).content.cloneNode(true)),
+      };
+    },
+  });
+
+  const bounds = root.getBoundingClientRect();
+  const width = Math.max(640, bounds.width);
+  const height = Math.max(480, bounds.height);
+  const panel = (id, component, title) => ({ id, contentComponent: component, title });
+  const leaf = (size, ...panels) => ({
+    type: "leaf",
+    size,
+    data: { views: panels.map((entry) => entry.id), activeView: panels[0].id, id: `group-${panels[0].id}` },
+    panels,
+  });
+  const groups = [
+    leaf(Math.round(width * 0.6), panel("map", "map", "Map"), panel("alignment", "alignment", "Alignment Lab")),
+    {
+      type: "branch",
+      size: Math.round(width * 0.4),
+      data: [
+        leaf(Math.round(height * 0.48), panel("camera", "camera", "Camera")),
+        leaf(Math.round(height * 0.34), panel("controls", "controls", "Camera View")),
+        leaf(Math.round(height * 0.18), panel("peaks", "peaks", "Peaks")),
+      ],
+    },
+  ];
+  dockview.fromJSON({
+    grid: {
+      orientation: "HORIZONTAL",
+      width,
+      height,
+      root: { type: "branch", size: height, data: groups },
+    },
+    panels: Object.fromEntries(groups.flatMap(collectLeafPanels).map((entry) => [entry.id, entry])),
+    activeGroup: "group-map",
+  });
+  return dockview;
+}
+
+function collectLeafPanels(node) {
+  return node.type === "leaf" ? node.panels : node.data.flatMap(collectLeafPanels);
+}
 
 async function main() {
   const response = await fetch("viewer-data.json");
@@ -52,15 +121,29 @@ async function main() {
   const appState = {
     activeView: null,
     data,
-    imageMode: "render",
     views: data.views,
   };
   validateViews(appState.views);
   appState.activeView = appState.views[0];
   populatePanels(appState);
-  setupImageToggle(appState);
   setupComparisonPanel(appState.activeView);
   setupTerrainViewer(data, appState);
+  // Dockview only mounts a tab's content when it is first shown, so defer the
+  // lab until its panel exists in the DOM.
+  initAlignmentLabWhenReady(data);
+}
+
+function initAlignmentLabWhenReady(data) {
+  let started = false;
+  const tryStart = () => {
+    if (started || !document.getElementById("algoSelect")) {
+      return;
+    }
+    started = true;
+    setupAlignmentLab(data);
+  };
+  layout.onDidActivePanelChange(tryStart);
+  tryStart();
 }
 
 function validateViews(views) {
@@ -96,70 +179,9 @@ function populatePanels(appState) {
   }
 }
 
-function setupImageToggle(appState) {
-  const modes = {
-    annotated: {
-      alt: "Synthetic mountain view with peak labels",
-      button: showAnnotated,
-      showLegend: false,
-    },
-    contours: {
-      alt: "True and estimated 2D skyline contour comparison",
-      button: showContours,
-      showLegend: true,
-    },
-    render: {
-      alt: "Synthetic mountain view",
-      button: showRender,
-      showLegend: false,
-    },
-  };
-
-  for (const [mode, config] of Object.entries(modes)) {
-    config.button.addEventListener("click", () => selectImageMode(appState, modes, mode));
-  }
-  selectImageMode(appState, modes, appState.imageMode);
-}
-
-function selectImageMode(appState, modes, mode) {
-  const selected = modes[mode];
-  appState.imageMode = mode;
-  sceneImage.src = appState.activeView.images[imageModeKey(mode)];
-  sceneImage.alt = selected.alt;
-  imageContourLegend.hidden = !selected.showLegend;
-  for (const [key, config] of Object.entries(modes)) {
-    config.button.classList.toggle("active", key === mode);
-  }
-}
-
-function imageModeKey(mode) {
-  return mode === "contours" ? "contour_debug" : mode;
-}
-
 function refreshActiveViewPanels(appState) {
   populatePanels(appState);
   setupComparisonPanel(appState.activeView);
-  selectImageMode(appState, imageToggleModes(), appState.imageMode);
-}
-
-function imageToggleModes() {
-  return {
-    annotated: {
-      alt: "Synthetic mountain view with peak labels",
-      button: showAnnotated,
-      showLegend: false,
-    },
-    contours: {
-      alt: "True and estimated 2D skyline contour comparison",
-      button: showContours,
-      showLegend: true,
-    },
-    render: {
-      alt: "Synthetic mountain view",
-      button: showRender,
-      showLegend: false,
-    },
-  };
 }
 
 function setupComparisonPanel(view) {
@@ -177,6 +199,346 @@ function setupComparisonPanel(view) {
     Math.abs(trueCamera.pitch_deg - estimatedCamera.pitch_deg),
     "deg",
   );
+}
+
+// --- Live camera-image panel -------------------------------------------------
+// Renders the right-hand image on the fly from the current viewport pose using
+// the true pinhole intrinsics, then overlays the live skyline contour and peak
+// labels. Replaces the former static render/annotated/contour PNG toggle.
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const CAMERA_OVERLAY_SAMPLE_WIDTH = 260;
+const PEAK_OCCLUSION_MARGIN_M = 0.01;
+
+function createCameraImagePanel(terrain, frame, data, mainTerrainMesh) {
+  const intrinsics = data.scene.intrinsics;
+  const aspect = intrinsics.width_px / intrinsics.height_px;
+
+  const renderer = new THREE.WebGLRenderer({ canvas: cameraCanvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0xacc4d6, 1);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xacc4d6);
+  scene.fog = new THREE.Fog(0xacc4d6, 2.8, 7.4);
+  scene.add(new THREE.HemisphereLight(0xeaf1f6, 0x34402f, 1.7));
+  const sun = new THREE.DirectionalLight(0xffe4a8, 2.2);
+  sun.position.set(-1.6, 2.4, 1.1);
+  scene.add(sun);
+  scene.add(new THREE.Mesh(mainTerrainMesh.geometry, mainTerrainMesh.material));
+
+  const camera = new THREE.PerspectiveCamera(verticalFovDeg(intrinsics), aspect, 0.02, 30);
+
+  const gridPoints = new Array(terrain.grid_width * terrain.grid_height);
+  for (let row = 0; row < terrain.grid_height; row += 1) {
+    for (let col = 0; col < terrain.grid_width; col += 1) {
+      gridPoints[terrainVertexIndex(terrain, row, col)] = localToScenePoint(
+        terrainLocalGridPoint(terrain, frame, row, col),
+        frame,
+      );
+    }
+  }
+
+  const panel = {
+    aspect,
+    fovDeg: verticalFovDeg(intrinsics),
+    camera,
+    frame,
+    gridPoints,
+    lastPose: new THREE.Matrix4().makeScale(0, 0, 0),
+    occluder: new THREE.Mesh(mainTerrainMesh.geometry, new THREE.MeshBasicMaterial()),
+    overlayHeight: 1,
+    overlayWidth: 1,
+    peaks: data.peaks.map((peak) => ({ name: peak.name, point: localToScenePoint(peak.local_position, frame) })),
+    raycaster: new THREE.Raycaster(),
+    renderer,
+    sampleHeight: Math.round(CAMERA_OVERLAY_SAMPLE_WIDTH / aspect),
+    sampleWidth: CAMERA_OVERLAY_SAMPLE_WIDTH,
+    scene,
+    terrain,
+  };
+  panel.resize = () => resizeCameraImage(panel);
+  panel.update = (mainCamera) => updateCameraImage(panel, mainCamera);
+  panel.resize();
+  return panel;
+}
+
+function verticalFovDeg(intrinsics) {
+  return THREE.MathUtils.radToDeg(2 * Math.atan(intrinsics.height_px / 2 / intrinsics.focal_length_px));
+}
+
+function resizeCameraImage(panel) {
+  const frame = cameraCanvas.parentElement.parentElement;
+  const box = fitContainBox(frame.clientWidth, frame.clientHeight, panel.aspect);
+  setBox(cameraCanvas.parentElement, box);
+  panel.renderer.setSize(box.width, box.height, false);
+  panel.overlayWidth = box.width;
+  panel.overlayHeight = box.height;
+  panel.camera.aspect = panel.aspect;
+  panel.camera.updateProjectionMatrix();
+  panel.sampleWidth = CAMERA_OVERLAY_SAMPLE_WIDTH;
+  panel.sampleHeight = Math.max(1, Math.round(CAMERA_OVERLAY_SAMPLE_WIDTH / panel.aspect));
+  cameraOverlay.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
+  panel.lastPose.makeScale(0, 0, 0);
+}
+
+// Largest box of the given aspect ratio that fits inside the container, centered
+// so the leftover container background reads as the camera frame mask.
+function fitContainBox(containerWidth, containerHeight, aspect) {
+  const width = Math.max(1, containerWidth);
+  const height = Math.max(1, containerHeight);
+  let boxWidth = width;
+  let boxHeight = width / aspect;
+  if (boxHeight > height) {
+    boxHeight = height;
+    boxWidth = height * aspect;
+  }
+  return {
+    width: Math.max(1, Math.round(boxWidth)),
+    height: Math.max(1, Math.round(boxHeight)),
+    left: Math.round((width - boxWidth) / 2),
+    top: Math.round((height - boxHeight) / 2),
+  };
+}
+
+function setBox(element, box) {
+  element.style.left = `${box.left}px`;
+  element.style.top = `${box.top}px`;
+  element.style.width = `${box.width}px`;
+  element.style.height = `${box.height}px`;
+}
+
+// Letterboxes the map render to the pinhole frame while in Camera POV; in Map
+// mode the render fills the panel.
+function layoutMapFrame(viewer) {
+  const panelElement = viewer.mapFrameBox.parentElement;
+  const width = panelElement.clientWidth;
+  const height = panelElement.clientHeight;
+  if (viewer.mode === CAMERA_MODES.pov) {
+    setBox(viewer.mapFrameBox, fitContainBox(width, height, viewer.cameraImage.aspect));
+    panelElement.classList.add("pov-framed");
+  } else {
+    setBox(viewer.mapFrameBox, { left: 0, top: 0, width: Math.max(1, width), height: Math.max(1, height) });
+    panelElement.classList.remove("pov-framed");
+  }
+}
+
+function setScaleHudVisible(visible) {
+  const hud = document.querySelector(".map-scale-hud");
+  if (hud) {
+    hud.hidden = !visible;
+  }
+}
+
+// First-person look: rotate the view direction about a fixed camera position.
+function setupPovLook(viewer) {
+  let drag = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    if (viewer.mode !== CAMERA_MODES.pov || event.button !== 0) {
+      return;
+    }
+    drag = { x: event.clientX, y: event.clientY };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!drag) {
+      return;
+    }
+    viewer.povAzimuth += (event.clientX - drag.x) * 0.0032;
+    viewer.povElevation = THREE.MathUtils.clamp(viewer.povElevation - (event.clientY - drag.y) * 0.0032, -1.2, 1.2);
+    drag = { x: event.clientX, y: event.clientY };
+    applyPovOrientation(viewer);
+  });
+  const release = (event) => {
+    if (drag) {
+      canvas.releasePointerCapture?.(event.pointerId);
+      drag = null;
+    }
+  };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+}
+
+function initPovOrientation(viewer, config) {
+  const forward = config.target.clone().sub(config.position).normalize();
+  viewer.povElevation = Math.asin(THREE.MathUtils.clamp(forward.y, -1, 1));
+  viewer.povAzimuth = Math.atan2(forward.x, -forward.z);
+  applyPovOrientation(viewer);
+}
+
+function applyPovOrientation(viewer) {
+  const cosElevation = Math.cos(viewer.povElevation);
+  const direction = new THREE.Vector3(
+    cosElevation * Math.sin(viewer.povAzimuth),
+    Math.sin(viewer.povElevation),
+    -cosElevation * Math.cos(viewer.povAzimuth),
+  );
+  viewer.camera.up.set(0, 1, 0);
+  viewer.camera.lookAt(viewer.camera.position.clone().add(direction));
+}
+
+function updateCameraImage(panel, mainCamera) {
+  mainCamera.updateMatrixWorld();
+  panel.camera.position.setFromMatrixPosition(mainCamera.matrixWorld);
+  panel.camera.quaternion.setFromRotationMatrix(mainCamera.matrixWorld);
+  panel.camera.updateMatrixWorld(true);
+  panel.renderer.render(panel.scene, panel.camera);
+
+  if (!matricesClose(panel.camera.matrixWorld, panel.lastPose)) {
+    panel.lastPose.copy(panel.camera.matrixWorld);
+    drawCameraOverlay(panel);
+  }
+}
+
+function drawCameraOverlay(panel) {
+  const elements = [skylinePathElement(panel), ...peakLabelElements(panel)].filter(Boolean);
+  cameraOverlay.replaceChildren(...elements);
+}
+
+function skylinePathElement(panel) {
+  const skyline = extractSkyline(panel);
+  if (skyline.length < 2) {
+    return null;
+  }
+  const scaleX = panel.overlayWidth / panel.sampleWidth;
+  const scaleY = panel.overlayHeight / panel.sampleHeight;
+  const points = skyline.map((point) => `${(point.x * scaleX).toFixed(1)},${(point.y * scaleY).toFixed(1)}`);
+  return svgElement("polyline", { class: "skyline", points: points.join(" ") });
+}
+
+function extractSkyline(panel) {
+  const { terrain, camera, sampleWidth: width, sampleHeight: height } = panel;
+  camera.updateMatrixWorld();
+  const projected = projectGridToSample(panel);
+  const topRow = new Float32Array(width).fill(Number.POSITIVE_INFINITY);
+
+  for (let row = 0; row < terrain.grid_height - 1; row += 1) {
+    for (let col = 0; col < terrain.grid_width - 1; col += 1) {
+      const a = projected[terrainVertexIndex(terrain, row, col)];
+      const b = projected[terrainVertexIndex(terrain, row, col + 1)];
+      const c = projected[terrainVertexIndex(terrain, row + 1, col)];
+      const d = projected[terrainVertexIndex(terrain, row + 1, col + 1)];
+      rasterizeTopEdge(topRow, width, height, a, b, c);
+      rasterizeTopEdge(topRow, width, height, b, d, c);
+    }
+  }
+
+  const points = [];
+  for (let x = 0; x < width; x += 1) {
+    if (Number.isFinite(topRow[x])) {
+      points.push({ x: x + 0.5, y: topRow[x] });
+    }
+  }
+  return points;
+}
+
+function projectGridToSample(panel) {
+  const { terrain, camera, gridPoints, sampleWidth: width, sampleHeight: height } = panel;
+  const projected = new Array(gridPoints.length);
+  const ndc = new THREE.Vector3();
+  const view = new THREE.Vector3();
+  for (let index = 0; index < gridPoints.length; index += 1) {
+    view.copy(gridPoints[index]).applyMatrix4(camera.matrixWorldInverse);
+    if (view.z >= -camera.near) {
+      projected[index] = { front: false, px: 0, py: 0 };
+      continue;
+    }
+    ndc.copy(gridPoints[index]).project(camera);
+    projected[index] = {
+      front: true,
+      px: (ndc.x * 0.5 + 0.5) * width,
+      py: (1 - (ndc.y * 0.5 + 0.5)) * height,
+    };
+  }
+  return projected;
+}
+
+function rasterizeTopEdge(topRow, width, height, a, b, c) {
+  if (!a.front || !b.front || !c.front) {
+    return;
+  }
+  const minX = Math.max(0, Math.floor(Math.min(a.px, b.px, c.px)));
+  const maxX = Math.min(width - 1, Math.ceil(Math.max(a.px, b.px, c.px)));
+  const minRow = Math.max(0, Math.floor(Math.min(a.py, b.py, c.py)));
+  const maxRow = Math.min(height - 1, Math.ceil(Math.max(a.py, b.py, c.py)));
+  if (minX > maxX || minRow > maxRow) {
+    return;
+  }
+  const denominator = (b.py - c.py) * (a.px - c.px) + (c.px - b.px) * (a.py - c.py);
+  if (Math.abs(denominator) <= RASTER_EPSILON) {
+    return;
+  }
+
+  for (let x = minX; x <= maxX; x += 1) {
+    const sampleX = x + 0.5;
+    const ceiling = Math.min(maxRow, topRow[x]);
+    for (let y = minRow; y <= ceiling; y += 1) {
+      const sampleY = y + 0.5;
+      const weightA = ((b.py - c.py) * (sampleX - c.px) + (c.px - b.px) * (sampleY - c.py)) / denominator;
+      const weightB = ((c.py - a.py) * (sampleX - c.px) + (a.px - c.px) * (sampleY - c.py)) / denominator;
+      const weightC = 1 - weightA - weightB;
+      if (weightA >= -RASTER_EPSILON && weightB >= -RASTER_EPSILON && weightC >= -RASTER_EPSILON) {
+        topRow[x] = y;
+        break;
+      }
+    }
+  }
+}
+
+function peakLabelElements(panel) {
+  const { camera } = panel;
+  camera.updateMatrixWorld();
+  const ndc = new THREE.Vector3();
+  const view = new THREE.Vector3();
+  const elements = [];
+  for (const peak of panel.peaks) {
+    view.copy(peak.point).applyMatrix4(camera.matrixWorldInverse);
+    if (view.z >= -camera.near || peakOccluded(panel, peak.point)) {
+      continue;
+    }
+    ndc.copy(peak.point).project(camera);
+    if (Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1) {
+      continue;
+    }
+    const x = (ndc.x * 0.5 + 0.5) * panel.overlayWidth;
+    const y = (1 - (ndc.y * 0.5 + 0.5)) * panel.overlayHeight;
+    elements.push(svgElement("circle", { class: "peak-dot", cx: x.toFixed(1), cy: y.toFixed(1), r: "3" }));
+    const text = svgElement("text", { class: "peak-text", x: (x + 6).toFixed(1), y: (y - 5).toFixed(1) });
+    text.textContent = peak.name;
+    elements.push(text);
+  }
+  return elements;
+}
+
+function peakOccluded(panel, point) {
+  const origin = panel.camera.position;
+  const distance = origin.distanceTo(point);
+  panel.raycaster.set(origin, point.clone().sub(origin).normalize());
+  panel.raycaster.near = panel.camera.near;
+  panel.raycaster.far = distance - PEAK_OCCLUSION_MARGIN_M;
+  if (panel.raycaster.far <= panel.raycaster.near) {
+    return false;
+  }
+  return panel.raycaster.intersectObject(panel.occluder, false).length > 0;
+}
+
+function svgElement(name, attributes) {
+  const element = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attributes)) {
+    element.setAttribute(key, value);
+  }
+  return element;
+}
+
+function matricesClose(a, b) {
+  const ae = a.elements;
+  const be = b.elements;
+  for (let index = 0; index < 16; index += 1) {
+    if (Math.abs(ae[index] - be[index]) > 1e-5) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function setupTerrainViewer(data, appState) {
@@ -215,6 +577,8 @@ function setupTerrainViewer(data, appState) {
   terrainGroup.add(createBasePlane());
   scene.add(terrainGroup);
 
+  const cameraImage = createCameraImagePanel(terrain, frame, data, terrainMesh);
+
   addPeakLabels(scene, data, frame);
 
   const viewConfigs = cameraConfigsFor(appState.views, frame);
@@ -225,6 +589,7 @@ function setupTerrainViewer(data, appState) {
   camera.updateMatrixWorld(true);
   scene.updateMatrixWorld(true);
 
+  const mapFrameBox = document.getElementById("mapFrameBox");
   const viewer = {
     activeViewId: appState.activeView.id,
     appState,
@@ -237,26 +602,44 @@ function setupTerrainViewer(data, appState) {
     connectors,
     labelOcclusion: createLabelOcclusion(scene, terrainMesh),
     scaleHud: createScaleHud(terrain, frame),
-    mode: CAMERA_MODES.compare,
+    cameraImage,
+    mapFrameBox,
+    baseFov: camera.fov,
+    povAzimuth: 0,
+    povElevation: 0,
+    resizeMap: () => {
+      layoutMapFrame(viewer);
+      resizeRenderers(renderer, labelRenderer, camera);
+    },
+    mode: CAMERA_MODES.map,
+    povRole: CAMERA_ROLES.true,
     selectedFootprint: null,
   };
 
   setupMarkerPicking(viewer);
+  setupPovLook(viewer);
   setupCameraModeControls(viewer);
-  applyCameraMode(viewer, CAMERA_MODES.compare);
+  applyCameraMode(viewer, CAMERA_MODES.map);
 
-  const resizeObserver = new ResizeObserver(() => resizeRenderers(renderer, labelRenderer, camera));
-  resizeObserver.observe(canvas);
-  resizeRenderers(renderer, labelRenderer, camera);
+  const resizeObserver = new ResizeObserver(() => {
+    viewer.resizeMap();
+    cameraImage.resize();
+  });
+  resizeObserver.observe(mapFrameBox.parentElement);
+  resizeObserver.observe(cameraCanvas.parentElement.parentElement);
+  viewer.resizeMap();
 
   renderer.setAnimationLoop(() => {
-    controls.update();
+    if (controls.enabled) {
+      controls.update();
+    }
     camera.updateMatrixWorld();
     scene.updateMatrixWorld();
     updateLabelOcclusion(viewer.labelOcclusion, camera);
     updateScaleHud(viewer.scaleHud, camera);
     renderer.render(scene, camera);
     labelRenderer.render(scene, camera);
+    cameraImage.update(camera);
   });
 }
 
@@ -274,9 +657,23 @@ function configureOrbitControls(controls) {
 }
 
 function setupCameraModeControls(viewer) {
+  const viewSelect = document.getElementById("viewSelect");
+  viewSelect.replaceChildren(
+    ...viewer.viewConfigs.map((viewConfig) => new Option(viewConfig.label, viewConfig.id)),
+  );
+  viewSelect.value = viewer.activeViewId;
+  viewSelect.addEventListener("change", () => {
+    activateViewerView(viewer, viewSelect.value);
+    applyCameraMode(viewer, viewer.mode);
+  });
+
   for (const button of document.querySelectorAll("[data-camera-mode]")) {
+    button.addEventListener("click", () => applyCameraMode(viewer, button.dataset.cameraMode));
+  }
+  for (const button of document.querySelectorAll("[data-pov-role]")) {
     button.addEventListener("click", () => {
-      applyCameraMode(viewer, button.dataset.cameraMode);
+      viewer.povRole = button.dataset.povRole;
+      applyCameraMode(viewer, CAMERA_MODES.pov);
     });
   }
 }
@@ -284,45 +681,53 @@ function setupCameraModeControls(viewer) {
 function applyCameraMode(viewer, mode) {
   viewer.mode = mode;
   viewer.selectedFootprint = null;
-  for (const button of document.querySelectorAll("[data-camera-mode]")) {
-    button.classList.toggle("active", button.dataset.cameraMode === mode);
+  syncSegmented("[data-camera-mode]", "cameraMode", mode);
+  syncSegmented("[data-pov-role]", "povRole", viewer.povRole);
+  document.getElementById("povRoleControls").hidden = mode !== CAMERA_MODES.pov;
+  document.getElementById("viewSelect").value = viewer.activeViewId;
+
+  setScaleHudVisible(mode !== CAMERA_MODES.pov);
+  for (const marker of viewer.cameraMarkers) {
+    marker.visible = mode !== CAMERA_MODES.pov;
   }
 
   const viewConfig = activeViewConfig(viewer);
-  if (mode === CAMERA_MODES.true || mode === CAMERA_MODES.estimated) {
-    const config = viewConfig[mode];
+  if (mode === CAMERA_MODES.pov) {
+    const config = viewConfig[viewer.povRole];
     viewer.controls.enabled = false;
+    viewer.camera.fov = viewer.cameraImage.fovDeg;
     viewer.camera.position.copy(config.position);
-    viewer.camera.lookAt(config.target);
-    viewer.controls.target.copy(config.target);
-    setOverlayVisibility(viewer, [mode]);
+    initPovOrientation(viewer, config);
+    setOverlayVisibility(viewer, [viewer.povRole]);
     setConnectorVisibility(viewer, false);
-    document.getElementById("selectedCamera").textContent = `${viewConfig.label}: ${config.label}`;
-    document.getElementById("selectedCameraDescription").textContent =
-      "Locked to camera POV; highlighted terrain is inside this camera frame.";
-  } else if (mode === CAMERA_MODES.compare) {
-    viewer.controls.enabled = true;
-    viewer.camera.position.copy(CAMERA_INITIAL_POSITION);
-    viewer.controls.target.copy(CAMERA_TARGET);
-    viewer.controls.update();
-    setOverlayVisibility(viewer, [CAMERA_MODES.true, CAMERA_MODES.estimated]);
-    setConnectorVisibility(viewer, true);
-    document.getElementById("selectedCamera").textContent = `${viewConfig.label}: Compare`;
-    document.getElementById("selectedCameraDescription").textContent =
-      "Blue is true camera coverage; amber is estimated camera coverage.";
+    setCameraReadout(
+      `${viewConfig.label}: ${config.label}`,
+      "Locked to the camera position. Drag to look around; black bars mark the camera frame.",
+    );
   } else {
     viewer.controls.enabled = true;
+    viewer.camera.fov = viewer.baseFov;
     viewer.camera.position.copy(CAMERA_INITIAL_POSITION);
     viewer.controls.target.copy(CAMERA_TARGET);
     viewer.controls.update();
-    setOverlayVisibility(viewer, []);
-    setConnectorVisibility(viewer, false);
-    document.getElementById("selectedCamera").textContent = "Orbit";
-    document.getElementById("selectedCameraDescription").textContent =
-      "Free orbit view; camera footprints are hidden.";
+    setOverlayVisibility(viewer, [CAMERA_ROLES.true, CAMERA_ROLES.estimated]);
+    setConnectorVisibility(viewer, true);
+    setCameraReadout(`${viewConfig.label}: Map`, "Free orbit; blue is true camera coverage, amber is estimated.");
   }
 
+  viewer.resizeMap();
   updateMarkerSelection(viewer);
+}
+
+function syncSegmented(selector, datasetKey, value) {
+  for (const button of document.querySelectorAll(selector)) {
+    button.classList.toggle("active", button.dataset[datasetKey] === value);
+  }
+}
+
+function setCameraReadout(title, description) {
+  document.getElementById("selectedCamera").textContent = title;
+  document.getElementById("selectedCameraDescription").textContent = description;
 }
 
 function activeViewConfig(viewer) {
@@ -333,8 +738,8 @@ function setOverlayVisibility(viewer, visibleRoles) {
   const visible = new Set(visibleRoles);
   for (const viewConfig of viewer.viewConfigs) {
     const viewOverlays = viewer.overlays[viewConfig.id];
-    viewOverlays.true.visible = viewConfig.id === viewer.activeViewId && visible.has(CAMERA_MODES.true);
-    viewOverlays.estimated.visible = viewConfig.id === viewer.activeViewId && visible.has(CAMERA_MODES.estimated);
+    viewOverlays.true.visible = viewConfig.id === viewer.activeViewId && visible.has(CAMERA_ROLES.true);
+    viewOverlays.estimated.visible = viewConfig.id === viewer.activeViewId && visible.has(CAMERA_ROLES.estimated);
   }
 }
 
@@ -347,56 +752,71 @@ function setConnectorVisibility(viewer, visible) {
 function createTerrainMesh(terrain) {
   const geometry = terrainGeometry(terrain);
   geometry.computeVertexNormals();
-
-  const material = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 0.88,
-    metalness: 0,
-    side: THREE.FrontSide,
-  });
-
-  return new THREE.Mesh(geometry, material);
+  return new THREE.Mesh(geometry, createTerrainMaterial());
 }
 
-function createIsolines(terrain) {
-  const buffers = {
-    core: [],
-    halo: [],
+// Hypsometric (elevation) gradient with soft contour banding, injected into a
+// standard lit material. The elevation tint plus the banded "pattern" makes
+// overlapping ridges separable on the flat camera image, where plain shading
+// left similar-height mountains looking identical.
+function createTerrainMaterial() {
+  const material = new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0, side: THREE.FrontSide });
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying float vTerrainElevation;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvTerrainElevation = position.y / float(" + TERRAIN_HEIGHT.toFixed(4) + ");");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", `#include <common>
+varying float vTerrainElevation;
+vec3 peakleHypsometric(float t) {
+  vec3 c = vec3(0.16, 0.30, 0.20);
+  c = mix(c, vec3(0.24, 0.44, 0.25), smoothstep(0.0, 0.22, t));
+  c = mix(c, vec3(0.46, 0.50, 0.28), smoothstep(0.22, 0.45, t));
+  c = mix(c, vec3(0.64, 0.57, 0.37), smoothstep(0.45, 0.66, t));
+  c = mix(c, vec3(0.55, 0.44, 0.35), smoothstep(0.66, 0.82, t));
+  c = mix(c, vec3(0.84, 0.81, 0.72), smoothstep(0.82, 0.93, t));
+  c = mix(c, vec3(0.97, 0.97, 0.95), smoothstep(0.93, 1.0, t));
+  return c;
+}`)
+      .replace("#include <color_fragment>", `#include <color_fragment>
+{
+  float terrainT = clamp(vTerrainElevation, 0.0, 1.0);
+  vec3 hypso = peakleHypsometric(terrainT);
+  float bandEdge = fract(terrainT * 9.0);
+  float band = smoothstep(0.0, 0.08, bandEdge) * smoothstep(1.0, 0.92, bandEdge);
+  hypso *= mix(0.8, 1.0, band);
+  diffuseColor.rgb = hypso;
+}`);
   };
+  return material;
+}
+
+// Marching-squares contour lines drawn directly on the terrain surface (a small
+// lift only avoids z-fighting), so they hug the slopes instead of floating above
+// them as the old constant-height ribbons did.
+function createIsolines(terrain) {
+  const positions = [];
   const firstLevel = Math.ceil(terrain.elevation_min_m / ISOLINE_INTERVAL_M) * ISOLINE_INTERVAL_M;
-  for (
-    let level = firstLevel;
-    level <= terrain.elevation_max_m;
-    level += ISOLINE_INTERVAL_M
-  ) {
-    addIsolineLevel(buffers, terrain, level);
+  for (let level = firstLevel; level <= terrain.elevation_max_m; level += ISOLINE_INTERVAL_M) {
+    addIsolineLevel(positions, terrain, level);
   }
 
-  const group = new THREE.Group();
-  group.add(createIsolineMesh(buffers.halo, 0xf2e2b4, 0.62, 2));
-  group.add(createIsolineMesh(buffers.core, 0x1b1710, 0.86, 3));
-  return group;
-}
-
-function createIsolineMesh(positions, color, opacity, renderOrder) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  const material = new THREE.MeshBasicMaterial({
-    color,
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -2,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.renderOrder = renderOrder;
-  return mesh;
+  const lines = new THREE.LineSegments(
+    geometry,
+    new THREE.LineBasicMaterial({
+      color: 0xe7dab2,
+      transparent: true,
+      opacity: 0.26,
+      depthWrite: false,
+    }),
+  );
+  lines.renderOrder = 1;
+  return lines;
 }
 
-function addIsolineLevel(buffers, terrain, level) {
+function addIsolineLevel(positions, terrain, level) {
   for (let row = 0; row < terrain.grid_height - 1; row += 1) {
     for (let col = 0; col < terrain.grid_width - 1; col += 1) {
       const corners = [
@@ -413,10 +833,10 @@ function addIsolineLevel(buffers, terrain, level) {
       ].filter(Boolean);
       const unique = deduplicateIntersections(intersections);
       if (unique.length === 2) {
-        pushIsolineSegment(buffers, terrain, unique[0], unique[1]);
+        pushIsolineSegment(positions, terrain, unique[0], unique[1]);
       } else if (unique.length === 4) {
-        pushIsolineSegment(buffers, terrain, unique[0], unique[1]);
-        pushIsolineSegment(buffers, terrain, unique[2], unique[3]);
+        pushIsolineSegment(positions, terrain, unique[0], unique[1]);
+        pushIsolineSegment(positions, terrain, unique[2], unique[3]);
       }
     }
   }
@@ -466,53 +886,25 @@ function deduplicateIntersections(points) {
   return unique;
 }
 
-function pushIsolineSegment(buffers, terrain, a, b) {
+function pushIsolineSegment(positions, terrain, a, b) {
   const aPoint = terrainFloatPoint(terrain, a.row, a.col, a.elevation, ISOLINE_VERTICAL_OFFSET);
   const bPoint = terrainFloatPoint(terrain, b.row, b.col, b.elevation, ISOLINE_VERTICAL_OFFSET);
-  pushRibbonSegment(buffers.halo, aPoint, bPoint, ISOLINE_HALO_WIDTH);
-  aPoint.y += 0.001;
-  bPoint.y += 0.001;
-  pushRibbonSegment(buffers.core, aPoint, bPoint, ISOLINE_CORE_WIDTH);
-}
-
-function pushRibbonSegment(positions, a, b, width) {
-  const dx = b.x - a.x;
-  const dz = b.z - a.z;
-  const length = Math.hypot(dx, dz);
-  if (length <= 1e-8) {
-    return;
-  }
-
-  const offsetX = (-dz / length) * width * 0.5;
-  const offsetZ = (dx / length) * width * 0.5;
-  const aLeft = new THREE.Vector3(a.x + offsetX, a.y, a.z + offsetZ);
-  const aRight = new THREE.Vector3(a.x - offsetX, a.y, a.z - offsetZ);
-  const bLeft = new THREE.Vector3(b.x + offsetX, b.y, b.z + offsetZ);
-  const bRight = new THREE.Vector3(b.x - offsetX, b.y, b.z - offsetZ);
-  pushTriangle(positions, aLeft, aRight, bLeft);
-  pushTriangle(positions, aRight, bRight, bLeft);
+  positions.push(aPoint.x, aPoint.y, aPoint.z, bPoint.x, bPoint.y, bPoint.z);
 }
 
 function terrainGeometry(terrain) {
   const gridWidth = terrain.grid_width;
   const gridHeight = terrain.grid_height;
   const positions = new Float32Array(gridWidth * gridHeight * 3);
-  const colors = new Float32Array(gridWidth * gridHeight * 3);
   const indices = [];
 
   for (let row = 0; row < gridHeight; row += 1) {
     for (let col = 0; col < gridWidth; col += 1) {
-      const pointIndex = row * gridWidth + col;
-      const offset = pointIndex * 3;
+      const offset = (row * gridWidth + col) * 3;
       const point = terrainGridPoint(terrain, row, col, 0);
       positions[offset] = point.x;
       positions[offset + 1] = point.y;
       positions[offset + 2] = point.z;
-
-      const color = terrainColor(elevationRatio(terrain, terrain.elevation_m[row][col]));
-      colors[offset] = color.r;
-      colors[offset + 1] = color.g;
-      colors[offset + 2] = color.b;
     }
   }
 
@@ -528,7 +920,6 @@ function terrainGeometry(terrain) {
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   geometry.setIndex(indices);
   return geometry;
 }
@@ -562,42 +953,52 @@ function addPeakLabels(scene, data, frame) {
     const point = localToScenePoint(peak.local_position, frame);
     const marker = createPeakMarker();
     marker.position.copy(point);
-    marker.position.y += 0.012;
     scene.add(marker);
 
     const label = createLabel(peak.name, "peak-label");
     label.position.copy(marker.position);
-    label.position.y += 0.058;
+    label.position.y += 0.078;
     label.userData.occlusionAnchor = marker;
     scene.add(label);
   }
 }
 
-function createPeakMarker() {
-  const group = new THREE.Group();
-  const markerMaterial = new THREE.MeshBasicMaterial({
-    color: 0xd84232,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -2,
-    side: THREE.DoubleSide,
-  });
-  const triangle = new THREE.Mesh(createPeakTriangleGeometry(0.044), markerMaterial);
-  triangle.position.y = 0.008;
-  group.add(triangle);
+// A flat camera-facing triangle glyph: the cartographic summit symbol. Reads as
+// a clean map marker from any orbit angle without the bulk of a 3D model.
+let peakGlyphTexture = null;
 
-  const outline = new THREE.LineLoop(
-    createPeakTriangleGeometry(0.048),
-    new THREE.LineBasicMaterial({
-      color: 0x29100d,
-      depthWrite: false,
-      transparent: true,
-      opacity: 0.9,
-    }),
+function createPeakMarker() {
+  if (!peakGlyphTexture) {
+    peakGlyphTexture = createPeakGlyphTexture();
+  }
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: peakGlyphTexture, transparent: true, depthWrite: false }),
   );
-  outline.position.y = 0.01;
-  group.add(outline);
-  return group;
+  sprite.scale.setScalar(0.06);
+  sprite.center.set(0.5, 0);
+  return sprite;
+}
+
+function createPeakGlyphTexture() {
+  const size = 64;
+  const element = document.createElement("canvas");
+  element.width = size;
+  element.height = size;
+  const context = element.getContext("2d");
+  context.beginPath();
+  context.moveTo(size * 0.5, size * 0.12);
+  context.lineTo(size * 0.86, size * 0.82);
+  context.lineTo(size * 0.14, size * 0.82);
+  context.closePath();
+  context.fillStyle = "#e2483a";
+  context.fill();
+  context.lineWidth = size * 0.07;
+  context.lineJoin = "round";
+  context.strokeStyle = "#2a0f0c";
+  context.stroke();
+  const texture = new THREE.CanvasTexture(element);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 
 function cameraConfigsFor(views, frame) {
@@ -610,11 +1011,11 @@ function cameraConfigsFor(views, frame) {
       positionDeltaM,
       true: cameraConfig(
         view,
-        CAMERA_MODES.true,
+        CAMERA_ROLES.true,
         "True camera",
         view.label,
         view.true_camera,
-        0x67c7ff,
+        FOV_TRUE_COLOR,
         compactEstimate ? 0 : -0.055,
         compactEstimate ? 0 : -0.035,
         false,
@@ -622,11 +1023,11 @@ function cameraConfigsFor(views, frame) {
       ),
       estimated: cameraConfig(
         view,
-        CAMERA_MODES.estimated,
+        CAMERA_ROLES.estimated,
         compactEstimate ? "Predicted position" : "Estimated camera",
         compactEstimate ? "Fit" : `${view.label} fit`,
         view.pose_estimate.extrinsics,
-        0xffd15a,
+        FOV_ESTIMATED_COLOR,
         compactEstimate ? 0 : 0.055,
         compactEstimate ? 0 : 0.035,
         compactEstimate,
@@ -917,15 +1318,15 @@ function markerSelected(viewer, active, role) {
   if (viewer.selectedFootprint) {
     return role === viewer.selectedFootprint;
   }
-  return viewer.mode === CAMERA_MODES.compare || role === viewer.mode;
+  return viewer.mode === CAMERA_MODES.map || role === viewer.povRole;
 }
 
 function addFovOverlays(scene, data, frame, viewConfigs) {
   const overlays = {};
   for (const viewConfig of viewConfigs) {
     overlays[viewConfig.id] = {
-      true: createFovOverlay(data, frame, viewConfig.true, 0x67c7ff),
-      estimated: createFovOverlay(data, frame, viewConfig.estimated, 0xffd15a),
+      true: createFovOverlay(data, frame, viewConfig.true, FOV_TRUE_COLOR),
+      estimated: createFovOverlay(data, frame, viewConfig.estimated, FOV_ESTIMATED_COLOR),
     };
     scene.add(overlays[viewConfig.id].true);
     scene.add(overlays[viewConfig.id].estimated);
@@ -933,49 +1334,74 @@ function addFovOverlays(scene, data, frame, viewConfigs) {
   return overlays;
 }
 
+// Builds the camera-coverage highlight: an additive "glow" fill over the terrain
+// the camera actually sees, plus a crisp outline of the coverage boundary. The
+// fill uses additive blending so it reads clearly against terrain and so an
+// overlapping true/estimated pair shows agreement (bright) versus mismatch
+// (single-colour fringes).
 function createFovOverlay(data, frame, config, color) {
   const terrain = data.terrain;
   const projection = cameraProjection(config.extrinsics, data.scene.intrinsics);
   const visibleTriangleIds = visibleTerrainTriangleIds(terrain, frame, projection);
   const positions = [];
+  const boundaryEdges = new Map();
   for (let row = 0; row < terrain.grid_height - 1; row += 1) {
     for (let col = 0; col < terrain.grid_width - 1; col += 1) {
       const a = terrainLocalGridPoint(terrain, frame, row, col);
       const b = terrainLocalGridPoint(terrain, frame, row, col + 1);
       const c = terrainLocalGridPoint(terrain, frame, row + 1, col);
       const d = terrainLocalGridPoint(terrain, frame, row + 1, col + 1);
-      addOverlayTriangle(positions, frame, projection, visibleTriangleIds, terrainTriangleId(terrain, row, col, 0), [
-        a,
-        b,
-        c,
-      ]);
-      addOverlayTriangle(positions, frame, projection, visibleTriangleIds, terrainTriangleId(terrain, row, col, 1), [
-        b,
-        d,
-        c,
-      ]);
+      addOverlayTriangle(positions, boundaryEdges, frame, projection, visibleTriangleIds, terrainTriangleId(terrain, row, col, 0), [a, b, c]);
+      addOverlayTriangle(positions, boundaryEdges, frame, projection, visibleTriangleIds, terrainTriangleId(terrain, row, col, 1), [b, d, c]);
     }
   }
 
+  const group = new THREE.Group();
+  group.add(createFovFill(positions, color));
+  group.add(createFovOutline(boundaryEdges, color));
+  group.visible = false;
+  return group;
+}
+
+function createFovFill(positions, color) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  const material = new THREE.MeshBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 0.33,
-    depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
-    side: THREE.FrontSide,
-  });
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+      side: THREE.DoubleSide,
+    }),
+  );
   mesh.renderOrder = 1;
-  mesh.visible = false;
   return mesh;
 }
 
-function addOverlayTriangle(positions, frame, projection, visibleTriangleIds, triangleId, localVertices) {
+function createFovOutline(boundaryEdges, color) {
+  const positions = [];
+  for (const edge of boundaryEdges.values()) {
+    if (edge.count === 1) {
+      positions.push(edge.a.x, edge.a.y, edge.a.z, edge.b.x, edge.b.y, edge.b.z);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  const lines = new THREE.LineSegments(
+    geometry,
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95, depthWrite: false }),
+  );
+  lines.renderOrder = 2;
+  return lines;
+}
+
+function addOverlayTriangle(positions, boundaryEdges, frame, projection, visibleTriangleIds, triangleId, localVertices) {
   if (!visibleTriangleIds.has(triangleId) || !surfaceFacesCamera(localVertices, projection.extrinsics.position)) {
     return;
   }
@@ -988,6 +1414,23 @@ function addOverlayTriangle(positions, frame, projection, visibleTriangleIds, tr
   const origin = clipped[0].scene;
   for (let index = 1; index < clipped.length - 1; index += 1) {
     pushTriangle(positions, origin, clipped[index].scene, clipped[index + 1].scene);
+  }
+  // Shared interior edges are emitted by both adjacent triangles (count 2) and
+  // dropped; only the true coverage boundary survives with count 1.
+  for (let index = 0; index < clipped.length; index += 1) {
+    accumulateBoundaryEdge(boundaryEdges, clipped[index].scene, clipped[(index + 1) % clipped.length].scene);
+  }
+}
+
+function accumulateBoundaryEdge(boundaryEdges, a, b) {
+  const keyA = `${a.x.toFixed(4)},${a.y.toFixed(4)},${a.z.toFixed(4)}`;
+  const keyB = `${b.x.toFixed(4)},${b.y.toFixed(4)},${b.z.toFixed(4)}`;
+  const key = keyA < keyB ? `${keyA}|${keyB}` : `${keyB}|${keyA}`;
+  const existing = boundaryEdges.get(key);
+  if (existing) {
+    existing.count += 1;
+  } else {
+    boundaryEdges.set(key, { a, b, count: 1 });
   }
 }
 
@@ -1294,19 +1737,17 @@ function findCameraPick(object) {
 function selectCameraFootprint(viewer, pick) {
   activateViewerView(viewer, pick.viewId);
   const viewConfig = activeViewConfig(viewer);
-  const mode = pick.cameraMode;
-  const config = viewConfig[mode];
+  const role = pick.cameraMode;
+  const config = viewConfig[role];
   if (!config) {
     return;
   }
 
-  viewer.selectedFootprint = mode;
+  viewer.selectedFootprint = role;
   viewer.controls.enabled = true;
-  setOverlayVisibility(viewer, [mode]);
+  setOverlayVisibility(viewer, [role]);
   setConnectorVisibility(viewer, false);
-  document.getElementById("selectedCamera").textContent = `${viewConfig.label}: ${config.label} footprint`;
-  document.getElementById("selectedCameraDescription").textContent =
-    "Free orbit view; highlighted terrain is visible from this camera.";
+  setCameraReadout(`${viewConfig.label}: ${config.label} footprint`, "Free orbit; highlighted terrain is visible from this camera.");
   updateMarkerSelection(viewer);
 }
 
@@ -1316,19 +1757,9 @@ function clearCameraFootprint(viewer) {
   }
   viewer.selectedFootprint = null;
   const viewConfig = activeViewConfig(viewer);
-  if (viewer.mode === CAMERA_MODES.compare) {
-    setOverlayVisibility(viewer, [CAMERA_MODES.true, CAMERA_MODES.estimated]);
-    setConnectorVisibility(viewer, true);
-    document.getElementById("selectedCamera").textContent = `${viewConfig.label}: Compare`;
-    document.getElementById("selectedCameraDescription").textContent =
-      "Blue is true camera coverage; amber is estimated camera coverage.";
-  } else if (viewer.mode === CAMERA_MODES.orbit) {
-    setOverlayVisibility(viewer, []);
-    setConnectorVisibility(viewer, false);
-    document.getElementById("selectedCamera").textContent = "Orbit";
-    document.getElementById("selectedCameraDescription").textContent =
-      "Free orbit view; camera footprints are hidden.";
-  }
+  setOverlayVisibility(viewer, [CAMERA_ROLES.true, CAMERA_ROLES.estimated]);
+  setConnectorVisibility(viewer, true);
+  setCameraReadout(`${viewConfig.label}: Map`, "Free orbit; blue is true camera coverage, amber is estimated.");
   updateMarkerSelection(viewer);
 }
 
@@ -1342,6 +1773,7 @@ function activateViewerView(viewer, viewId) {
   }
   viewer.activeViewId = viewId;
   viewer.appState.activeView = nextView;
+  document.getElementById("viewSelect").value = viewId;
   refreshActiveViewPanels(viewer.appState);
 }
 
@@ -1480,12 +1912,6 @@ function cameraTargetPoint(extrinsics, frame) {
   return localToScenePoint(target, frame);
 }
 
-function projectLocalPoint(point, extrinsics, intrinsics) {
-  const axes = cameraAxes(extrinsics);
-  const cameraPoint = localToCameraPoint(point, extrinsics, axes);
-  return projectCameraPoint(cameraPoint, intrinsics);
-}
-
 function localToCameraPoint(point, extrinsics, axes) {
   const vector = [
     point.east_m - extrinsics.position.east_m,
@@ -1543,21 +1969,6 @@ function createLabel(text, className) {
   return new CSS2DObject(element);
 }
 
-function createPeakTriangleGeometry(size) {
-  const geometry = new THREE.BufferGeometry();
-  const halfWidth = size * 0.5;
-  const halfDepth = size * 0.45;
-  const vertices = new Float32Array([
-    0, 0, -halfDepth,
-    -halfWidth, 0, halfDepth,
-    halfWidth, 0, halfDepth,
-  ]);
-  geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
-  geometry.setIndex([0, 1, 2]);
-  geometry.computeVertexNormals();
-  return geometry;
-}
-
 function createCameraFrustumGlyph(color) {
   const originZ = 0.058;
   const farZ = 0.18;
@@ -1595,16 +2006,6 @@ function resizeRenderers(renderer, labelRenderer, camera) {
   camera.updateProjectionMatrix();
 }
 
-function terrainColor(t) {
-  const low = new THREE.Color(0x2f6843);
-  const mid = new THREE.Color(0x92955d);
-  const high = new THREE.Color(0xdad1b3);
-  if (t < 0.58) {
-    return low.lerp(mid, t / 0.58);
-  }
-  return mid.lerp(high, (t - 0.58) / 0.42);
-}
-
 function formatNumber(value, unit) {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "-";
@@ -1629,10 +2030,6 @@ function angleDeltaDeg(a, b) {
 
 function normalize(value, min, max) {
   return (value - min) / Math.max(max - min, 1);
-}
-
-function elevationRatio(terrain, elevation) {
-  return normalize(elevation, terrain.elevation_min_m, terrain.elevation_max_m);
 }
 
 function interpolate(min, max, t) {
@@ -1666,4 +2063,627 @@ function cross(a, b) {
 function unit(vector) {
   const norm = Math.hypot(vector[0], vector[1], vector[2]);
   return [vector[0] / norm, vector[1] / norm, vector[2] / norm];
+}
+
+// --- Alignment Lab -----------------------------------------------------------
+// Runtime camera localization: the position is known (click to place anywhere),
+// the orientation is not. We render the ground-truth skyline outline, corrupt it
+// with noise, then let a chosen solver recover the heading from that outline.
+// The solvers map to families from docs/development/camera-fitting-research.md:
+// bounded coarse-to-fine grid, Nelder-Mead local refinement, and differential
+// evolution global search.
+
+const ALIGN_SAMPLE_WIDTH = 176;
+const ALIGN_TERRAIN_STRIDE = 3;
+const ALIGN_EYE_HEIGHT_M = 3;
+const ALIGN_YAW_BOUNDS = [-180, 180];
+const ALIGN_PITCH_BOUNDS = [-12, 26];
+
+const ALIGN_SOLVERS = {
+  grid: {
+    label: "Coarse-to-fine grid",
+    blurb: "Bounded global scan over heading and pitch, then a local refine around the best cell.",
+    create: createGridSolver,
+    usesPrior: false,
+  },
+  nelder: {
+    label: "Nelder-Mead (local)",
+    blurb: "Derivative-free simplex refining from a compass prior toward the highest terrain.",
+    create: createNelderMeadSolver,
+    usesPrior: true,
+  },
+  evolution: {
+    label: "Differential evolution",
+    blurb: "Population-based global search; robust to the many local minima of skyline matching.",
+    create: createDifferentialEvolutionSolver,
+    usesPrior: false,
+  },
+};
+
+function setupAlignmentLab(data) {
+  const terrain = data.terrain;
+  const frame = terrainFrame(terrain);
+  const lab = {
+    terrain,
+    frame,
+    intrinsics: data.scene.intrinsics,
+    sampleWidth: ALIGN_SAMPLE_WIDTH,
+    sampleHeight: Math.max(1, Math.round((ALIGN_SAMPLE_WIDTH * data.scene.intrinsics.height_px) / data.scene.intrinsics.width_px)),
+    grid: buildAlignGrid(terrain, frame, ALIGN_TERRAIN_STRIDE),
+    lookTarget: highestLocalPoint(terrain, frame),
+    algo: "grid",
+    noisePx: 6,
+    position: null,
+    trueYaw: 0,
+    truePitch: 4,
+    priorYaw: 0,
+    target: null,
+    best: null,
+    solver: null,
+    running: false,
+    raf: 0,
+    evals: 0,
+    dom: {
+      select: document.getElementById("algoSelect"),
+      blurb: document.getElementById("algoBlurb"),
+      noise: document.getElementById("noiseSlider"),
+      noiseValue: document.getElementById("noiseValue"),
+      run: document.getElementById("algoRun"),
+      step: document.getElementById("algoStep"),
+      reset: document.getElementById("algoReset"),
+      status: document.getElementById("algoStatus"),
+      yawErr: document.getElementById("algoYawErr"),
+      pitchErr: document.getElementById("algoPitchErr"),
+      score: document.getElementById("algoScore"),
+      evalCount: document.getElementById("algoEvals"),
+      mapCanvas: document.getElementById("alignMap"),
+      plot: document.getElementById("alignPlot"),
+    },
+  };
+  lab.mapContext = lab.dom.mapCanvas.getContext("2d");
+  lab.topScratch = new Float32Array(lab.sampleWidth);
+  lab.projection = lab.grid.points.map((row) => row.map(() => ({ front: false, px: 0, py: 0 })));
+
+  lab.dom.select.replaceChildren(
+    ...Object.entries(ALIGN_SOLVERS).map(([key, meta]) => new Option(meta.label, key)),
+  );
+  lab.dom.select.value = lab.algo;
+  lab.dom.select.addEventListener("change", () => {
+    lab.algo = lab.dom.select.value;
+    resetAlignSolver(lab);
+  });
+  lab.dom.noise.addEventListener("input", () => {
+    lab.noisePx = Number(lab.dom.noise.value);
+    lab.dom.noiseValue.textContent = `${lab.noisePx} px`;
+    if (lab.position) {
+      regenerateAlignTarget(lab);
+      resetAlignSolver(lab);
+    }
+  });
+  lab.dom.run.addEventListener("click", () => (lab.running ? stopAlignSolver(lab) : runAlignSolver(lab)));
+  lab.dom.step.addEventListener("click", () => stepAlignSolver(lab));
+  lab.dom.reset.addEventListener("click", () => resetAlignSolver(lab));
+  lab.dom.mapCanvas.addEventListener("click", (event) => {
+    const rect = lab.dom.mapCanvas.getBoundingClientRect();
+    placeAlignCamera(lab, alignCanvasToLocal(lab, event.clientX - rect.left, event.clientY - rect.top));
+  });
+
+  const resizeObserver = new ResizeObserver(() => {
+    renderAlignMinimap(lab);
+    drawAlignMinimap(lab);
+    drawAlignPlot(lab);
+  });
+  resizeObserver.observe(lab.dom.mapCanvas);
+  resizeObserver.observe(lab.dom.plot);
+
+  syncSolverBlurb(lab);
+  renderAlignMinimap(lab);
+  placeAlignCamera(lab, lowestLocalPoint(terrain, frame));
+}
+
+function buildAlignGrid(terrain, frame, stride) {
+  const rowIndices = strideIndices(terrain.grid_height, stride);
+  const colIndices = strideIndices(terrain.grid_width, stride);
+  const points = rowIndices.map((row) => colIndices.map((col) => terrainLocalGridPoint(terrain, frame, row, col)));
+  return { points };
+}
+
+function strideIndices(count, stride) {
+  const indices = [];
+  for (let value = 0; value < count - 1; value += stride) {
+    indices.push(value);
+  }
+  indices.push(count - 1);
+  return indices;
+}
+
+function alignSkyline(lab, yawDeg, pitchDeg) {
+  const { intrinsics, sampleWidth: width, sampleHeight: height, grid, projection } = lab;
+  const axes = cameraAxes({ yaw_deg: yawDeg, pitch_deg: pitchDeg });
+  const extrinsics = { position: lab.position };
+  const scaleX = width / intrinsics.width_px;
+  const scaleY = height / intrinsics.height_px;
+  const rows = grid.points.length;
+  const cols = grid.points[0].length;
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const projected = projectCameraPoint(localToCameraPoint(grid.points[row][col], extrinsics, axes), intrinsics);
+      const slot = projection[row][col];
+      slot.front = projected.valid;
+      slot.px = projected.u * scaleX;
+      slot.py = projected.v * scaleY;
+    }
+  }
+
+  lab.topScratch.fill(Number.POSITIVE_INFINITY);
+  for (let row = 0; row < rows - 1; row += 1) {
+    for (let col = 0; col < cols - 1; col += 1) {
+      rasterizeTopEdge(lab.topScratch, width, height, projection[row][col], projection[row][col + 1], projection[row + 1][col]);
+      rasterizeTopEdge(lab.topScratch, width, height, projection[row][col + 1], projection[row + 1][col + 1], projection[row + 1][col]);
+    }
+  }
+  return lab.topScratch;
+}
+
+// Mean absolute skyline residual in sample rows, with missing-coverage columns
+// charged the full image height so the objective pulls overlap into agreement.
+function scoreAlignProfiles(profile, target, height) {
+  let sum = 0;
+  let counted = 0;
+  let mismatch = 0;
+  for (let column = 0; column < target.length; column += 1) {
+    const a = profile[column];
+    const b = target[column];
+    const aFinite = Number.isFinite(a);
+    const bFinite = Number.isFinite(b);
+    if (aFinite && bFinite) {
+      sum += Math.abs(a - b);
+      counted += 1;
+    } else if (aFinite !== bFinite) {
+      mismatch += 1;
+    }
+  }
+  const total = counted + mismatch;
+  return total === 0 ? height : (sum + mismatch * height) / total;
+}
+
+function regenerateAlignTarget(lab) {
+  const clean = alignSkyline(lab, lab.trueYaw, lab.truePitch);
+  const noiseRows = (lab.noisePx * lab.sampleHeight) / lab.intrinsics.height_px;
+  const target = new Float32Array(lab.sampleWidth);
+  for (let column = 0; column < target.length; column += 1) {
+    target[column] = Number.isFinite(clean[column]) ? clean[column] + gaussianNoise() * noiseRows : Number.POSITIVE_INFINITY;
+  }
+  lab.target = target;
+}
+
+function placeAlignCamera(lab, local) {
+  stopAlignSolver(lab);
+  const up = sampleAlignElevation(lab, local.east, local.north) + ALIGN_EYE_HEIGHT_M;
+  lab.position = { east_m: local.east, north_m: local.north, up_m: up };
+  lab.priorYaw = headingDeg(local.east, local.north, lab.lookTarget.east, lab.lookTarget.north);
+  lab.trueYaw = wrapDeg(lab.priorYaw + (Math.random() * 80 - 40));
+  lab.truePitch = 1 + Math.random() * 7;
+  regenerateAlignTarget(lab);
+  resetAlignSolver(lab);
+}
+
+function resetAlignSolver(lab) {
+  stopAlignSolver(lab);
+  if (!lab.position) {
+    return;
+  }
+  lab.evals = 0;
+  const evaluate = (yaw, pitch) => {
+    lab.evals += 1;
+    return scoreAlignProfiles(alignSkyline(lab, yaw, pitch), lab.target, lab.sampleHeight);
+  };
+  const bounds = { yaw: ALIGN_YAW_BOUNDS, pitch: ALIGN_PITCH_BOUNDS };
+  const seed = { yaw: lab.priorYaw, pitch: 4 };
+  lab.solver = ALIGN_SOLVERS[lab.algo].create(evaluate, bounds, seed);
+  lab.best = ALIGN_SOLVERS[lab.algo].usesPrior ? { yaw: seed.yaw, pitch: seed.pitch, score: NaN } : null;
+  syncSolverBlurb(lab);
+  lab.dom.status.textContent = "Ready. Run or step the solver.";
+  updateAlignReadout(lab, lab.best ? { ...lab.best, done: false } : null);
+  drawAlignMinimap(lab);
+  drawAlignPlot(lab);
+}
+
+function runAlignSolver(lab) {
+  if (!lab.solver || lab.running) {
+    return;
+  }
+  lab.running = true;
+  lab.dom.run.textContent = "Pause";
+  const tick = () => {
+    if (!lab.running) {
+      return;
+    }
+    const result = lab.solver.step();
+    lab.best = result;
+    updateAlignReadout(lab, result);
+    if (result.done) {
+      stopAlignSolver(lab);
+      lab.dom.status.textContent = `Converged after ${lab.evals} evaluations.`;
+    } else {
+      lab.raf = requestAnimationFrame(tick);
+    }
+  };
+  lab.raf = requestAnimationFrame(tick);
+}
+
+function stepAlignSolver(lab) {
+  if (!lab.solver || lab.running) {
+    return;
+  }
+  const result = lab.solver.step();
+  lab.best = result;
+  updateAlignReadout(lab, result);
+  if (result.done) {
+    lab.dom.status.textContent = `Converged after ${lab.evals} evaluations.`;
+  }
+}
+
+function stopAlignSolver(lab) {
+  lab.running = false;
+  cancelAnimationFrame(lab.raf);
+  lab.dom.run.textContent = "Run";
+}
+
+function syncSolverBlurb(lab) {
+  lab.dom.blurb.textContent = ALIGN_SOLVERS[lab.algo].blurb;
+}
+
+function updateAlignReadout(lab, result) {
+  if (!result) {
+    lab.dom.yawErr.textContent = "-";
+    lab.dom.pitchErr.textContent = "-";
+    lab.dom.score.textContent = "-";
+    lab.dom.evalCount.textContent = "0";
+    return;
+  }
+  lab.dom.yawErr.textContent = formatNumber(angleDeltaDeg(result.yaw, lab.trueYaw), "deg");
+  lab.dom.pitchErr.textContent = formatNumber(Math.abs(result.pitch - lab.truePitch), "deg");
+  const scorePx = Number.isFinite(result.score)
+    ? (result.score * lab.intrinsics.height_px) / lab.sampleHeight
+    : NaN;
+  lab.dom.score.textContent = formatNumber(scorePx, "px");
+  lab.dom.evalCount.textContent = String(lab.evals);
+  drawAlignMinimap(lab);
+  drawAlignPlot(lab);
+}
+
+// --- Solvers ---
+
+function createGridSolver(evaluate, bounds) {
+  let queue = buildGridQueue(bounds.yaw, 6, bounds.pitch, 4);
+  let index = 0;
+  let best = null;
+  let refined = false;
+  const evaluateChunk = (count) => {
+    for (let step = 0; step < count && index < queue.length; step += 1, index += 1) {
+      const [yaw, pitch] = queue[index];
+      const score = evaluate(yaw, pitch);
+      if (!best || score < best.score) {
+        best = { yaw, pitch, score };
+      }
+    }
+  };
+  return {
+    step() {
+      evaluateChunk(28);
+      if (index >= queue.length) {
+        if (!refined && best) {
+          refined = true;
+          index = 0;
+          queue = buildGridQueue(
+            [best.yaw - 6, best.yaw + 6],
+            1,
+            [Math.max(bounds.pitch[0], best.pitch - 4), Math.min(bounds.pitch[1], best.pitch + 4)],
+            0.5,
+          );
+        } else {
+          return { ...best, done: true };
+        }
+      }
+      return { ...best, done: false };
+    },
+  };
+}
+
+function buildGridQueue([yawStart, yawEnd], yawStep, [pitchStart, pitchEnd], pitchStep) {
+  const queue = [];
+  for (let yaw = yawStart; yaw <= yawEnd; yaw += yawStep) {
+    for (let pitch = pitchStart; pitch <= pitchEnd; pitch += pitchStep) {
+      queue.push([wrapDeg(yaw), pitch]);
+    }
+  }
+  return queue;
+}
+
+function createNelderMeadSolver(evaluate, bounds, seed) {
+  const vertex = (yaw, pitch) => ({ yaw, pitch, score: evaluate(wrapDeg(yaw), clamp(pitch, bounds.pitch)) });
+  let simplex = [vertex(seed.yaw, seed.pitch), vertex(seed.yaw + 18, seed.pitch), vertex(seed.yaw, seed.pitch + 6)];
+  let iterations = 0;
+  return {
+    step() {
+      simplex.sort((a, b) => a.score - b.score);
+      const [best, , worst] = simplex;
+      const centroidYaw = (simplex[0].yaw + simplex[1].yaw) / 2;
+      const centroidPitch = (simplex[0].pitch + simplex[1].pitch) / 2;
+      const reflected = vertex(centroidYaw + (centroidYaw - worst.yaw), centroidPitch + (centroidPitch - worst.pitch));
+      if (reflected.score < best.score) {
+        const expanded = vertex(centroidYaw + 2 * (centroidYaw - worst.yaw), centroidPitch + 2 * (centroidPitch - worst.pitch));
+        simplex[2] = expanded.score < reflected.score ? expanded : reflected;
+      } else if (reflected.score < simplex[1].score) {
+        simplex[2] = reflected;
+      } else {
+        const contracted = vertex(centroidYaw + 0.5 * (worst.yaw - centroidYaw), centroidPitch + 0.5 * (worst.pitch - centroidPitch));
+        if (contracted.score < worst.score) {
+          simplex[2] = contracted;
+        } else {
+          simplex = [best, vertex((best.yaw + simplex[1].yaw) / 2, (best.pitch + simplex[1].pitch) / 2), vertex((best.yaw + worst.yaw) / 2, (best.pitch + worst.pitch) / 2)];
+        }
+      }
+      iterations += 1;
+      simplex.sort((a, b) => a.score - b.score);
+      const spread = Math.abs(simplex[0].yaw - simplex[2].yaw) + Math.abs(simplex[0].pitch - simplex[2].pitch);
+      const top = simplex[0];
+      return { yaw: wrapDeg(top.yaw), pitch: clamp(top.pitch, bounds.pitch), score: top.score, done: spread < 0.05 || iterations > 80 };
+    },
+  };
+}
+
+function createDifferentialEvolutionSolver(evaluate, bounds) {
+  const size = 24;
+  const population = [];
+  for (let member = 0; member < size; member += 1) {
+    const yaw = randomIn(bounds.yaw);
+    const pitch = randomIn(bounds.pitch);
+    population.push({ yaw, pitch, score: evaluate(yaw, pitch) });
+  }
+  let generation = 0;
+  let stagnation = 0;
+  let bestScore = Math.min(...population.map((member) => member.score));
+  return {
+    step() {
+      for (let target = 0; target < size; target += 1) {
+        const [a, b, c] = pickThree(population, target);
+        let yaw = wrapDeg(a.yaw + 0.7 * angleDiff(b.yaw, c.yaw));
+        let pitch = clamp(a.pitch + 0.7 * (b.pitch - c.pitch), bounds.pitch);
+        if (Math.random() > 0.9) {
+          yaw = population[target].yaw;
+        }
+        if (Math.random() > 0.9) {
+          pitch = population[target].pitch;
+        }
+        const score = evaluate(yaw, pitch);
+        if (score < population[target].score) {
+          population[target] = { yaw, pitch, score };
+        }
+      }
+      generation += 1;
+      const best = population.reduce((lowest, member) => (member.score < lowest.score ? member : lowest));
+      stagnation = best.score < bestScore - 1e-4 ? 0 : stagnation + 1;
+      bestScore = Math.min(bestScore, best.score);
+      return { yaw: best.yaw, pitch: best.pitch, score: best.score, done: generation > 60 || stagnation > 12 };
+    },
+  };
+}
+
+// --- Lab drawing ---
+
+function renderAlignMinimap(lab) {
+  const canvas = lab.dom.mapCanvas;
+  const width = Math.max(1, canvas.clientWidth);
+  const height = Math.max(1, canvas.clientHeight);
+  canvas.width = width;
+  canvas.height = height;
+  const image = lab.mapContext.createImageData(width, height);
+  const { frame } = lab;
+  const elevationRange = Math.max(1, frame.zMax - frame.zMin);
+  const metersPerPixel = (frame.xMax - frame.xMin) / width;
+  for (let y = 0; y < height; y += 1) {
+    const north = interpolate(frame.yMax, frame.yMin, y / height);
+    for (let x = 0; x < width; x += 1) {
+      const east = interpolate(frame.xMin, frame.xMax, x / width);
+      const elevation = sampleAlignElevation(lab, east, north);
+      const rgb = alignElevationRgb((elevation - frame.zMin) / elevationRange);
+      const shade = alignHillshade(lab, east, north, metersPerPixel);
+      const offset = (y * width + x) * 4;
+      image.data[offset] = Math.min(255, rgb[0] * shade);
+      image.data[offset + 1] = Math.min(255, rgb[1] * shade);
+      image.data[offset + 2] = Math.min(255, rgb[2] * shade);
+      image.data[offset + 3] = 255;
+    }
+  }
+  lab.mapBaseImage = image;
+}
+
+// Cheap relief shading from the terrain gradient lit from the north-west.
+function alignHillshade(lab, east, north, step) {
+  const dEast = sampleAlignElevation(lab, east + step, north) - sampleAlignElevation(lab, east - step, north);
+  const dNorth = sampleAlignElevation(lab, east, north + step) - sampleAlignElevation(lab, east, north - step);
+  const scale = 1.4 / (2 * step);
+  const light = (-dEast * scale + dNorth * scale) * 0.5 + 0.78;
+  return Math.max(0.45, Math.min(1.25, light));
+}
+
+function drawAlignMinimap(lab) {
+  if (!lab.mapBaseImage) {
+    return;
+  }
+  const context = lab.mapContext;
+  context.putImageData(lab.mapBaseImage, 0, 0);
+  if (!lab.position) {
+    return;
+  }
+  const origin = alignLocalToCanvas(lab, lab.position.east_m, lab.position.north_m);
+  drawAlignHeading(context, origin, lab.trueYaw, "rgba(108, 235, 150, 0.95)");
+  if (lab.best) {
+    drawAlignHeading(context, origin, lab.best.yaw, "rgba(255, 183, 77, 0.95)");
+  }
+  context.beginPath();
+  context.arc(origin.x, origin.y, 5, 0, Math.PI * 2);
+  context.fillStyle = "#f2eddf";
+  context.strokeStyle = "#1a1c15";
+  context.lineWidth = 2;
+  context.fill();
+  context.stroke();
+}
+
+function drawAlignHeading(context, origin, yawDeg, color) {
+  const yaw = THREE.MathUtils.degToRad(yawDeg);
+  const length = 46;
+  context.beginPath();
+  context.moveTo(origin.x, origin.y);
+  context.lineTo(origin.x + Math.sin(yaw) * length, origin.y - Math.cos(yaw) * length);
+  context.strokeStyle = color;
+  context.lineWidth = 2.5;
+  context.stroke();
+}
+
+function drawAlignPlot(lab) {
+  const plot = lab.dom.plot;
+  const width = Math.max(1, plot.clientWidth);
+  const height = Math.max(1, plot.clientHeight);
+  plot.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  const elements = [];
+  if (lab.target) {
+    elements.push(alignProfilePath(lab, lab.target, width, height, "target-line"));
+  }
+  if (lab.best && lab.position && Number.isFinite(lab.best.yaw)) {
+    elements.push(alignProfilePath(lab, alignSkyline(lab, lab.best.yaw, lab.best.pitch), width, height, "estimate-line"));
+  }
+  plot.replaceChildren(...elements.filter(Boolean));
+}
+
+function alignProfilePath(lab, profile, width, height, className) {
+  const points = [];
+  for (let column = 0; column < profile.length; column += 1) {
+    if (Number.isFinite(profile[column])) {
+      const x = (column / (profile.length - 1)) * width;
+      const y = (profile[column] / lab.sampleHeight) * height;
+      points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+  }
+  if (points.length < 2) {
+    return null;
+  }
+  return svgElement("polyline", { class: className, points: points.join(" ") });
+}
+
+// --- Lab helpers ---
+
+function sampleAlignElevation(lab, east, north) {
+  const { terrain, frame } = lab;
+  const colFloat = ((east - frame.xMin) / Math.max(1, frame.xMax - frame.xMin)) * (terrain.grid_width - 1);
+  const rowFloat = ((north - frame.yMin) / Math.max(1, frame.yMax - frame.yMin)) * (terrain.grid_height - 1);
+  const col = Math.max(0, Math.min(terrain.grid_width - 2, Math.floor(colFloat)));
+  const row = Math.max(0, Math.min(terrain.grid_height - 2, Math.floor(rowFloat)));
+  const tx = colFloat - col;
+  const ty = rowFloat - row;
+  const top = interpolate(terrain.elevation_m[row][col], terrain.elevation_m[row][col + 1], tx);
+  const bottom = interpolate(terrain.elevation_m[row + 1][col], terrain.elevation_m[row + 1][col + 1], tx);
+  return interpolate(top, bottom, ty);
+}
+
+function highestLocalPoint(terrain, frame) {
+  return extremeLocalPoint(terrain, frame, (value, best) => value > best);
+}
+
+function lowestLocalPoint(terrain, frame) {
+  return extremeLocalPoint(terrain, frame, (value, best) => value < best);
+}
+
+function extremeLocalPoint(terrain, frame, isBetter) {
+  let bestValue = terrain.elevation_m[0][0];
+  let bestRow = 0;
+  let bestCol = 0;
+  for (let row = 0; row < terrain.grid_height; row += 1) {
+    for (let col = 0; col < terrain.grid_width; col += 1) {
+      if (isBetter(terrain.elevation_m[row][col], bestValue)) {
+        bestValue = terrain.elevation_m[row][col];
+        bestRow = row;
+        bestCol = col;
+      }
+    }
+  }
+  const point = terrainLocalGridPoint(terrain, frame, bestRow, bestCol);
+  return { east: point.east_m, north: point.north_m };
+}
+
+function alignCanvasToLocal(lab, canvasX, canvasY) {
+  const width = Math.max(1, lab.dom.mapCanvas.clientWidth);
+  const height = Math.max(1, lab.dom.mapCanvas.clientHeight);
+  return {
+    east: interpolate(lab.frame.xMin, lab.frame.xMax, canvasX / width),
+    north: interpolate(lab.frame.yMax, lab.frame.yMin, canvasY / height),
+  };
+}
+
+function alignLocalToCanvas(lab, east, north) {
+  const width = Math.max(1, lab.dom.mapCanvas.clientWidth);
+  const height = Math.max(1, lab.dom.mapCanvas.clientHeight);
+  return {
+    x: ((east - lab.frame.xMin) / Math.max(1, lab.frame.xMax - lab.frame.xMin)) * width,
+    y: ((lab.frame.yMax - north) / Math.max(1, lab.frame.yMax - lab.frame.yMin)) * height,
+  };
+}
+
+function alignElevationRgb(t) {
+  const clamped = Math.max(0, Math.min(1, t));
+  const stops = [
+    [38, 58, 44],
+    [62, 104, 67],
+    [146, 149, 93],
+    [218, 209, 179],
+  ];
+  const scaled = clamped * (stops.length - 1);
+  const index = Math.min(stops.length - 2, Math.floor(scaled));
+  const fraction = scaled - index;
+  return stops[index].map((value, channel) => Math.round(interpolate(value, stops[index + 1][channel], fraction)));
+}
+
+function headingDeg(fromEast, fromNorth, toEast, toNorth) {
+  return (Math.atan2(toEast - fromEast, toNorth - fromNorth) * 180) / Math.PI;
+}
+
+function wrapDeg(value) {
+  return ((((value + 180) % 360) + 360) % 360) - 180;
+}
+
+function angleDiff(a, b) {
+  return wrapDeg(a - b);
+}
+
+function clamp(value, [low, high]) {
+  return Math.max(low, Math.min(high, value));
+}
+
+function randomIn([low, high]) {
+  return low + Math.random() * (high - low);
+}
+
+function pickThree(population, exclude) {
+  const indices = [];
+  while (indices.length < 3) {
+    const candidate = Math.floor(Math.random() * population.length);
+    if (candidate !== exclude && !indices.includes(candidate)) {
+      indices.push(candidate);
+    }
+  }
+  return indices.map((index) => population[index]);
+}
+
+function gaussianNoise() {
+  let u = 0;
+  let v = 0;
+  while (u === 0) {
+    u = Math.random();
+  }
+  while (v === 0) {
+    v = Math.random();
+  }
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }

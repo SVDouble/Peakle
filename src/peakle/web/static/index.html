@@ -3,109 +3,152 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Peakle Demo</title>
+    <title>Peakle</title>
     <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/dockview-core@6.6.1/dist/styles/dockview.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="app">
-      <section class="terrain-stage" aria-label="Terrain visualization">
-        <canvas id="terrainCanvas"></canvas>
-        <div class="topbar">
-          <div>
-            <h1>Peakle</h1>
-            <p id="summary">Loading synthetic scene</p>
-          </div>
-          <div class="segmented" aria-label="Image view">
-            <button id="showRender" class="active" type="button">Render</button>
-            <button id="showAnnotated" type="button">Annotated</button>
-            <button id="showContours" type="button">Contours</button>
-          </div>
+    <div id="layoutRoot"></div>
+
+    <template id="tpl-map">
+      <div class="panel map-panel">
+        <div class="frame-box" id="mapFrameBox">
+          <canvas id="terrainCanvas"></canvas>
         </div>
-        <div class="camera-hud" aria-label="Camera mode">
-          <div>
-            <span class="hud-title">Camera</span>
-            <strong id="selectedCamera">Compare</strong>
-          </div>
-          <div class="camera-actions">
-            <button class="active" data-camera-mode="compare" type="button">Compare</button>
-            <button data-camera-mode="true" type="button">True POV</button>
-            <button data-camera-mode="estimated" type="button">Estimated POV</button>
-            <button data-camera-mode="orbit" type="button">Orbit</button>
-          </div>
-          <p id="selectedCameraDescription">Blue is true camera coverage; amber is estimated camera coverage.</p>
+        <div class="panel-heading">
+          <h1>Peakle</h1>
+          <p id="summary">Loading synthetic scene</p>
         </div>
         <div class="map-scale-hud" aria-label="Map scale">
           <div id="scaleBar" class="scale-bar"></div>
           <div id="scaleLabel" class="scale-label">-</div>
         </div>
         <div id="webglStatus" class="status" hidden></div>
-      </section>
+      </div>
+    </template>
 
-      <aside class="inspector">
-        <section class="image-panel">
-          <img id="sceneImage" alt="Synthetic mountain view" />
-          <div id="imageContourLegend" class="image-contour-legend" hidden>
-            <span><i class="true-contour"></i>True contour</span>
-            <span><i class="estimated-contour"></i>Estimated contour</span>
+    <template id="tpl-camera">
+      <div class="panel camera-panel">
+        <div class="camera-frame">
+          <div class="frame-box" id="cameraFrameBox">
+            <canvas id="cameraCanvas"></canvas>
+            <svg id="cameraOverlay" class="camera-overlay" preserveAspectRatio="none"></svg>
           </div>
+        </div>
+        <div class="camera-image-legend">
+          <span><i class="skyline-swatch"></i>Live skyline</span>
+          <span><i class="peak-swatch"></i>Peak labels</span>
+        </div>
+      </div>
+    </template>
+
+    <template id="tpl-controls">
+      <div class="panel controls-panel">
+        <section class="control-block">
+          <span class="control-eyebrow">Camera view</span>
+          <strong id="selectedCamera">Map</strong>
+          <label class="field">
+            <span>View</span>
+            <select id="viewSelect"></select>
+          </label>
+          <div class="segmented" id="cameraModeControls" aria-label="Camera mode">
+            <button class="active" data-camera-mode="map" type="button">Map</button>
+            <button data-camera-mode="pov" type="button">Camera POV</button>
+          </div>
+          <div class="segmented" id="povRoleControls" aria-label="POV camera" hidden>
+            <button class="active" data-pov-role="true" type="button">True</button>
+            <button data-pov-role="estimated" type="button">Estimated</button>
+          </div>
+          <p id="selectedCameraDescription" class="control-hint">
+            Free orbit; blue is true camera coverage, amber is estimated.
+          </p>
         </section>
 
-        <section class="metrics">
+        <section class="control-block">
           <h2>Pose Fit</h2>
-          <dl>
-            <div>
-              <dt>Position Error</dt>
-              <dd id="positionError">-</dd>
-            </div>
-            <div>
-              <dt>Yaw Error</dt>
-              <dd id="yawError">-</dd>
-            </div>
-            <div>
-              <dt>Contour MAE</dt>
-              <dd id="contourMae">-</dd>
-            </div>
-            <div>
-              <dt>Labels</dt>
-              <dd id="labelCount">-</dd>
-            </div>
+          <dl class="metric-grid">
+            <div><dt>Position Error</dt><dd id="positionError">-</dd></div>
+            <div><dt>Yaw Error</dt><dd id="yawError">-</dd></div>
+            <div><dt>Contour MAE</dt><dd id="contourMae">-</dd></div>
+            <div><dt>Labels</dt><dd id="labelCount">-</dd></div>
           </dl>
         </section>
 
-        <section class="camera-compare">
-          <h2>Camera Compare</h2>
+        <section class="control-block">
+          <h2>True vs Estimated</h2>
           <div class="camera-legend">
             <span><i class="true-swatch"></i>True</span>
             <span><i class="estimated-swatch"></i>Estimated</span>
           </div>
-          <dl>
-            <div>
-              <dt>Position Delta</dt>
-              <dd id="comparePositionDelta">-</dd>
-            </div>
-            <div>
-              <dt>Yaw Delta</dt>
-              <dd id="compareYawDelta">-</dd>
-            </div>
-            <div>
-              <dt>Pitch Delta</dt>
-              <dd id="comparePitchDelta">-</dd>
-            </div>
+          <dl class="delta-list">
+            <div><dt>Position &Delta;</dt><dd id="comparePositionDelta">-</dd></div>
+            <div><dt>Yaw &Delta;</dt><dd id="compareYawDelta">-</dd></div>
+            <div><dt>Pitch &Delta;</dt><dd id="comparePitchDelta">-</dd></div>
           </dl>
         </section>
+      </div>
+    </template>
 
-        <section class="peaks">
-          <h2>Visible Peaks</h2>
-          <ol id="peakList"></ol>
-        </section>
-      </aside>
-    </main>
+    <template id="tpl-peaks">
+      <div class="panel peaks-panel">
+        <ol id="peakList"></ol>
+      </div>
+    </template>
+
+    <template id="tpl-alignment">
+      <div class="panel alignment-panel">
+        <div class="align-side">
+          <div class="control-block">
+            <span class="control-eyebrow">Localization lab</span>
+            <strong>Skyline &rarr; pose</strong>
+            <p class="control-hint">
+              Location known, orientation unknown &mdash; the camera can sit anywhere. Click the minimap
+              to place it, add noise to the 2D outline, then let a solver recover the heading.
+            </p>
+            <label class="field"><span>Solver</span><select id="algoSelect"></select></label>
+            <p id="algoBlurb" class="control-hint"></p>
+            <label class="field">
+              <span>Noise</span>
+              <input id="noiseSlider" type="range" min="0" max="40" step="1" value="6" />
+              <output id="noiseValue">6 px</output>
+            </label>
+            <div class="align-actions">
+              <button id="algoRun" class="primary" type="button">Run</button>
+              <button id="algoStep" type="button">Step</button>
+              <button id="algoReset" type="button">Reset</button>
+            </div>
+            <p id="algoStatus" class="control-hint">Click the minimap to place the camera.</p>
+          </div>
+          <dl class="metric-grid">
+            <div><dt>Yaw error</dt><dd id="algoYawErr">-</dd></div>
+            <div><dt>Pitch error</dt><dd id="algoPitchErr">-</dd></div>
+            <div><dt>Skyline MAE</dt><dd id="algoScore">-</dd></div>
+            <div><dt>Evaluations</dt><dd id="algoEvals">-</dd></div>
+          </dl>
+        </div>
+        <div class="align-main">
+          <div class="align-map">
+            <canvas id="alignMap"></canvas>
+            <span class="align-caption">Top-down terrain &middot; click to place camera</span>
+          </div>
+          <div class="align-plot">
+            <svg id="alignPlot" class="align-plot-svg" preserveAspectRatio="none"></svg>
+            <div class="align-plot-legend">
+              <span><i class="target-line"></i>Noisy target outline</span>
+              <span><i class="estimate-line"></i>Solver estimate</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
     <script type="importmap">
       {
         "imports": {
           "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
+          "dockview-core": "https://cdn.jsdelivr.net/npm/dockview-core@6.6.1/+esm"
         }
       }
     </script>
