@@ -100,7 +100,22 @@ button {
   height: 100%;
 }
 
+/* Letterbox box: fills the panel in map mode, shrinks to the image aspect in POV. */
+.map-viewport {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.map-viewport.placing {
+  cursor: crosshair;
+}
+
 #mapCanvas {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -113,15 +128,16 @@ button {
 }
 
 .terrain-label {
-  padding: 3px 7px;
+  padding: 3px 8px;
   border: 1px solid rgba(240, 199, 94, 0.55);
-  border-radius: 4px;
-  background: rgba(20, 21, 18, 0.76);
+  border-radius: 5px;
+  background: rgba(16, 17, 14, 0.9);
   color: var(--text);
   font-size: 11px;
   line-height: 1.2;
   white-space: nowrap;
-  text-shadow: 0 1px 1px #000;
+  text-shadow: 0 1px 2px #000;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
   transform: translate(-50%, -100%);
 }
 
@@ -130,14 +146,39 @@ button {
   color: #ffd7d1;
 }
 
+/* Camera labels carry a leading colour dot for their role and read a touch
+   stronger than peak labels so true/predicted poses are unambiguous. */
+.camera-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.camera-label::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+
 .camera-label.true-camera {
-  border-color: rgba(83, 198, 255, 0.75);
-  color: #d8f1ff;
+  border-color: rgba(83, 198, 255, 0.85);
+  color: #dcf2ff;
+}
+
+.camera-label.true-camera::before {
+  background: var(--true);
 }
 
 .camera-label.predicted-camera {
-  border-color: rgba(255, 140, 66, 0.8);
-  color: #ffd9b0;
+  border-color: rgba(255, 140, 66, 0.9);
+  color: #ffdcbb;
+}
+
+.camera-label.predicted-camera::before {
+  background: var(--predicted);
 }
 
 .map-hud {
@@ -234,6 +275,16 @@ button {
 
 .predicted-swatch {
   background: var(--predicted);
+}
+
+.diff-swatch {
+  background: #ff4db8;
+}
+
+/* Shaded band between the observed (truth) and predicted skylines. */
+.diff-fill {
+  fill: rgba(255, 77, 184, 0.26);
+  stroke: none;
 }
 
 /* --- Control blocks shared by config / views / solve --- */
@@ -509,4 +560,125 @@ button.primary:disabled {
 .solve-plot {
   width: 100%;
   height: 100%;
+}
+
+/* --- Web Awesome theming (shared across every panel) --- */
+/* Remap Web Awesome's "brand" colour ramp onto the gold accent so accent
+   buttons / focus rings match the rest of the workbench. */
+body {
+  --wa-color-brand-95: #fdf6e3;
+  --wa-color-brand-90: #f6e7b8;
+  --wa-color-brand-80: #f0d488;
+  --wa-color-brand-70: #ecc760;
+  --wa-color-brand-60: #f0c75e;
+  --wa-color-brand-50: #e0b94f;
+  --wa-color-brand-40: #d8a93b;
+  --wa-color-brand-30: #b88a2c;
+  --wa-color-brand-20: #8a661f;
+  --wa-color-brand-10: #5c4414;
+  --wa-color-brand-05: #2e220a;
+  --wa-color-brand: #f0c75e;
+  --wa-color-brand-on: #1d1b13;
+  --wa-font-family-body: inherit;
+}
+
+wa-button[appearance~="accent"][variant="brand"]::part(base) {
+  color: #1d1b13;
+  font-weight: 600;
+}
+
+/* --- Setup panel --- */
+.config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-form .field-row {
+  display: flex;
+  gap: 10px;
+}
+
+.config-form .field-row wa-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.config-form .appearance-eyebrow {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* --- Views panel: place button, view + solve lists, solve actions --- */
+.views-panel wa-button[slot],
+.views-panel > .control-block > wa-button,
+.views-panel .solve-actions wa-button {
+  width: 100%;
+}
+
+.views-panel > .control-block > wa-button {
+  display: block;
+}
+
+.editor-title {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.solve-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+
+.solve-actions wa-select {
+  min-width: 0;
+}
+
+.solve-option {
+  margin: 4px 0 8px;
+}
+
+.solve-row .solve-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+}
+
+.solve-strategy {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.solve-stat {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* --- Solve inspector --- */
+.solve-plot-legend {
+  display: flex;
+  gap: 14px;
+  padding: 4px 8px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.solve-plot-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.solve-plot-legend i {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 999px;
 }

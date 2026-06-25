@@ -20,7 +20,9 @@ import {
   terrainVertexIndex,
 } from "../../geometry.js";
 
-const FOV_OVERLAY_VERTICAL_OFFSET = 0.011;
+// Keep the coverage fill essentially on the terrain surface (was 0.011, which
+// floated visibly above the mountain); polygon offset handles z-fighting.
+const FOV_OVERLAY_VERTICAL_OFFSET = 0.0015;
 const VISIBILITY_RASTER_MAX_WIDTH = 820;
 
 export function createFovOverlay(terrain, frame, extrinsics, intrinsics, color) {
@@ -57,12 +59,12 @@ function createFovFill(positions, color) {
     new THREE.MeshBasicMaterial({
       color,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0.3,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -4,
       side: THREE.DoubleSide,
     }),
   );

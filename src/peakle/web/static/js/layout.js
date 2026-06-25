@@ -38,16 +38,16 @@ export function buildLayout(rootElement) {
     panels,
   });
 
+  // Right column: two tabbed groups instead of four cramped stacked panels.
+  // Top tabs Views|Setup (Views is the main workspace); bottom tabs Camera|Solve.
   const groups = [
-    leaf(Math.round(width * 0.6), panel("map")),
+    leaf(Math.round(width * 0.62), panel("map")),
     {
       type: "branch",
-      size: Math.round(width * 0.4),
+      size: Math.round(width * 0.38),
       data: [
-        leaf(Math.round(height * 0.2), panel("config")),
-        leaf(Math.round(height * 0.28), panel("views")),
-        leaf(Math.round(height * 0.26), panel("camera")),
-        leaf(Math.round(height * 0.26), panel("solve")),
+        leaf(Math.round(height * 0.5), panel("views"), panel("config")),
+        leaf(Math.round(height * 0.5), panel("camera"), panel("solve")),
       ],
     },
   ];

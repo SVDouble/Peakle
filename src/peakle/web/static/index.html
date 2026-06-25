@@ -1,16 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="wa-dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Peakle</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/dockview-core@6.6.1/dist/styles/dockview.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@awesome.me/webawesome@3.9.0/dist-cdn/styles/webawesome.css" />
     <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div id="layoutRoot"></div>
 
+    <!-- The import map must precede every module script in the document, so it
+         lives here ahead of the Web Awesome loader and js/main.js. -->
     <script type="importmap">
       {
         "imports": {
@@ -20,6 +20,10 @@
         }
       }
     </script>
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@awesome.me/webawesome@3.9.0/dist-cdn/webawesome.loader.js"></script>
+  </head>
+  <body>
+    <div id="layoutRoot"></div>
     <script type="module" src="js/main.js"></script>
   </body>
 </html>

@@ -1,15 +1,18 @@
 "use strict";
 
-// Views panel: toggle the place-camera tool, list views, select/delete, and
-// edit the selected view's pose (yaw / pitch / eye height) which re-renders the
-// image server-side and clears its solves.
+// Views panel: place cameras, pick/delete views, edit the selected view's pose,
+// and — right next to the view — run solvers and pick among that view's solves.
+// Selecting a solve drives the map's predicted camera and the Camera/Solve panels.
 
 import { el, formatNumber } from "../format.js";
 
 const PATCH_DEBOUNCE_MS = 250;
 
 export function setupViewsPanel(store, root) {
-  const placeButton = el("button", { type: "button", class: "primary", onclick: () => togglePlacing() });
+  root.classList.add("views-panel");
+
+  const placeButton = el("wa-button", { variant: "brand", appearance: "accent", size: "s", text: "Place camera" });
+  placeButton.addEventListener("click", () => store.setPlacing(!store.placing));
   const hint = el("p", { class: "control-hint" });
   const list = el("ul", { class: "view-list" });
   const editor = el("div", { class: "view-editor" });
@@ -25,14 +28,15 @@ export function setupViewsPanel(store, root) {
   );
 
   let patchTimer = null;
-
-  function togglePlacing() {
-    store.setPlacing(!store.placing);
-  }
+  let editorViewId = undefined;
+  let strategyChoice = null;
+  let positionPriorChoice = true;
+  let solvesHost = null;
+  let runStatus = null;
 
   function renderPlacing() {
-    placeButton.textContent = store.placing ? "Placing… (click the map)" : "Place camera";
-    placeButton.classList.toggle("active", store.placing);
+    placeButton.textContent = store.placing ? "Click the map to place…" : "Place camera";
+    placeButton.setAttribute("variant", store.placing ? "neutral" : "brand");
     hint.textContent = store.placing
       ? "Click the 3D map to drop a camera looking outward."
       : "Place cameras on the map, then solve each view.";
@@ -42,67 +46,165 @@ export function setupViewsPanel(store, root) {
     list.replaceChildren(
       ...store.views.map((view) => {
         const selected = view.id === store.selectedViewId;
+        const remove = el("button", { type: "button", class: "icon-button", title: "Delete view", text: "✕" });
+        remove.addEventListener("click", (event) => {
+          event.stopPropagation();
+          store.deleteView(view.id);
+        });
         return el("li", { class: selected ? "view-row selected" : "view-row" }, [
           el("button", { type: "button", class: "view-name", text: view.label, onclick: () => store.selectView(view.id) }),
           el("span", { class: "view-meta", text: `${view.solves.length} solve${view.solves.length === 1 ? "" : "s"}` }),
-          el("button", { type: "button", class: "icon-button", title: "Delete", text: "✕", onclick: () => store.deleteView(view.id) }),
+          remove,
         ]);
       }),
     );
     if (!store.views.length) {
-      list.append(el("li", { class: "view-empty", text: "No views yet." }));
+      list.append(el("li", { class: "view-empty", text: "No views yet — place one on the map." }));
     }
   }
 
-  function renderEditor() {
-    const view = store.selectedView();
+  function poseSlider(labelText, value, min, max, step, unit, viewId, toChange) {
+    const output = el("output", { text: formatNumber(value, unit) });
+    const input = el("input", {
+      type: "range",
+      min: String(min),
+      max: String(max),
+      step: String(step),
+      value: String(value),
+      oninput: () => {
+        output.textContent = formatNumber(Number(input.value), unit);
+        schedulePatch(viewId, toChange(Number(input.value)));
+      },
+    });
+    return el("label", { class: "field" }, [el("span", { text: labelText }), input, output]);
+  }
+
+  function rebuildEditor(view) {
     if (!view || !view.true_extrinsics) {
       editor.replaceChildren();
+      solvesHost = null;
       return;
     }
     const ext = view.true_extrinsics;
-    const slider = (labelText, value, min, max, step, unit, onChange) => {
-      const output = el("output", { text: `${formatNumber(value, unit)}` });
-      const input = el("input", {
-        type: "range",
-        min: String(min),
-        max: String(max),
-        step: String(step),
-        value: String(value),
-        oninput: () => {
-          output.textContent = formatNumber(Number(input.value), unit);
-          schedulePatch(view.id, onChange(Number(input.value)));
-        },
-      });
-      return el("label", { class: "field" }, [el("span", { text: labelText }), input, output]);
-    };
+
+    const strategies = store.scene?.strategies ?? [];
+    if (!strategyChoice || !strategies.some((s) => s.name === strategyChoice)) {
+      strategyChoice = store.scene?.config.default_strategy ?? strategies[0]?.name ?? "powell";
+    }
+    const strategySelect = el(
+      "wa-select",
+      { label: "Solver", size: "s", value: strategyChoice },
+      strategies.map((s) => el("wa-option", { value: s.name, text: s.label })),
+    );
+    strategySelect.addEventListener("change", () => {
+      strategyChoice = strategySelect.value;
+    });
+
+    const runButton = el("wa-button", { variant: "brand", appearance: "accent", size: "s", text: "Run solver" });
+    runButton.addEventListener("click", () => runSolve(view.id, strategySelect, runButton));
+
+    const priorSwitch = el("wa-switch", { size: "s", text: "Position prior", hint: "Off: recover position from the skyline alone" });
+    if (positionPriorChoice) {
+      priorSwitch.setAttribute("checked", "");
+    }
+    priorSwitch.addEventListener("change", () => {
+      positionPriorChoice = priorSwitch.checked;
+    });
+
+    runStatus = el("p", { class: "control-hint" });
+    solvesHost = el("ul", { class: "solve-list" });
 
     editor.replaceChildren(
       el("div", { class: "control-block compact" }, [
-        el("strong", { text: view.label }),
-        slider("Yaw", ext.yaw_deg, -180, 180, 1, "deg", (v) => ({ yaw_deg: v })),
-        slider("Pitch", ext.pitch_deg, -30, 30, 0.5, "deg", (v) => ({ pitch_deg: v })),
-        slider("Eye height", view.eye_height_m, 0, 1000, 10, "m", (v) => ({ eye_height_m: v })),
+        el("strong", { class: "editor-title", text: view.label }),
+        poseSlider("Yaw", ext.yaw_deg, -180, 180, 1, "deg", view.id, (v) => ({ yaw_deg: v })),
+        poseSlider("Pitch", ext.pitch_deg, -30, 30, 0.5, "deg", view.id, (v) => ({ pitch_deg: v })),
+        poseSlider("Eye height", view.eye_height_m, 0, 1000, 10, "m", view.id, (v) => ({ eye_height_m: v })),
         el("p", { class: "control-hint", text: `East ${Math.round(ext.position.east_m)} m · North ${Math.round(ext.position.north_m)} m` }),
+        el("wa-divider"),
+        el("span", { class: "control-eyebrow", text: "Solve" }),
+        el("div", { class: "solve-actions" }, [strategySelect, runButton]),
+        el("div", { class: "solve-option" }, [priorSwitch]),
+        runStatus,
+        solvesHost,
       ]),
     );
+    renderSolves(view);
+  }
+
+  function renderSolves(view) {
+    if (!solvesHost) {
+      return;
+    }
+    const solves = view.solves;
+    solvesHost.replaceChildren(
+      ...solves.map((summary) => {
+        const selected = summary.id === store.selectedSolveId;
+        const remove = el("button", { type: "button", class: "icon-button", title: "Delete solve", text: "✕" });
+        remove.addEventListener("click", (event) => {
+          event.stopPropagation();
+          store.deleteSolve(view.id, summary.id);
+        });
+        const yawErr = summary.metrics.yaw_error_deg;
+        const mae = summary.metrics.contour_mae_px;
+        return el("li", { class: selected ? "solve-row selected" : "solve-row" }, [
+          el("button", { type: "button", class: "solve-name", onclick: () => store.selectSolve(view.id, summary.id) }, [
+            el("span", { class: "solve-strategy", text: strategyLabel(summary.strategy) }),
+            el("span", { class: "solve-stat", text: `yaw ${formatNumber(yawErr, "°")} · fit ${formatNumber(mae, "px")}` }),
+          ]),
+          remove,
+        ]);
+      }),
+    );
+    if (!solves.length) {
+      solvesHost.append(el("li", { class: "view-empty", text: "No solves yet — run one above." }));
+    }
+  }
+
+  function strategyLabel(name) {
+    return store.scene?.strategies.find((s) => s.name === name)?.label ?? name;
+  }
+
+  async function runSolve(viewId, strategySelect, runButton) {
+    runButton.disabled = true;
+    runButton.setAttribute("loading", "");
+    runStatus.textContent = `Solving with ${strategyLabel(strategySelect.value)}…`;
+    try {
+      const solve = await store.runSolve(viewId, strategySelect.value, { position_prior: positionPriorChoice });
+      runStatus.textContent = `Converged in ${solve.result.evaluations} evaluations.`;
+    } catch (error) {
+      runStatus.textContent = error.message;
+    } finally {
+      runButton.disabled = false;
+      runButton.removeAttribute("loading");
+    }
   }
 
   function schedulePatch(viewId, changes) {
     clearTimeout(patchTimer);
     patchTimer = setTimeout(() => {
       store.patchView(viewId, changes).catch((error) => {
-        hint.textContent = error.message;
+        if (runStatus) {
+          runStatus.textContent = error.message;
+        }
       });
     }, PATCH_DEBOUNCE_MS);
   }
 
+  function render() {
+    renderList();
+    const view = store.selectedView();
+    if (view?.id !== editorViewId) {
+      editorViewId = view?.id;
+      rebuildEditor(view);
+    } else if (view) {
+      renderSolves(view);
+    }
+  }
+
   store.on("placing", renderPlacing);
-  store.on("views", renderList);
-  store.on("views", renderEditor);
-  store.on("selection", renderList);
-  store.on("selection", renderEditor);
+  store.on("views", render);
+  store.on("selection", render);
   renderPlacing();
-  renderList();
-  renderEditor();
+  render();
 }

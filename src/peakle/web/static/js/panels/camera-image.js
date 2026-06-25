@@ -13,8 +13,9 @@ export function setupCameraPanel(store, root) {
   const box = el("div", { class: "frame-box camera-box" }, [image, overlay]);
   const placeholder = el("p", { class: "control-hint", text: "Select or place a view to see its image." });
   const legend = el("div", { class: "camera-image-legend" }, [
-    el("span", { html: '<i class="observed-swatch"></i>Observed contour' }),
-    el("span", { html: '<i class="predicted-swatch"></i>Predicted contour' }),
+    el("span", { html: '<i class="observed-swatch"></i>Observed (truth)' }),
+    el("span", { html: '<i class="predicted-swatch"></i>Predicted' }),
+    el("span", { html: '<i class="diff-swatch"></i>Difference' }),
   ]);
   root.replaceChildren(el("div", { class: "camera-frame" }, [box]), legend, placeholder);
 
@@ -50,37 +51,47 @@ export function setupCameraPanel(store, root) {
   function drawOverlay(view, fit) {
     const elements = [];
     const observed = view.contour;
-    if (observed && observed.points.length > 1) {
-      const points = observed.points
-        .map((p) => `${((p.x_px / observed.image_width_px) * fit.width).toFixed(1)},${((p.y_px / observed.image_height_px) * fit.height).toFixed(1)}`)
-        .join(" ");
-      elements.push(svgElement("polyline", { class: "observed-line", points }));
-    }
+    const observedPoints =
+      observed && observed.points.length > 1
+        ? observed.points.map((p) => [(p.x_px / observed.image_width_px) * fit.width, (p.y_px / observed.image_height_px) * fit.height])
+        : null;
 
+    let predictedPoints = null;
     const solve = store.selectedSolve();
     if (solve && view.solves.some((s) => s.id === solve.id)) {
       const result = solve.result;
-      const frame = result.trace[result.trace.length - 1];
-      const predicted = profilePolyline(frame.profile, result.sample_width, result.sample_height, fit);
-      if (predicted) {
-        elements.push(svgElement("polyline", { class: "predicted-line", points: predicted }));
-      }
+      // Full-resolution prediction so the contour is as crisp as the observed one.
+      predictedPoints = profilePoints(result.predicted_profile_full, view.intrinsics.width_px, view.intrinsics.height_px, fit);
+    }
+
+    // Shade the difference between ground-truth (observed) and predicted skylines.
+    if (observedPoints && predictedPoints && predictedPoints.length > 1) {
+      const polygon = observedPoints.concat([...predictedPoints].reverse());
+      elements.push(svgElement("polygon", { class: "diff-fill", points: toPointString(polygon) }));
+    }
+    if (observedPoints) {
+      elements.push(svgElement("polyline", { class: "observed-line", points: toPointString(observedPoints) }));
+    }
+    if (predictedPoints && predictedPoints.length > 1) {
+      elements.push(svgElement("polyline", { class: "predicted-line", points: toPointString(predictedPoints) }));
     }
     overlay.replaceChildren(...elements);
   }
 
-  function profilePolyline(profile, sampleWidth, sampleHeight, fit) {
+  function profilePoints(profile, sampleWidth, sampleHeight, fit) {
     const points = [];
     for (let col = 0; col < profile.length; col += 1) {
       const value = profile[col];
       if (value === null || value === undefined) {
         continue;
       }
-      const x = (col / (sampleWidth - 1)) * fit.width;
-      const y = (value / sampleHeight) * fit.height;
-      points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+      points.push([(col / (sampleWidth - 1)) * fit.width, (value / sampleHeight) * fit.height]);
     }
-    return points.length > 1 ? points.join(" ") : null;
+    return points;
+  }
+
+  function toPointString(points) {
+    return points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
   }
 
   const resizeObserver = new ResizeObserver(() => layoutAndDraw());

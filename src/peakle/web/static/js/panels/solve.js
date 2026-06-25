@@ -1,84 +1,62 @@
 "use strict";
 
-// Solve inspector: pick a strategy, run it, and watch the backend's convergence
-// trace animate (no solver runs in the browser). Lists the view's past solves
-// so different strategies can be compared on the same view.
+// Solve inspector: read-only detail for the currently selected solve. Animates
+// the backend's convergence trace, shows fit/error metrics, and overlays the
+// observed vs. predicted skyline. Running solvers and picking among them lives
+// in the Views panel.
 
 import { angleDeltaDeg, distanceMeters } from "../geometry.js";
-import { el, formatNumber, svgElement } from "../format.js";
+import { el, formatDistance, formatNumber, svgElement } from "../format.js";
 
 export function setupSolvePanel(store, root) {
-  const strategy = el("select");
+  root.classList.add("solve-panel");
   const blurb = el("p", { class: "control-hint" });
-  const runButton = el("button", { type: "button", class: "primary", text: "Run solver", onclick: () => run() });
-  const status = el("p", { class: "control-hint", text: "Select a view, then run a solver." });
+  const status = el("p", { class: "control-hint", text: "Select a solve in the Views panel to inspect it." });
 
   const readouts = {
+    confidence: metric("Confidence"),
     yaw: metric("Yaw error"),
     pitch: metric("Pitch error"),
-    position: metric("Position error"),
-    score: metric("Objective"),
+    position: metric("Position"),
+    fit: metric("Fit MAE"),
     evals: metric("Evaluations"),
   };
   const plot = svgElement("svg", { class: "solve-plot" });
   plot.setAttribute("preserveAspectRatio", "none");
-  const solveList = el("ul", { class: "solve-list" });
-
-  strategy.addEventListener("change", () => updateBlurb());
 
   root.replaceChildren(
     el("div", { class: "control-block" }, [
       el("span", { class: "control-eyebrow", text: "Solve inspector" }),
-      el("label", { class: "field" }, [el("span", { text: "Strategy" }), strategy]),
       blurb,
-      el("div", { class: "align-actions" }, [runButton]),
       status,
       el("dl", { class: "metric-grid" }, Object.values(readouts).map((m) => m.node)),
-      el("div", { class: "solve-plot-wrap" }, [plot]),
-      el("div", { class: "control-eyebrow", text: "Solves" }),
-      solveList,
+      el("div", { class: "solve-plot-wrap" }, [
+        plot,
+        el("div", { class: "solve-plot-legend" }, [
+          el("span", { html: '<i class="observed-swatch"></i>Observed' }),
+          el("span", { html: '<i class="predicted-swatch"></i>Predicted' }),
+        ]),
+      ]),
     ]),
   );
 
   let animation = 0;
+  let shownSolveId = null;
 
   function metric(label) {
     const value = el("dd", { text: "-" });
     return { node: el("div", {}, [el("dt", { text: label }), value]), value };
   }
 
-  function updateStrategies() {
-    if (!store.scene) {
-      return;
-    }
-    const previous = strategy.value;
-    strategy.replaceChildren(...store.scene.strategies.map((s) => new Option(s.label, s.name)));
-    strategy.value = previous || store.scene.config.default_strategy;
-    updateBlurb();
+  function strategyBlurb(name) {
+    return store.scene?.strategies.find((s) => s.name === name)?.blurb ?? "";
   }
 
-  function updateBlurb() {
-    const meta = store.scene?.strategies.find((s) => s.name === strategy.value);
-    blurb.textContent = meta ? meta.blurb : "";
-  }
-
-  async function run() {
-    const view = store.selectedView();
-    if (!view) {
-      status.textContent = "Place or select a view first.";
-      return;
+  function clearReadouts() {
+    for (const readout of Object.values(readouts)) {
+      readout.value.textContent = "-";
     }
-    runButton.disabled = true;
-    status.textContent = `Solving with ${strategy.value}…`;
-    try {
-      const solve = await store.runSolve(view.id, strategy.value, {});
-      animate(solve, view);
-      status.textContent = `Converged in ${solve.result.evaluations} evaluations.`;
-    } catch (error) {
-      status.textContent = error.message;
-    } finally {
-      runButton.disabled = false;
-    }
+    plot.replaceChildren();
   }
 
   function animate(solve, view) {
@@ -86,11 +64,12 @@ export function setupSolvePanel(store, root) {
     const frames = solve.result.trace;
     let index = 0;
     const step = () => {
-      const frame = frames[index];
-      showFrame(frame, solve.result, view);
+      showFrame(frames[index], solve.result, view);
       if (index < frames.length - 1) {
         index += 1;
         animation = requestAnimationFrame(step);
+      } else {
+        showFinal(solve, view);
       }
     };
     step();
@@ -99,16 +78,26 @@ export function setupSolvePanel(store, root) {
   function showFrame(frame, result, view) {
     const truth = view.true_extrinsics;
     if (truth) {
-      readouts.yaw.value.textContent = formatNumber(angleDeltaDeg(frame.yaw_deg, truth.yaw_deg), "deg");
-      readouts.pitch.value.textContent = formatNumber(Math.abs(frame.pitch_deg - truth.pitch_deg), "deg");
-      readouts.position.value.textContent = formatNumber(
+      readouts.yaw.value.textContent = formatNumber(angleDeltaDeg(frame.yaw_deg, truth.yaw_deg), "°");
+      readouts.pitch.value.textContent = formatNumber(Math.abs(frame.pitch_deg - truth.pitch_deg), "°");
+      readouts.position.value.textContent = formatDistance(
         distanceMeters({ east_m: frame.east_m, north_m: frame.north_m, up_m: frame.up_m }, truth.position),
-        "m",
       );
     }
-    readouts.score.value.textContent = formatNumber(frame.score, "px");
+    readouts.fit.value.textContent = formatNumber(frame.score, "px");
     readouts.evals.value.textContent = String(frame.evaluations);
     drawPlot(result.observed_profile, frame.profile, result.sample_width, result.sample_height);
+  }
+
+  function showFinal(solve, view) {
+    const m = solve.result.estimate.metrics;
+    readouts.confidence.value.textContent = m.confidence == null ? "-" : `${Math.round(m.confidence * 100)}%`;
+    readouts.yaw.value.textContent = m.yaw_error_deg == null ? "-" : formatNumber(m.yaw_error_deg, "°");
+    readouts.pitch.value.textContent = m.pitch_error_deg == null ? "-" : formatNumber(m.pitch_error_deg, "°");
+    readouts.position.value.textContent = m.position_error_m == null ? "-" : formatDistance(m.position_error_m);
+    readouts.fit.value.textContent = formatNumber(m.contour_mae_px, "px");
+    readouts.evals.value.textContent = String(solve.result.evaluations);
+    drawPlot(solve.result.observed_profile, solve.result.predicted_profile, solve.result.sample_width, solve.result.sample_height);
   }
 
   function drawPlot(observed, predicted, sampleWidth, sampleHeight) {
@@ -129,48 +118,30 @@ export function setupSolvePanel(store, root) {
     plot.replaceChildren(...[line(observed, "observed-line"), line(predicted, "predicted-line")].filter(Boolean));
   }
 
-  function renderSolveList() {
-    const view = store.selectedView();
-    const solves = view ? view.solves : [];
-    solveList.replaceChildren(
-      ...solves.map((summary) => {
-        const selected = summary.id === store.selectedSolveId;
-        const yawErr = summary.metrics.yaw_error_deg;
-        return el("li", { class: selected ? "solve-row selected" : "solve-row" }, [
-          el("button", {
-            type: "button",
-            class: "solve-name",
-            text: `${summary.strategy} · yaw ${formatNumber(yawErr, "deg")}`,
-            onclick: () => store.selectSolve(view.id, summary.id),
-          }),
-          el("button", { type: "button", class: "icon-button", title: "Delete", text: "✕", onclick: () => store.deleteSolve(view.id, summary.id) }),
-        ]);
-      }),
-    );
-    if (!solves.length) {
-      solveList.append(el("li", { class: "view-empty", text: "No solves yet." }));
-    }
-  }
-
   function renderSelection() {
-    renderSolveList();
     const view = store.selectedView();
     const solve = store.selectedSolve();
     if (view && solve && view.solves.some((s) => s.id === solve.id)) {
-      cancelAnimationFrame(animation);
-      const result = solve.result;
-      showFrame(result.trace[result.trace.length - 1], result, view);
-    } else if (!solve) {
-      for (const readout of Object.values(readouts)) {
-        readout.value.textContent = "-";
+      blurb.textContent = strategyBlurb(solve.strategy);
+      status.textContent = `${strategyLabel(solve.strategy)} · ${solve.result.evaluations} evaluations`;
+      if (solve.id !== shownSolveId) {
+        shownSolveId = solve.id;
+        animate(solve, view);
       }
-      plot.replaceChildren();
+    } else {
+      shownSolveId = null;
+      cancelAnimationFrame(animation);
+      blurb.textContent = "";
+      status.textContent = view ? "Run or pick a solve in the Views panel to inspect it." : "Select a view first.";
+      clearReadouts();
     }
   }
 
-  store.on("scene", updateStrategies);
-  store.on("views", renderSolveList);
+  function strategyLabel(name) {
+    return store.scene?.strategies.find((s) => s.name === name)?.label ?? name;
+  }
+
+  store.on("scene", renderSelection);
   store.on("selection", renderSelection);
-  updateStrategies();
   renderSelection();
 }

@@ -10,9 +10,12 @@ import { cameraTargetScenePoint, localToScenePoint } from "../../geometry.js";
 import { createFovOverlay } from "./fov.js";
 import { createLabel } from "./terrain-mesh.js";
 
-export const TRUE_COLOR = 0x3b82f6;
+export const TRUE_COLOR = 0x53c6ff;
 export const PREDICTED_COLOR = 0xff8c42;
 
+// A compact, legible camera glyph: a vertical stem to the ground for depth, a
+// bright core sphere, and a cone pointing where the camera looks. Reads cleanly
+// at map scale where the old box+lens+wireframe glyph turned to mush.
 export function createCameraMarker(extrinsics, frame, color, labelText, roleClass) {
   const position = localToScenePoint(extrinsics.position, frame);
   position.y += 0.012;
@@ -22,54 +25,52 @@ export function createCameraMarker(extrinsics, frame, color, labelText, roleClas
   const group = new THREE.Group();
   group.position.copy(position);
 
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.4, roughness: 0.45 });
-  const lensMaterial = new THREE.MeshStandardMaterial({ color: 0x11130f, emissive: 0x0b1215, emissiveIntensity: 0.25, roughness: 0.25 });
+  const stemMaterial = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.7 });
+  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 0.085, 6), stemMaterial);
+  stem.position.y = -0.0425;
+  group.add(stem);
 
-  const marker = new THREE.Group();
-  marker.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), forward);
-  marker.add(new THREE.Mesh(new THREE.BoxGeometry(0.088, 0.052, 0.04), bodyMaterial));
-  const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.021, 0.032, 24), lensMaterial);
-  lens.rotation.x = Math.PI / 2;
-  lens.position.z = 0.036;
-  marker.add(lens);
-  marker.add(createFrustumGlyph(color));
-  group.add(marker);
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.015, 18, 18), new THREE.MeshBasicMaterial({ color }));
+  group.add(core);
 
-  const standMaterial = new THREE.MeshStandardMaterial({ color: 0x0e100d, emissive: color, emissiveIntensity: 0.18, roughness: 0.55 });
-  const stand = new THREE.Mesh(new THREE.CylinderGeometry(0.005, 0.006, 0.072, 8), standMaterial);
-  stand.position.y = -0.038;
-  group.add(stand);
+  // Cone points along +Y by default; aim it down the camera's view direction.
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(0.026, 0.075, 22),
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.6, roughness: 0.35 }),
+  );
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), forward);
+  cone.position.copy(forward.clone().multiplyScalar(0.05));
+  group.add(cone);
 
   if (labelText) {
     const label = createLabel(labelText, `camera-label ${roleClass}`);
-    label.position.set(0, 0.09, 0);
+    label.position.set(0, 0.085, 0);
     label.userData.occlusionAnchor = group;
     group.add(label);
   }
   return group;
 }
 
-function createFrustumGlyph(color) {
-  const originZ = 0.058;
-  const farZ = 0.18;
-  const halfWidth = 0.062;
-  const halfHeight = 0.04;
-  const vertices = new Float32Array([
-    0, 0, originZ, -halfWidth, -halfHeight, farZ,
-    0, 0, originZ, halfWidth, -halfHeight, farZ,
-    0, 0, originZ, halfWidth, halfHeight, farZ,
-    0, 0, originZ, -halfWidth, halfHeight, farZ,
-    -halfWidth, -halfHeight, farZ, halfWidth, -halfHeight, farZ,
-    halfWidth, -halfHeight, farZ, halfWidth, halfHeight, farZ,
-    halfWidth, halfHeight, farZ, -halfWidth, halfHeight, farZ,
-    -halfWidth, halfHeight, farZ, -halfWidth, -halfHeight, farZ,
-  ]);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
-  return new THREE.LineSegments(
-    geometry,
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95, depthWrite: false }),
+// A small dim glyph for an alternative candidate location from a prior-free
+// search; the primary prediction keeps the full marker + label.
+function createCandidateMarker(extrinsics, frame, color) {
+  const position = localToScenePoint(extrinsics.position, frame);
+  position.y += 0.012;
+  const target = cameraTargetScenePoint(extrinsics, frame);
+  const forward = target.clone().sub(position).normalize();
+  const group = new THREE.Group();
+  group.position.copy(position);
+  group.add(
+    new THREE.Mesh(new THREE.SphereGeometry(0.01, 12, 12), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55 })),
   );
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(0.016, 0.04, 14),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45 }),
+  );
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), forward);
+  cone.position.copy(forward.clone().multiplyScalar(0.03));
+  group.add(cone);
+  return group;
 }
 
 // Rebuilds the dynamic layer for the current selection: a small marker for every
@@ -93,13 +94,17 @@ export function buildSelectionLayer(terrain, frame, views, selectedViewId, selec
       group.add(marker);
       continue;
     }
-    group.add(createCameraMarker(view.true_extrinsics, frame, TRUE_COLOR, `${view.label} · true`, "true-camera"));
+    group.add(createCameraMarker(view.true_extrinsics, frame, TRUE_COLOR, `${view.label} · True`, "true-camera"));
     group.add(createFovOverlay(terrain, frame, view.true_extrinsics, view.intrinsics, TRUE_COLOR));
 
     if (selectedSolve && view.solves.some((s) => s.id === selectedSolve.id)) {
       const predicted = selectedSolve.result.estimate.extrinsics;
-      group.add(createCameraMarker(predicted, frame, PREDICTED_COLOR, "predicted", "predicted-camera"));
+      group.add(createCameraMarker(predicted, frame, PREDICTED_COLOR, "Predicted", "predicted-camera"));
       group.add(createFovOverlay(terrain, frame, predicted, view.intrinsics, PREDICTED_COLOR));
+      // Other plausible locations from a prior-free search ("find all of them").
+      for (const candidate of (selectedSolve.result.candidates ?? []).slice(1)) {
+        group.add(createCandidateMarker(candidate.extrinsics, frame, PREDICTED_COLOR));
+      }
     }
   }
   return group;

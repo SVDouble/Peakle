@@ -9,7 +9,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 
 import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame, verticalFovDeg } from "../../geometry.js";
-import { el } from "../../format.js";
+import { el, fitContainBox } from "../../format.js";
 import { buildSelectionLayer } from "./cameras.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
@@ -21,7 +21,12 @@ const LABEL_OCCLUSION_MARGIN = 0.018;
 export function setupMapPanel(store, root) {
   root.classList.add("map-panel");
   const canvas = el("canvas", { id: "mapCanvas" });
-  const frameBox = el("div", { class: "frame-box", id: "mapFrameBox" }, [canvas]);
+  // The canvas + labels live in a viewport box that fills the panel in map mode
+  // and shrinks to the camera image's aspect ratio in POV modes (letterboxing),
+  // so the through-the-lens framing matches the rendered image instead of being
+  // cropped to the panel's shape.
+  const viewport = el("div", { class: "map-viewport" }, [canvas]);
+  const frameBox = el("div", { class: "frame-box", id: "mapFrameBox" }, [viewport]);
   const hint = el("p", { class: "control-hint", id: "mapHint" });
   const povControls = el(
     "div",
@@ -53,24 +58,39 @@ export function setupMapPanel(store, root) {
 
   const labelRenderer = new CSS2DRenderer();
   labelRenderer.domElement.className = "label-layer";
-  frameBox.append(labelRenderer.domElement);
+  viewport.append(labelRenderer.domElement);
 
+  // Blender-style navigation: orbit on left/middle drag, screen-space pan on
+  // right drag, zoom toward the cursor, and (nearly) full vertical orbit.
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.copy(CAMERA_TARGET);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
+  controls.dampingFactor = 0.06;
   controls.minDistance = 0.08;
-  controls.maxDistance = 4.8;
-  controls.minPolarAngle = 0.12;
-  controls.maxPolarAngle = Math.PI / 2 - 0.05;
+  controls.maxDistance = 6.0;
+  controls.minPolarAngle = 0.02;
+  controls.maxPolarAngle = Math.PI - 0.05;
+  controls.screenSpacePanning = true;
+  controls.zoomToCursor = true;
+  controls.rotateSpeed = 0.85;
+  controls.panSpeed = 0.8;
+  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.PAN };
+  controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
 
   let frame = null;
   let terrainGroup = null;
   let terrainMesh = null;
+  let terrainControls = null;
   let peakLabels = [];
+  let selectionLabels = [];
   let selectionLayer = null;
   let mode = "map";
+  // Two raycasters: `raycaster` stays unbounded for click-to-place picking, while
+  // `occlusionRaycaster` gets its near/far rewritten every frame for label hiding.
+  // Sharing one caused placement to fail, since the stale short `far` left by the
+  // occlusion pass clipped the pick ray before it reached the terrain.
   const raycaster = new THREE.Raycaster();
+  const occlusionRaycaster = new THREE.Raycaster();
 
   function rebuildTerrain() {
     if (!store.terrain) {
@@ -83,12 +103,22 @@ export function setupMapPanel(store, root) {
       scene.remove(label);
     }
     frame = terrainFrame(store.terrain);
-    const built = createTerrainGroup(store.terrain, frame);
+    const built = createTerrainGroup(store.terrain, frame, store.peaks);
     terrainGroup = built.group;
     terrainMesh = built.mesh;
+    terrainControls = built;
     scene.add(terrainGroup);
+    applyDisplay();
     peakLabels = addPeakLabels(scene, store.peaks, frame);
     rebuildSelection();
+  }
+
+  function applyDisplay() {
+    if (!terrainControls) {
+      return;
+    }
+    terrainControls.setShadingMode(store.display.shadingMode);
+    terrainControls.setContours(store.display.contours);
   }
 
   function rebuildSelection() {
@@ -96,10 +126,20 @@ export function setupMapPanel(store, root) {
       return;
     }
     if (selectionLayer) {
+      // The camera labels are CSS2DObjects nested inside marker groups, so
+      // removing the layer group does not fire their own `removed` event and
+      // their DOM nodes would otherwise leak. Detach them explicitly.
+      disposeLabelElements(selectionLayer);
       scene.remove(selectionLayer);
     }
     selectionLayer = buildSelectionLayer(store.terrain, frame, store.views, store.selectedViewId, store.selectedSolve());
     scene.add(selectionLayer);
+    selectionLabels = [];
+    selectionLayer.traverse((object) => {
+      if (object.isCSS2DObject) {
+        selectionLabels.push(object);
+      }
+    });
     if (mode !== "map") {
       applyPov(mode);
     }
@@ -124,7 +164,7 @@ export function setupMapPanel(store, root) {
       camera.position.copy(CAMERA_INITIAL_POSITION);
       controls.target.copy(CAMERA_TARGET);
       controls.update();
-      camera.updateProjectionMatrix();
+      resize();
       hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view and choose a POV.";
       return;
     }
@@ -133,8 +173,17 @@ export function setupMapPanel(store, root) {
     camera.position.copy(localToScenePoint(pose.position, frame));
     camera.up.set(0, 1, 0);
     camera.lookAt(cameraTargetScenePoint(pose, frame));
-    camera.updateProjectionMatrix();
+    // resize() recomputes the letterbox box for the new mode and sets the matching aspect.
+    resize();
     hint.textContent = `Looking through the ${nextMode} camera of ${view.label}.`;
+  }
+
+  function disposeLabelElements(root) {
+    root.traverse((object) => {
+      if (object.isCSS2DObject && object.element?.parentNode) {
+        object.element.remove();
+      }
+    });
   }
 
   function syncPovButtons() {
@@ -198,7 +247,7 @@ export function setupMapPanel(store, root) {
     const target = new THREE.Vector3();
     const direction = new THREE.Vector3();
     const projected = new THREE.Vector3();
-    for (const label of peakLabels) {
+    for (const label of [...peakLabels, ...selectionLabels]) {
       const anchor = label.userData.occlusionAnchor ?? label;
       anchor.getWorldPosition(target);
       projected.copy(target).project(camera);
@@ -209,22 +258,37 @@ export function setupMapPanel(store, root) {
         const rayLength = distance - LABEL_OCCLUSION_MARGIN;
         if (rayLength > camera.near) {
           direction.copy(target).sub(cameraPosition).normalize();
-          raycaster.set(cameraPosition, direction);
-          raycaster.near = camera.near;
-          raycaster.far = rayLength;
-          occluded = raycaster.intersectObject(terrainMesh, false).length > 0;
+          occlusionRaycaster.set(cameraPosition, direction);
+          occlusionRaycaster.near = camera.near;
+          occlusionRaycaster.far = rayLength;
+          occluded = occlusionRaycaster.intersectObject(terrainMesh, false).length > 0;
         }
       }
       label.visible = inView && !occluded;
     }
   }
 
-  function resize() {
+  function viewportBox() {
     const width = Math.max(1, frameBox.clientWidth);
     const height = Math.max(1, frameBox.clientHeight);
-    renderer.setSize(width, height, false);
-    labelRenderer.setSize(width, height);
-    camera.aspect = width / height;
+    if (mode !== "map") {
+      const view = store.selectedView();
+      if (view?.intrinsics) {
+        return fitContainBox(width, height, view.intrinsics.width_px / view.intrinsics.height_px);
+      }
+    }
+    return { width, height, left: 0, top: 0 };
+  }
+
+  function resize() {
+    const box = viewportBox();
+    viewport.style.left = `${box.left}px`;
+    viewport.style.top = `${box.top}px`;
+    viewport.style.width = `${box.width}px`;
+    viewport.style.height = `${box.height}px`;
+    renderer.setSize(box.width, box.height, false);
+    labelRenderer.setSize(box.width, box.height);
+    camera.aspect = box.width / box.height;
     camera.updateProjectionMatrix();
   }
 
@@ -243,9 +307,11 @@ export function setupMapPanel(store, root) {
   });
 
   store.on("scene", rebuildTerrain);
+  store.on("display", applyDisplay);
   store.on("views", rebuildSelection);
   store.on("selection", rebuildSelection);
   store.on("placing", () => {
+    viewport.classList.toggle("placing", store.placing);
     if (mode === "map") {
       hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view and choose a POV.";
     }

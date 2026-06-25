@@ -16,6 +16,9 @@ class Store {
     this.selectedSolveId = null;
     this.placing = false;
     this.solveCache = new Map();
+    // Client-side map appearance, applied live by the viewer (never round-trips
+    // to the server). `shadingMode` is one of terrain-mesh.js' SHADING_MODES ids.
+    this.display = { shadingMode: "relief", contours: true };
     this._listeners = new Map();
   }
 
@@ -135,6 +138,11 @@ class Store {
   setPlacing(active) {
     this.placing = active;
     this.emit("placing");
+  }
+
+  setDisplay(changes) {
+    this.display = { ...this.display, ...changes };
+    this.emit("display");
   }
 
   async runSolve(viewId, strategy, params) {
