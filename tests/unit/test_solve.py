@@ -9,6 +9,10 @@ import pytest
 from peakle.optimization.solve import STRATEGIES
 from peakle.scene.scene import Scene
 
+# `global` is prior-free and intentionally searches the whole map; on a tiny test
+# scene its skyline match is ambiguous, so it is covered by a looser smoke test.
+PRIOR_STRATEGIES = tuple(strategy for strategy in STRATEGIES if strategy != "global")
+
 
 def _place_near_prominent_peak(scene: Scene):
     peak = max(scene.peaks, key=lambda candidate: candidate.prominence_m)
@@ -18,7 +22,7 @@ def _place_near_prominent_peak(scene: Scene):
     return scene.create_view(east_m, north_m, yaw_deg=yaw_deg, pitch_deg=3.0)
 
 
-@pytest.mark.parametrize("strategy", STRATEGIES)
+@pytest.mark.parametrize("strategy", PRIOR_STRATEGIES)
 def test_solver_recovers_heading(scene: Scene, strategy: str) -> None:
     view = _place_near_prominent_peak(scene)
 
@@ -34,6 +38,19 @@ def test_solver_recovers_heading(scene: Scene, strategy: str) -> None:
     assert metrics.yaw_error_deg is not None
     assert metrics.yaw_error_deg < 6.0
     assert math.isfinite(metrics.contour_mae_px)
+    # A good fit reports a meaningful confidence in [0, 1].
+    assert metrics.confidence is not None
+    assert 0.0 <= metrics.confidence <= 1.0
+
+
+def test_global_strategy_runs_prior_free(scene: Scene) -> None:
+    view = _place_near_prominent_peak(scene)
+    solve = scene.run_solve(view.id, "global", {})
+    result = solve.result
+    assert result.strategy == "global"
+    assert result.trace, "expected a non-empty convergence trace"
+    assert math.isfinite(result.estimate.metrics.contour_mae_px)
+    assert result.estimate.metrics.yaw_error_deg is not None
 
 
 def test_solves_accumulate_on_a_view(scene: Scene) -> None:

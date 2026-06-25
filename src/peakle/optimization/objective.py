@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.ndimage import map_coordinates
 
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import LocalPoint
@@ -17,6 +18,25 @@ type PoseTheta = NDArray[np.float64]
 HORIZONTAL_POSITION_WEIGHT = 1.4
 VERTICAL_POSITION_WEIGHT = 0.8
 ORIENTATION_WEIGHT = 0.35
+# The fast skyline takes the topmost projected point per column, which misses
+# sub-grid silhouette edges; upsampling the terrain grid ~2x closes that gap
+# (~3px vs the rasterized reference) while staying ~10x cheaper than rasterizing.
+POINT_UPSAMPLE_FACTOR = 2
+
+
+def dense_terrain_points(terrain: TerrainMap, factor: int) -> NDArray[np.float64]:
+    """Returns terrain points on a `factor`x-upsampled grid as an `(N, 3)` array."""
+
+    if factor <= 1:
+        return terrain.flattened_points(stride=1)
+    grid_height, grid_width = terrain.elevation_m.shape
+    rows = np.linspace(0.0, grid_height - 1, (grid_height - 1) * factor + 1)
+    cols = np.linspace(0.0, grid_width - 1, (grid_width - 1) * factor + 1)
+    row_grid, col_grid = np.meshgrid(rows, cols, indexing="ij")
+    elevation = map_coordinates(terrain.elevation_m, [row_grid.ravel(), col_grid.ravel()], order=1, mode="nearest")
+    east = np.interp(col_grid.ravel(), np.arange(grid_width), terrain.x_m)
+    north = np.interp(row_grid.ravel(), np.arange(grid_height), terrain.y_m)
+    return np.column_stack((east, north, elevation)).astype(np.float64)
 
 
 class PoseObjective:
@@ -38,6 +58,8 @@ class PoseObjective:
         prior: PosePrior,
         renderer: SyntheticRenderer,
         terrain_stride: int,
+        use_position_prior: bool = True,
+        use_orientation_prior: bool = True,
     ) -> None:
         self.terrain = terrain
         self.observed_profile = observed_profile
@@ -45,6 +67,14 @@ class PoseObjective:
         self.prior = prior
         self.renderer = renderer
         self.terrain_stride = terrain_stride
+        # Build the (upsampled) terrain points once; every score() reuses them for
+        # the fast point-projection skyline instead of re-flattening + rasterizing.
+        self._points = dense_terrain_points(terrain, POINT_UPSAMPLE_FACTOR)
+        # When False, position (resp. orientation) is recovered purely from the
+        # skyline: no penalty pulls it toward the prior and its bounds open up
+        # (whole terrain for position, full circle for yaw).
+        self.use_position_prior = use_position_prior
+        self.use_orientation_prior = use_orientation_prior
 
     def score(self, theta: PoseTheta) -> float:
         """Scores a candidate parameter vector.
@@ -57,12 +87,7 @@ class PoseObjective:
         """
 
         extrinsics = self.extrinsics_from_theta(theta)
-        predicted = self.renderer.skyline_profile(
-            self.terrain,
-            self.intrinsics,
-            extrinsics,
-            stride=self.terrain_stride,
-        )
+        predicted = self.renderer.fast_skyline(self._points, self.intrinsics, extrinsics)
         residuals = robust_contour_residuals(predicted, self.observed_profile)
         contour_loss = huber_mean(residuals, delta=8.0)
         return contour_loss + self._prior_penalty(theta)
@@ -96,8 +121,29 @@ class PoseObjective:
         )
 
     def bounds(self) -> list[tuple[float, float]]:
-        """Returns solver bounds around the prior."""
+        """Returns solver bounds: a box around the prior, or the whole terrain
+        for position when the position prior is disabled."""
 
+        if self.use_orientation_prior:
+            orientation_bounds = [
+                (
+                    self.prior.yaw_deg - 3.0 * self.prior.yaw_sigma_deg,
+                    self.prior.yaw_deg + 3.0 * self.prior.yaw_sigma_deg,
+                ),
+                (
+                    max(-45.0, self.prior.pitch_deg - 3.0 * self.prior.pitch_sigma_deg),
+                    min(45.0, self.prior.pitch_deg + 3.0 * self.prior.pitch_sigma_deg),
+                ),
+            ]
+        else:
+            orientation_bounds = [(-180.0, 180.0), (-45.0, 45.0)]
+        if not self.use_position_prior:
+            return [
+                (float(self.terrain.x_m[0]), float(self.terrain.x_m[-1])),
+                (float(self.terrain.y_m[0]), float(self.terrain.y_m[-1])),
+                (float(self.terrain.elevation_m.min()), float(self.terrain.elevation_m.max()) + 3000.0),
+                *orientation_bounds,
+            ]
         return [
             (
                 self.prior.position.east_m - 2.5 * self.prior.horizontal_sigma_m,
@@ -111,24 +157,18 @@ class PoseObjective:
                 self.prior.position.up_m - 2.5 * self.prior.vertical_sigma_m,
                 self.prior.position.up_m + 2.5 * self.prior.vertical_sigma_m,
             ),
-            (
-                self.prior.yaw_deg - 3.0 * self.prior.yaw_sigma_deg,
-                self.prior.yaw_deg + 3.0 * self.prior.yaw_sigma_deg,
-            ),
-            (
-                max(-45.0, self.prior.pitch_deg - 3.0 * self.prior.pitch_sigma_deg),
-                min(45.0, self.prior.pitch_deg + 3.0 * self.prior.pitch_sigma_deg),
-            ),
+            *orientation_bounds,
         ]
 
     def _prior_penalty(self, theta: PoseTheta) -> float:
-        dx = (theta[0] - self.prior.position.east_m) / self.prior.horizontal_sigma_m
-        dy = (theta[1] - self.prior.position.north_m) / self.prior.horizontal_sigma_m
-        dz = (theta[2] - self.prior.position.up_m) / self.prior.vertical_sigma_m
-        dyaw = (theta[3] - self.prior.yaw_deg) / self.prior.yaw_sigma_deg
-        dpitch = (theta[4] - self.prior.pitch_deg) / self.prior.pitch_sigma_deg
-        return float(
-            HORIZONTAL_POSITION_WEIGHT * (dx * dx + dy * dy)
-            + VERTICAL_POSITION_WEIGHT * dz * dz
-            + ORIENTATION_WEIGHT * (dyaw * dyaw + dpitch * dpitch)
-        )
+        penalty = 0.0
+        if self.use_orientation_prior:
+            dyaw = (theta[3] - self.prior.yaw_deg) / self.prior.yaw_sigma_deg
+            dpitch = (theta[4] - self.prior.pitch_deg) / self.prior.pitch_sigma_deg
+            penalty += ORIENTATION_WEIGHT * (dyaw * dyaw + dpitch * dpitch)
+        if self.use_position_prior:
+            dx = (theta[0] - self.prior.position.east_m) / self.prior.horizontal_sigma_m
+            dy = (theta[1] - self.prior.position.north_m) / self.prior.horizontal_sigma_m
+            dz = (theta[2] - self.prior.position.up_m) / self.prior.vertical_sigma_m
+            penalty += HORIZONTAL_POSITION_WEIGHT * (dx * dx + dy * dy) + VERTICAL_POSITION_WEIGHT * dz * dz
+        return float(penalty)

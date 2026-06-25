@@ -26,6 +26,8 @@ from peakle.optimization.solve import PoseSolveResult, solve_pose
 from peakle.rendering.rasterizer import RenderArrays, SyntheticRenderer
 from peakle.scene.providers import ProviderKind, build_provider
 from peakle.scene.state import build_intrinsics, noisy_prior
+from peakle.terrain.dem import DEFAULT_DEM_DIR
+from peakle.terrain.gazetteer import name_peaks_from_osm
 from peakle.terrain.peak_detection import PeakDetector
 
 DEFAULT_EYE_HEIGHT_M = 150.0
@@ -156,7 +158,7 @@ class Scene:
             terrain_spec=settings.terrain,
             peak_detection=settings.peak_detection,
         )
-        scene.peaks = PeakDetector(settings.peak_detection).detect(scene.terrain)
+        scene.peaks = scene._detect_peaks(scene.terrain)
         return scene
 
     def set_config(
@@ -179,7 +181,7 @@ class Scene:
             default_strategy=default_strategy,
         )
         self.terrain = _build_terrain(self.config, self._terrain_spec)
-        self.peaks = PeakDetector(self._peak_detection).detect(self.terrain)
+        self.peaks = self._detect_peaks(self.terrain)
         self.intrinsics = build_intrinsics(image_width, image_height, horizontal_fov_deg)
         self.views = {}
         self._view_counter = 0
@@ -250,6 +252,7 @@ class Scene:
             raise ValueError(msg)
         params = dict(params or {})
         seed = params.get("seed")
+        use_position_prior = bool(params.get("position_prior", True))
         self._solve_counter += 1
         result = solve_pose(
             terrain=self.terrain,
@@ -260,6 +263,7 @@ class Scene:
             terrain_stride=self.terrain_stride,
             truth=view.true_extrinsics,
             seed=seed,
+            use_position_prior=use_position_prior,
         )
         solve = Solve(
             id=f"solve-{self._solve_counter:02d}",
@@ -302,6 +306,21 @@ class Scene:
             contour=contour,
             render_arrays=render,
         )
+
+    def _detect_peaks(self, terrain: TerrainMap) -> list[Peak]:
+        """Detects prominent peaks; names them from OSM for real-DEM providers."""
+
+        peaks = PeakDetector(self._peak_detection).detect(terrain)
+        if self.config.provider == "srtm" and peaks:
+            pad = 0.01
+            bbox = (
+                float(terrain.latitude_deg.min()) - pad,
+                float(terrain.longitude_deg.min()) - pad,
+                float(terrain.latitude_deg.max()) + pad,
+                float(terrain.longitude_deg.max()) + pad,
+            )
+            peaks = name_peaks_from_osm(peaks, bbox, DEFAULT_DEM_DIR)
+        return peaks
 
     def _view_prior(self, view_id: str, extrinsics: CameraExtrinsics) -> PosePrior:
         index = int(view_id.rsplit("-", 1)[-1])

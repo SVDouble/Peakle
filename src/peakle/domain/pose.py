@@ -41,6 +41,8 @@ class FitMetrics(BaseModel):
         iterations: Number of local optimizer iterations.
         success: Whether the local optimizer reported success.
         message: Optimizer status message.
+        confidence: How well the predicted skyline reproduces the observed one,
+            in [0, 1] (low = the fit is ambiguous / untrustworthy).
         position_error_m: Optional true position error for synthetic demos.
         yaw_error_deg: Optional true yaw error for synthetic demos.
         pitch_error_deg: Optional true pitch error for synthetic demos.
@@ -56,6 +58,7 @@ class FitMetrics(BaseModel):
     position_error_m: float | None
     yaw_error_deg: float | None
     pitch_error_deg: float | None
+    confidence: float | None = None
 
 
 class PoseEstimate(BaseModel):

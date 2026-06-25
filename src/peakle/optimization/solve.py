@@ -18,15 +18,16 @@ from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.contours import SkylineContour
 from peakle.domain.pose import FitMetrics, PoseEstimate, PosePrior
 from peakle.domain.terrain import TerrainMap
+from peakle.optimization.horizon import horizon_seeds
 from peakle.optimization.objective import PoseObjective
 from peakle.optimization.pose_search import add_synthetic_truth_metrics
-from peakle.optimization.scoring import residual_summary, robust_contour_residuals
+from peakle.optimization.scoring import match_confidence, residual_summary, robust_contour_residuals
 from peakle.rendering.rasterizer import SyntheticRenderer
 
 SOLVE_SAMPLE_WIDTH = 360
 SOLVE_TARGET_COLUMNS = 22
 MAX_TRACE_FRAMES = 60
-STRATEGIES = ("powell", "nelder", "evolution")
+STRATEGIES = ("powell", "nelder", "evolution", "global")
 
 AVAILABLE_STRATEGIES = [
     {
@@ -43,6 +44,11 @@ AVAILABLE_STRATEGIES = [
         "name": "evolution",
         "label": "Differential evolution",
         "blurb": "Population-based search across the bounded pose box around the prior.",
+    },
+    {
+        "name": "global",
+        "label": "Global (no prior)",
+        "blurb": "Prior-free: 360 deg horizon correlation across the whole map for position + yaw, then local refine.",
     },
 ]
 
@@ -71,6 +77,18 @@ class SolveFrame(BaseModel):
     profile: list[float | None]
 
 
+class PoseCandidate(BaseModel):
+    """One plausible pose from a prior-free search.
+
+    Attributes:
+        extrinsics: Candidate camera pose.
+        score: Objective value (lower is a better skyline fit).
+    """
+
+    extrinsics: CameraExtrinsics
+    score: float
+
+
 class PoseSolveResult(BaseModel):
     """A solved pose plus the convergence trace and the observed outline.
 
@@ -81,6 +99,13 @@ class PoseSolveResult(BaseModel):
         sample_width: Reduced profile width in columns.
         sample_height: Reduced profile height in rows.
         observed_profile: Observed outline in sample rows (null for empty columns).
+        predicted_profile: Final predicted outline at the reduced sample width,
+            for the convergence plot; the per-frame trace profiles stay coarse.
+        predicted_profile_full: Final predicted outline at full image width, for a
+            crisp overlay on the rendered photo (length = image width).
+        candidates: Distinct plausible poses (best first). For a prior-free search
+            of an ambiguous outline this holds every well-separated location that
+            fits; for prior-based strategies it is just the single estimate.
         trace: Ordered convergence frames.
     """
 
@@ -90,6 +115,9 @@ class PoseSolveResult(BaseModel):
     sample_width: int
     sample_height: int
     observed_profile: list[float | None]
+    predicted_profile: list[float | None]
+    predicted_profile_full: list[float | None]
+    candidates: list[PoseCandidate]
     trace: list[SolveFrame]
 
 
@@ -102,6 +130,7 @@ def solve_pose(
     terrain_stride: int = 6,
     truth: CameraExtrinsics | None = None,
     seed: int | None = None,
+    use_position_prior: bool = True,
 ) -> PoseSolveResult:
     """Recovers a full camera pose from an observed contour and a prior.
 
@@ -126,8 +155,13 @@ def solve_pose(
     renderer = SyntheticRenderer()
     reduced = _reduced_intrinsics(intrinsics, SOLVE_SAMPLE_WIDTH)
     observed_reduced = _reduce_profile(contour.to_profile(), intrinsics, reduced)
-    # Coarsen the terrain on large grids so a full solve stays interactive; the
-    # nice full-resolution view image and final metrics are unaffected.
+    # The global strategy is prior-free by definition: drop both the position and
+    # orientation priors so the search spans the whole map and full yaw circle.
+    if strategy == "global":
+        use_position_prior = False
+    # The objective uses the fast upsampled point-projection skyline (set up
+    # inside PoseObjective); the trace display still renders at a coarse stride
+    # for cheap animation frames.
     working_stride = max(terrain_stride, round(terrain.spec.grid_width / SOLVE_TARGET_COLUMNS))
     objective = PoseObjective(
         terrain=terrain,
@@ -136,6 +170,8 @@ def solve_pose(
         prior=prior,
         renderer=renderer,
         terrain_stride=working_stride,
+        use_position_prior=use_position_prior,
+        use_orientation_prior=strategy != "global",
     )
     traced = _TracedSolve(objective, terrain, renderer, reduced, working_stride)
 
@@ -143,6 +179,8 @@ def solve_pose(
         _run_powell(traced)
     elif strategy == "nelder":
         _run_nelder_mead(traced)
+    elif strategy == "global":
+        _run_global(traced)
     else:
         _run_differential_evolution(traced, seed)
     if not traced.frames:
@@ -152,6 +190,19 @@ def solve_pose(
     if truth is not None:
         estimate = add_synthetic_truth_metrics(estimate, truth)
 
+    # Reduced predicted outline (accurate triangle skyline) drives the plot and
+    # the match metric; the crisp full-width overlay uses the fast skyline.
+    predicted_reduced = renderer.skyline_profile(terrain, reduced, estimate.extrinsics, stride=1)
+    predicted_full = renderer.fast_skyline(objective._points, intrinsics, estimate.extrinsics)
+
+    if traced.candidates:
+        candidates = [
+            PoseCandidate(extrinsics=objective.extrinsics_from_theta(theta), score=score)
+            for score, theta in traced.candidates
+        ]
+    else:
+        candidates = [PoseCandidate(extrinsics=estimate.extrinsics, score=float(traced.best_score))]
+
     return PoseSolveResult(
         strategy=strategy,
         estimate=estimate,
@@ -159,6 +210,9 @@ def solve_pose(
         sample_width=reduced.width_px,
         sample_height=reduced.height_px,
         observed_profile=_jsonable_profile(observed_reduced),
+        predicted_profile=_jsonable_profile(predicted_reduced),
+        predicted_profile_full=_jsonable_profile(predicted_full),
+        candidates=candidates,
         trace=_subsample_frames(traced.frames, MAX_TRACE_FRAMES),
     )
 
@@ -183,6 +237,11 @@ class _TracedSolve:
         self.best_score = float("inf")
         self.best_theta = objective.theta_from_prior()
         self.frames: list[SolveFrame] = []
+        # Multiplies the final confidence: <1 when the global search found a
+        # well-separated alternative pose that fits nearly as well (ambiguous).
+        self.localization_factor = 1.0
+        # Distinct plausible (score, theta) poses from a prior-free search.
+        self.candidates: list[tuple[float, NDArray[np.float64]]] = []
 
     def cost(self, theta: NDArray[np.float64]) -> float:
         self.evaluations += 1
@@ -247,6 +306,106 @@ def _run_nelder_mead(traced: _TracedSolve) -> None:
     )
 
 
+def _run_global(traced: _TracedSolve) -> None:
+    """Prior-free localization: horizon-correlation seeds, then local refine.
+
+    Finds the best whole-map (position, yaw) candidates by correlating the
+    observed outline against each candidate's 360 deg terrain horizon, then
+    refines the top seeds with Powell on the full 5-DOF objective.
+    """
+
+    objective = traced.objective
+    prior = objective.prior
+    terrain = objective.terrain
+    eye_height_m = float(
+        np.clip(prior.position.up_m - terrain.elevation_at(prior.position.east_m, prior.position.north_m), 2.0, 4000.0)
+    )
+    seeds = horizon_seeds(
+        terrain,
+        objective.observed_profile,
+        objective.intrinsics,
+        pitch_deg=prior.pitch_deg,
+        eye_height_m=eye_height_m,
+    )
+    bounds = objective.bounds()
+    lows = np.array([low for low, _high in bounds], dtype=np.float64)
+    highs = np.array([high for _low, high in bounds], dtype=np.float64)
+
+    # Stage 1: cheaply polish every seed so the true basin (often outranked by
+    # ambiguous skyline matches in the coarse score) gets a fair full-objective
+    # evaluation. Stage 2: deep-refine only the few best by full-objective score.
+    polished: list[tuple[float, NDArray[np.float64]]] = []
+    for seed in seeds:
+        theta0 = np.clip(
+            np.array(
+                [seed.position.east_m, seed.position.north_m, seed.position.up_m, seed.yaw_deg, seed.pitch_deg],
+                dtype=np.float64,
+            ),
+            lows,
+            highs,
+        )
+        traced.cost(theta0)
+        result = minimize(
+            traced.cost,
+            theta0,
+            method="Powell",
+            bounds=bounds,
+            options={"maxiter": 20, "xtol": 5e-2, "ftol": 5e-2, "disp": False},
+        )
+        theta = np.asarray(result.x, dtype=np.float64)
+        polished.append((float(traced.objective.score(theta)), theta))
+        traced.record()
+
+    polished.sort(key=lambda item: item[0])
+    refined: list[tuple[float, NDArray[np.float64]]] = []
+    for _score, theta in polished[:8]:
+        result = minimize(
+            traced.cost,
+            theta,
+            method="Powell",
+            bounds=bounds,
+            callback=traced.record,
+            options={"maxiter": 80, "xtol": 1e-2, "ftol": 1e-2, "disp": False},
+        )
+        refined.append((float(traced.objective.score(result.x)), np.asarray(result.x, dtype=np.float64)))
+    traced.record()
+
+    # Collect every well-separated pose that fits, best-first: a single outline is
+    # often ambiguous, so all of them are real candidate locations.
+    separation_m = 0.05 * float(traced.terrain.x_m[-1] - traced.terrain.x_m[0])
+    scored = sorted(refined + polished, key=lambda item: item[0])
+    traced.candidates = _distinct_candidates(scored, separation_m, max_count=10)
+    traced.localization_factor = _candidate_margin(traced.candidates)
+
+
+def _distinct_candidates(
+    scored: list[tuple[float, NDArray[np.float64]]], separation_m: float, max_count: int
+) -> list[tuple[float, NDArray[np.float64]]]:
+    """Greedily keep best-scoring poses that are spatially well separated."""
+
+    kept: list[tuple[float, NDArray[np.float64]]] = []
+    for score, theta in scored:
+        if all(np.hypot(theta[0] - other[0], theta[1] - other[1]) > separation_m for _s, other in kept):
+            kept.append((score, theta))
+            if len(kept) >= max_count:
+                break
+    return kept
+
+
+def _candidate_margin(candidates: list[tuple[float, NDArray[np.float64]]]) -> float:
+    """Confidence factor in [0, 1]: how much better the winner is than the runner-up.
+
+    A small gap means several far-apart poses fit nearly as well (ambiguous),
+    so a residual-only confidence would be misleadingly high.
+    """
+
+    if len(candidates) < 2:
+        return 1.0
+    best, runner_up = candidates[0][0], candidates[1][0]
+    relative_gap = (runner_up - best) / max(abs(best), 1e-6)
+    return float(np.clip(relative_gap / 0.5, 0.0, 1.0))
+
+
 def _run_differential_evolution(traced: _TracedSolve, seed: int | None) -> None:
     differential_evolution(
         traced.cost,
@@ -271,7 +430,11 @@ def _coarse_pose_search(traced: _TracedSolve) -> None:
     start = traced.objective.theta_from_prior()
     east_values = _offset_values(prior.position.east_m, prior.horizontal_sigma_m)
     north_values = _offset_values(prior.position.north_m, prior.horizontal_sigma_m)
-    yaw_values = np.linspace(prior.yaw_deg - prior.yaw_sigma_deg * 1.8, prior.yaw_deg + prior.yaw_sigma_deg * 1.8, 11)
+    # Keep the yaw scan ~8deg-spaced so a wide (compass-distrusting) yaw prior is
+    # still covered finely enough to land in the right basin.
+    yaw_span = prior.yaw_sigma_deg * 3.6
+    yaw_count = int(np.clip(round(yaw_span / 8.0), 11, 60))
+    yaw_values = np.linspace(prior.yaw_deg - yaw_span / 2.0, prior.yaw_deg + yaw_span / 2.0, yaw_count)
     pitch_values = np.linspace(
         prior.pitch_deg - prior.pitch_sigma_deg * 1.8,
         prior.pitch_deg + prior.pitch_sigma_deg * 1.8,
@@ -305,9 +468,14 @@ def _final_estimate(
     """Builds the final pose estimate with full-resolution fit metrics."""
 
     extrinsics = traced.objective.extrinsics_from_theta(traced.best_theta)
+    observed_profile = contour.to_profile()
     predicted = renderer.skyline_profile(terrain, intrinsics, extrinsics, stride=1)
-    residuals = robust_contour_residuals(predicted, contour.to_profile())
+    residuals = robust_contour_residuals(predicted, observed_profile)
     mae, p95, valid_columns = residual_summary(residuals)
+    observed_valid = int(np.sum(np.isfinite(observed_profile)))
+    confidence, _is_match = match_confidence(p95, valid_columns / max(1, observed_valid), intrinsics.height_px)
+    # Discount confidence when the global search found an ambiguous (multi-modal) fit.
+    confidence *= traced.localization_factor
     metrics = FitMetrics(
         score=float(traced.best_score),
         contour_mae_px=mae,
@@ -319,6 +487,7 @@ def _final_estimate(
         position_error_m=None,
         yaw_error_deg=None,
         pitch_error_deg=None,
+        confidence=confidence,
     )
     return PoseEstimate(extrinsics=extrinsics, metrics=metrics)
 

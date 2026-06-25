@@ -54,6 +54,7 @@ class _RasterizedTerrain(BaseModel):
 
     terrain_mask: NDArray[np.bool_]
     skyline_profile: NDArray[np.float64]
+    inverse_depth: NDArray[np.float64]
 
 
 class SyntheticRenderer:
@@ -118,6 +119,47 @@ class SyntheticRenderer:
             stride=stride,
         ).terrain_mask
 
+    def fast_skyline(
+        self,
+        points: NDArray[np.float64],
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+    ) -> NDArray[np.float64]:
+        """Skyline profile from precomputed points, without triangle rasterization.
+
+        The silhouette top in each column is simply the highest (smallest row)
+        projected terrain point, so a per-column minimum over projected points is
+        exact for an opaque surface and far cheaper than mesh rasterization. This
+        is the optimizer's hot path; pass terrain points once via
+        `TerrainMap.flattened_points(stride)`.
+
+        Args:
+            points: Precomputed `(N, 3)` local terrain points.
+            intrinsics: Camera intrinsics.
+            extrinsics: Candidate camera extrinsics.
+
+        Returns:
+            Dense skyline y-profile of length `intrinsics.width_px`.
+        """
+
+        width = intrinsics.width_px
+        height = intrinsics.height_px
+        u_px, v_px, _depth, valid = project_points(points, intrinsics, extrinsics)
+        columns = np.floor(np.nan_to_num(u_px, nan=-1.0)).astype(np.int64)
+        good = valid & np.isfinite(v_px) & (columns >= 0) & (columns < width)
+        profile = np.full(width, np.nan, dtype=np.float64)
+        good_columns = columns[good]
+        if good_columns.size:
+            # Per-column minimum via a single sort + segmented reduce, far faster
+            # than np.minimum.at for the dense (upsampled) point cloud.
+            order = np.argsort(good_columns, kind="stable")
+            sorted_columns = good_columns[order]
+            sorted_v = v_px[good][order]
+            unique_columns, first = np.unique(sorted_columns, return_index=True)
+            profile[unique_columns] = np.minimum.reduceat(sorted_v, first)
+        profile = interpolate_profile(profile, fallback=float(height) * 0.62)
+        return np.clip(profile, 0.0, float(height - 1))
+
     def _rasterize_visible_terrain(
         self,
         terrain: TerrainMap,
@@ -162,7 +204,62 @@ class SyntheticRenderer:
         return _RasterizedTerrain(
             terrain_mask=mask,
             skyline_profile=self._profile_from_mask(mask, fallback=float(height * 0.62)),
+            inverse_depth=inverse_depth_buffer,
         )
+
+    def depth_image(
+        self,
+        terrain: TerrainMap,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        stride: int = 1,
+    ) -> NDArray[np.float64]:
+        """Returns the per-pixel visible-terrain depth in metres (NaN for sky)."""
+
+        buffer = self._rasterize_visible_terrain(terrain, intrinsics, extrinsics, stride=stride).inverse_depth
+        depth = np.full_like(buffer, np.nan)
+        visible = np.isfinite(buffer) & (buffer > 0.0)
+        depth[visible] = 1.0 / buffer[visible]
+        return depth
+
+    def ridge_layers(
+        self,
+        terrain: TerrainMap,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        stride: int = 1,
+        max_layers: int = 4,
+        drop_fraction: float = 0.3,
+    ) -> NDArray[np.float64]:
+        """Predicts occlusion ridge rows per column from the rendered depth.
+
+        Scanning a column downward, the skyline is the first visible row and each
+        internal ridge crest is where the visible depth drops sharply (a nearer
+        ridge silhouetted against farther terrain). Returns `(max_layers + 1,
+        width)`: row 0 the skyline, the rest occlusion crests (NaN where absent),
+        for matching against the photo's extracted ridges.
+        """
+
+        buffer = self._rasterize_visible_terrain(terrain, intrinsics, extrinsics, stride=stride).inverse_depth
+        height, width = buffer.shape
+        layers = np.full((max_layers + 1, width), np.nan, dtype=np.float64)
+        for column in range(width):
+            rows = np.flatnonzero(np.isfinite(buffer[:, column]))
+            if rows.size == 0:
+                continue
+            layers[0, column] = float(rows[0])  # skyline
+            depth = 1.0 / buffer[rows, column]
+            drops = (depth[:-1] - depth[1:]) / np.maximum(depth[:-1], 1.0)  # relative depth drop going down
+            crest_order = np.argsort(drops)[::-1]
+            kept = 0
+            for index in crest_order:
+                if drops[index] < drop_fraction:
+                    break
+                layers[1 + kept, column] = float(rows[index + 1])
+                kept += 1
+                if kept >= max_layers:
+                    break
+        return layers
 
     def _screen_vertex(
         self,

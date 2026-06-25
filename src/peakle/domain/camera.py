@@ -56,6 +56,11 @@ class CameraIntrinsics(BaseModel):
             principal_y_px=(height_px - 1) / 2.0,
         )
 
+    def horizontal_fov_deg(self) -> float:
+        """Returns the horizontal field of view in degrees."""
+
+        return math.degrees(2.0 * math.atan(self.width_px / (2.0 * self.focal_length_px)))
+
     @model_validator(mode="after")
     def _validate_principal_point(self) -> CameraIntrinsics:
         if not 0.0 <= self.principal_x_px <= self.width_px - 1:
