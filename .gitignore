@@ -49,3 +49,14 @@ Thumbs.db
 !.vscode/tasks.json
 !.vscode/settings.json
 !.vscode/extensions.json
+
+# user working dir (inputs symlinked, outputs by run)
+local/
+
+# Data + model weights — kept under local/ (gitignored), never committed
+/data
+mobile_sam.pt
+*.pt
+*.pth
+*.hgt
+*.npz
