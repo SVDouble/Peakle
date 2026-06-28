@@ -32,7 +32,7 @@ DE_DIR = f"{_BASE}/local/derived/diffusionedge"
 SEGMENTER = os.environ.get("SEGMENTER", "sam3")  # swap backend: sam3 | mobile_sam | sam2
 EDGE = os.environ.get("EDGE", "diffusionedge")   # crisp contour model: diffusionedge | dexined
 DISCARD = os.environ.get("DISCARD", "1") != "0"   # discard 'clearly texture' contours (multi-signal)
-RS = dict(sky_t=0.15, crest_t=0.06, jump_t=0.05, sil_t=0.45, len_t=55.0)  # validated keep-signals
+RS = dict(sky_t=0.15, edge_t=0.30, sil_t=0.55)  # keep: near skyline, or strong edge, or strong silhouette
 PAL = np.array([(230,60,60),(60,200,90),(70,130,240),(240,180,40),(200,80,220),(40,210,210),(250,250,250)], float)/255
 _DEPTH_STOPS = np.array([(0.85,0.12,0.12),(0.95,0.80,0.20),(0.20,0.70,0.35),(0.20,0.45,0.92)])
 
@@ -128,7 +128,7 @@ def merge_polylines(polys, max_gap=14.0, min_cos=0.80):
             B=polys[ib][::-1] if eb else polys[ib]
             for k in sorted((ia,ib),reverse=True): polys.pop(k)
             polys.append(A+B); changed=True
-    return [smooth(p, sig=2.0) for p in polys]
+    return [smooth(p, sig=3.5) for p in polys]   # heavier smoothing → less ragged/curly
 
 
 def boundary_f(polys, gt_skel, dg, shape):
@@ -160,7 +160,7 @@ def process(name):
     d = os.path.join(OUT, name); os.makedirs(d, exist_ok=True)
     c = np.load(os.path.join(CACHE, name+".npz"), allow_pickle=True)
     rgb = c["rgb"].astype(float); depth = c["depth"].astype(float)
-    red = c["red"]; shape = rgb.shape[:2]
+    red = c["red"]; shape = rgb.shape[:2]   # masked to terrain after the SAM3 mask is built (drops t-shirt etc.)
     E, esrc = load_edge(name, shape, c)                                   # advanced crisp source (DiffusionEdge)
     Edense = st(c["dexined"].astype(float)) if "dexined" in c.files else st(c["combined"].astype(float))  # dense gate
     depthn = normalize_depth(depth)
@@ -172,6 +172,7 @@ def process(name):
     sky = seg.sky_mask(rgb)                                       # still needed for the skyline
     mountain = ndimage.binary_dilation(seg.terrain_mask(rgb, threshold=0.12), iterations=4)
     b=4; mountain[:, :b]=mountain[:, -b:]=mountain[-b:,:]=False
+    red = red & ndimage.binary_dilation(mountain, iterations=6)   # GT ridges on terrain only (drops red t-shirt etc.)
     s2=rgb*0.4
     s2[~mountain]=s2[~mountain]*0.45+np.array([0.30,0.40,0.6])*0.55   # non-terrain (sky / people) dimmed blue
     s2[mountain]=s2[mountain]*0.4+np.array([0.5,0.35,0.2])*0.6
@@ -209,14 +210,14 @@ def process(name):
     raw_polys = merge_polylines(trace_mask(ridge, min_len=24, min_straight=0.22))
     siln = st(sil) if sil.max() else sil
     if DISCARD:
-        internal, labels = filter_by_ridge_signal(raw_polys, depthn, siln, skyline, **RS)
+        internal, labels = filter_by_ridge_signal(raw_polys, siln, E, skyline, **RS)
     else:
         internal, labels = raw_polys, ["kept"] * len(raw_polys)
     COL = {"silhouette": (60,235,255), "crest": (70,240,120), "region": (205,140,255),
            "long": (60,235,255), "skyline": (255,235,90), "kept": (60,235,255)}
     ov = (rgb*0.45*255).astype(np.uint8); im=Image.fromarray(ov,"RGB"); dr=ImageDraw.Draw(im)
     for s in raw_polys:  # discarded ('clearly texture' — no ridge signal) shown faint red
-        if not keep_by_ridge_signal(s, depthn, siln, skyline, **RS)[0]:
+        if not keep_by_ridge_signal(s, siln, E, skyline, **RS)[0]:
             dr.line([(int(x),int(y)) for y,x in s], fill=(150,45,45), width=1)
     for s, lb in zip(internal, labels, strict=True):
         dr.line([(int(x),int(y)) for y,x in s], fill=COL.get(lb,(60,235,255)), width=2)
