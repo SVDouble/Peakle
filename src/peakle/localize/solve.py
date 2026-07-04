@@ -1,0 +1,285 @@
+"""Orientation solver: match an observed skyline to the DEM horizon over the full 360° yaw.
+
+Core idea: for a fixed position the horizon elevation profile ``el(az)`` is camera-independent,
+so it is ray-cast ONCE at fine azimuth resolution; every (yaw, pitch, fov) skyline hypothesis is
+then a resampling of that profile.  Pitch is decoupled as a vertical image shift (exact for the
+cylindrical projection, first-order for pinhole; the returned pitch is derived from the best
+shift).  The residual is a symmetric, distance-capped curve chamfer — capping keeps single
+garbage columns in the extraction from dominating the score.
+
+Every solve returns the full yaw-chamfer profile plus derived diagnostics (basin width, alias
+margin, coverage).  Thresholds behind ``verdict`` are PROVISIONAL until calibrated on the
+GeoPose3K benchmark (scripts/bench_geopose.py); treat CONFIRMED as "worth looking at", not truth,
+until that calibration lands.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from peakle.localize.raycast import horizon_elevation
+
+AZ_STEP_DEG = 0.1  # resolution of the one-time 360° horizon profile
+
+
+@dataclass
+class OrientationSolve:
+    yaw_deg: float
+    pitch_deg: float
+    fov_deg: float
+    chamfer_px: float
+    coverage: float                      # fraction of columns with an observed skyline
+    well_width_deg: float                # angular width of the chamfer basin around the solution
+    alias_ratio: float                   # best chamfer outside the basin / best chamfer (>1 good)
+    terrain_distinct_px: float           # how unlike the rest of the horizon the solved window is
+    snr: float                           # terrain_distinct_px / chamfer_px — fit noise vs signal
+    yaw_profile_deg: np.ndarray = field(repr=False)
+    yaw_profile_chamfer: np.ndarray = field(repr=False)
+    verdict: str = "UNCALIBRATED"
+
+    def summary(self) -> str:
+        return (
+            f"yaw={self.yaw_deg:.1f} pitch={self.pitch_deg:.1f} fov={self.fov_deg:.1f} "
+            f"chamfer={self.chamfer_px:.1f}px cover={self.coverage:.0%} "
+            f"well={self.well_width_deg:.0f}deg alias={self.alias_ratio:.2f} "
+            f"distinct={self.terrain_distinct_px:.0f}px snr={self.snr:.1f} -> {self.verdict}"
+        )
+
+
+def _directed(p: np.ndarray, q: np.ndarray, cap: float, shifts: np.ndarray) -> float:
+    """Mean capped distance from curve ``p`` to curve ``q`` (both row-per-column, NaN = missing)."""
+
+    n = len(p)
+    best = np.full(n, cap * cap)
+    for s in shifts:
+        lo, hi = max(0, -s), min(n, n - s)
+        if hi <= lo:
+            continue
+        d2 = s * s + (p[lo:hi] - q[lo + s : hi + s]) ** 2
+        np.minimum(best[lo:hi], np.where(np.isnan(d2), cap * cap, d2), out=best[lo:hi])
+    valid = ~np.isnan(p)
+    if not valid.any():
+        return cap
+    return float(np.sqrt(best[valid]).mean())
+
+
+def curve_chamfer(
+    a: np.ndarray,
+    b: np.ndarray,
+    cap: float = 60.0,
+    shift_step: int = 3,
+    max_shift: int = 45,
+) -> float:
+    """Symmetric capped chamfer between two per-column skyline curves, in pixels."""
+
+    shifts = np.arange(-max_shift, max_shift + 1, shift_step)
+    return 0.5 * (_directed(a, b, cap, shifts) + _directed(b, a, cap, shifts))
+
+
+class HorizonProfile:
+    """The one-time 360° horizon of a position, resampleable into any camera."""
+
+    def __init__(self, terrain, cam_up_m: float, step: float = 30.0, d_max: float | None = None):
+        self.az_deg = np.arange(0.0, 360.0, AZ_STEP_DEG)
+        el = horizon_elevation(terrain, np.radians(self.az_deg), cam_up_m, step=step, d_max=d_max)
+        self.el = el  # radians, NaN where the DEM had no sample
+        self.cam_up_m = cam_up_m
+
+    def _el_at(self, az_deg: np.ndarray) -> np.ndarray:
+        idx = (az_deg % 360.0) / AZ_STEP_DEG
+        i0 = np.floor(idx).astype(int) % len(self.el)
+        i1 = (i0 + 1) % len(self.el)
+        w = idx - np.floor(idx)
+        e0, e1 = self.el[i0], self.el[i1]
+        out = e0 * (1 - w) + e1 * w
+        return np.where(np.isnan(e0) | np.isnan(e1), np.nan, out)
+
+    def rows_cyl(self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+        hfov = math.radians(fov_deg)
+        vfov = hfov * height / width
+        cols = np.arange(width)
+        az = yaw_deg + np.degrees((cols - (width - 1) / 2.0) * (hfov / width))
+        el = self._el_at(az)
+        return (height - 1) / 2.0 - (el - math.radians(pitch_deg)) * (height / vfov)
+
+    def rows_pinhole(self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+        f = width / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
+        cols = np.arange(width)
+        az = yaw_deg + np.degrees(np.arctan((cols - (width - 1) / 2.0) / f))
+        el = self._el_at(az)
+        return (height - 1) / 2.0 - f * np.tan(el - math.radians(pitch_deg))
+
+    def rows(self, projection: str, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+        fn = self.rows_cyl if projection == "cyl" else self.rows_pinhole
+        return fn(width, height, fov_deg, yaw_deg, pitch_deg)
+
+    def pitch_from_shift(self, projection: str, width: int, height: int, fov_deg: float, dv: float) -> float:
+        """Pitch implied by shifting the pitch-0 skyline DOWN by ``dv`` rows."""
+
+        hfov = math.radians(fov_deg)
+        if projection == "cyl":
+            return math.degrees(dv * (hfov * height / width) / height)
+        f = width / (2.0 * math.tan(hfov / 2.0))
+        return math.degrees(math.atan(dv / f))
+
+
+def _basin(yaws: np.ndarray, ch: np.ndarray, best_i: int) -> tuple[float, np.ndarray]:
+    """Width of the contiguous chamfer basin around the best yaw + an inside/guard mask."""
+
+    cmin = ch[best_i]
+    near = ch < max(cmin * 1.15, cmin + 2.0)
+    n = len(yaws)
+    lo = hi = best_i
+    while near[(lo - 1) % n] and (best_i - lo) < n:
+        lo -= 1
+    while near[(hi + 1) % n] and (hi - best_i) < n:
+        hi += 1
+    if hi - lo + 1 >= n:
+        return 360.0, np.ones(n, bool)
+    width = (hi - lo + 1) * (yaws[1] - yaws[0]) if n > 1 else 360.0
+    inside = np.zeros(n, bool)
+    inside[np.arange(lo, hi + 1) % n] = True
+    # a guard band around the basin so the alias margin measures a DISTINCT minimum
+    guard = int(round(10.0 / (yaws[1] - yaws[0])))
+    for g in range(1, guard + 1):
+        inside[(lo - g) % n] = True
+        inside[(hi + g) % n] = True
+    return float(width), inside
+
+
+def solve_orientation(
+    obs_rows: np.ndarray,
+    height: int,
+    profile: HorizonProfile,
+    fov_deg: float | tuple[float, float, float],
+    projection: str = "cyl",
+    pitch_bounds: tuple[float, float] = (-30.0, 30.0),
+    cap_px: float = 60.0,
+    yaw_step_deg: float = 1.0,
+) -> OrientationSolve:
+    """Recover (yaw, pitch[, fov]) for an observed skyline given a position's horizon profile.
+
+    ``fov_deg`` is either a known value or an inclusive ``(lo, hi, step)`` search range.
+    ``obs_rows``: per-column skyline row (NaN where not observed), full image width.
+    """
+
+    obs = np.asarray(obs_rows, float)
+    width = len(obs)
+    coverage = float(np.isfinite(obs).mean())
+    fovs = [fov_deg] if isinstance(fov_deg, (int, float)) else list(np.arange(fov_deg[0], fov_deg[1] + 1e-9, fov_deg[2]))
+
+    yaws = np.arange(0.0, 360.0, yaw_step_deg)
+    best = None  # (chamfer, yaw, dv, fov, profile_ch, profile_dv)
+    for fov in fovs:
+        dv_max = _dv_for_pitch(projection, width, height, fov, max(abs(pitch_bounds[0]), abs(pitch_bounds[1])))
+        dvs = np.arange(-dv_max, dv_max + 1, max(4, int(dv_max / 12)))
+        ch = np.full(len(yaws), np.inf)
+        dv_at = np.zeros(len(yaws))
+        for i, yaw in enumerate(yaws):
+            base = profile.rows(projection, width, height, float(fov), float(yaw), 0.0)
+            c, dv = _best_shift_chamfer(obs, base, dvs, cap_px, shift_step=6)  # coarse ranking
+            ch[i] = c
+            dv_at[i] = dv
+        i = int(np.argmin(ch))
+        if best is None or ch[i] < best[0]:
+            best = (float(ch[i]), float(yaws[i]), float(dv_at[i]), float(fov), ch.copy(), dv_at.copy())
+
+    cmin, yaw0, dv0, fov0, prof_ch, prof_dv = best
+    dv_step_used = max(
+        4.0, _dv_for_pitch(projection, width, height, fov0, max(abs(pitch_bounds[0]), abs(pitch_bounds[1]))) / 12.0
+    )
+
+    def _polish(yaw_c: float, dv_c: float) -> tuple[float, float, float]:
+        c_best, y_best, dv_pick = math.inf, yaw_c, dv_c
+        fine_dvs = np.arange(dv_c - max(dv_step_used, 8.0), dv_c + max(dv_step_used, 8.0) + 1e-9, 1.0)
+        for yaw in np.arange(yaw_c - yaw_step_deg, yaw_c + yaw_step_deg + 1e-9, yaw_step_deg / 4):
+            base = profile.rows(projection, width, height, fov0, float(yaw), 0.0)
+            c, dv = _best_shift_chamfer(obs, base, fine_dvs, cap_px)
+            if c < c_best:
+                c_best, y_best, dv_pick = float(c), float(yaw % 360.0), float(dv)
+        return c_best, y_best, dv_pick
+
+    cmin, yaw0, dv0 = _polish(yaw0, dv0)
+
+    pitch = profile.pitch_from_shift(projection, width, height, fov0, dv0)
+    best_i = int(np.argmin(prof_ch))
+    well_width, inside = _basin(yaws, prof_ch, best_i)
+
+    # honest alias margin: the strongest rival OUTSIDE the winning basin gets the same fine
+    # polish as the winner, else coarse-grid quantisation compresses the ratio toward 1
+    alias = 1.0
+    if not inside.all():
+        rival_i = int(np.argmin(np.where(inside, np.inf, prof_ch)))
+        c_rival, _, _ = _polish(float(yaws[rival_i]), float(prof_dv[rival_i]))
+        alias = float(c_rival / cmin) if cmin > 0 else 1.0
+
+    # terrain self-distinctiveness: chamfer the SOLVED DEM window against the DEM horizon at all
+    # other yaws.  If the terrain nearly repeats itself (a symmetric valley, a rolling ridge), a
+    # small extraction error can flip the winning basin while looking distinct — no photo can
+    # disambiguate such a position, so CONFIRMED additionally requires the terrain to be more
+    # distinctive than the fit residual (the SNR gate).
+    template = profile.rows(projection, width, height, fov0, yaw0, 0.0) + dv0
+    self_yaws = np.arange(0.0, 360.0, max(yaw_step_deg, 2.0))
+    dv_lim = _dv_for_pitch(projection, width, height, fov0, max(abs(pitch_bounds[0]), abs(pitch_bounds[1])))
+    dv_scan = np.arange(-dv_lim, dv_lim + 1, max(4, int(dv_lim / 12)))
+    self_ch = np.full(len(self_yaws), np.inf)
+    for i, yaw in enumerate(self_yaws):
+        base = profile.rows(projection, width, height, fov0, float(yaw), 0.0)
+        self_ch[i], _ = _best_shift_chamfer(template, base, dv_scan, cap_px, shift_step=6)
+    self_i = int(np.argmin(np.abs(((self_yaws - yaw0 + 180) % 360) - 180)))
+    _, self_inside = _basin(self_yaws, self_ch, self_i)
+    distinct = float(np.min(self_ch[~self_inside])) if not self_inside.all() else 0.0
+    snr = distinct / max(cmin, 1.0)
+
+    solve = OrientationSolve(
+        yaw_deg=yaw0,
+        pitch_deg=pitch,
+        fov_deg=fov0,
+        chamfer_px=cmin,
+        coverage=coverage,
+        well_width_deg=well_width,
+        alias_ratio=alias,
+        terrain_distinct_px=distinct,
+        snr=snr,
+        yaw_profile_deg=yaws,
+        yaw_profile_chamfer=prof_ch,
+    )
+    solve.verdict = _provisional_verdict(solve, cap_px)
+    return solve
+
+
+def _dv_for_pitch(projection: str, width: int, height: int, fov: float, pitch_deg: float) -> int:
+    hfov = math.radians(fov)
+    if projection == "cyl":
+        return int(math.radians(pitch_deg) * height / (hfov * height / width)) + 1
+    f = width / (2.0 * math.tan(hfov / 2.0))
+    return int(f * math.tan(math.radians(pitch_deg))) + 1
+
+
+def _best_shift_chamfer(
+    obs: np.ndarray, base: np.ndarray, dvs: np.ndarray, cap: float, shift_step: int = 3
+) -> tuple[float, float]:
+    """Best (chamfer, dv) over vertical shifts of the rendered pitch-0 skyline."""
+
+    best_c, best_dv = math.inf, 0.0
+    for dv in dvs:
+        c = curve_chamfer(obs, base + dv, cap=cap, shift_step=shift_step)
+        if c < best_c:
+            best_c, best_dv = float(c), float(dv)
+    return best_c, best_dv
+
+
+def _provisional_verdict(s: OrientationSolve, cap_px: float) -> str:
+    """Calibrated on the 60-sample GeoPose3K benchmark (scripts/calibrate_verdict.py, 2026-07-05):
+    this gate confirmed 0 wrong solves out of 40 confirmations (recall 60-68% of correct solves).
+    Re-run the calibration when the benchmark grows; 100% precision here is not a field guarantee.
+    """
+
+    if s.coverage < 0.25 or s.chamfer_px > 0.5 * cap_px:
+        return "REJECTED"
+    if s.alias_ratio >= 1.35 and s.well_width_deg <= 10.0 and s.chamfer_px <= 10.0:
+        return "CONFIRMED"
+    return "AMBIGUOUS"

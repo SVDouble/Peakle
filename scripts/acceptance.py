@@ -3,15 +3,17 @@ results are verified against thresholds instead of eyeballed. Run after local/ma
 (which writes local/output/matterhorn_result.json).
 
   T1  DEM geolocation     DEM peak near a summit's published height (SRTM undersamples sharp peaks)
-  T2  forward+search      synthetic render->recover within tol   (run local/synth_recover.py)
+  T2  forward+search      synthetic render->recover within tol   (pytest tests/unit/test_localize.py)
   T3  skyline extraction  clean-sky photo: >=60% column coverage, in-frame
   T4  distant-horizon solve  Matterhorn/Gornergrat: yaw near true bearing, telephoto fov, small
                              pitch, median skyline gap small, summit column aligned
   T5  near-field limit    the 5 selfies: best achievable gap >> distant (SRTM resolution wall)
+  T7  benchmark invariants   latest GeoPose3K bench (scripts/bench_geopose.py): NO wrong solve is
+                             ever CONFIRMED (the honesty invariant) + oracle MANUAL success floor
 
 Each test prints PASS/FAIL with the measured value and the threshold.
 """
-import json, math
+import glob, json, math
 from pathlib import Path
 import numpy as np
 from peakle.terrain.dem import load_dem_around
@@ -69,6 +71,22 @@ if rj.exists():
         check("T6", "yaw well is narrow (localizable)", res["yaw_near"] <= 10, f"{res['yaw_near']} yaws within 1.3x of best", "<=10 (cal. to GT case)")
 else:
     check("T3/T4", "matterhorn_result.json present", False, "missing", "run local/matterhorn_solve.py first")
+
+# ---- T7: GeoPose3K benchmark invariants (latest run of scripts/bench_geopose.py) ----
+bench_files = sorted(glob.glob(str(BASE / "local/output/*-geopose-bench/results.json")))
+if bench_files:
+    bench = [r for r in json.load(open(bench_files[-1])) if "error" not in r]
+    solves = [(r, t, r.get(t)) for r in bench for t in ("oracle", "extracted") if isinstance(r.get(t), dict)]
+    confirmed = [(r, t, s) for r, t, s in solves if s.get("verdict") == "CONFIRMED"]
+    false_conf = [(r["name"], t) for r, t, s in confirmed if not s.get("correct")]
+    check("T7", "no wrong solve CONFIRMED", len(false_conf) == 0,
+          f"{len(false_conf)} false / {len(confirmed)} confirmed" + (f" e.g. {false_conf[0]}" if false_conf else ""), "0 false")
+    man = [r for r in bench if r.get("manual") and isinstance(r.get("oracle"), dict)]
+    if man:
+        ok = sum(1 for r in man if r["oracle"].get("correct"))
+        check("T7", "oracle MANUAL success floor", ok / len(man) >= 0.6, f"{ok}/{len(man)}", ">=60%")
+else:
+    check("T7", "geopose bench results present", False, "missing", "run scripts/bench_geopose.py")
 
 # ---- print table ----
 print(f"\n{'id':5} {'result':6} {'criterion':26} {'measured':34} threshold")
