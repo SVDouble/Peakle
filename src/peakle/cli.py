@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from peakle.benchmark import format_table, run_benchmark
 from peakle.config import AppSettings, load_settings
 from peakle.demo.pipeline import DemoOptions, run_demo
 from peakle.web.server import serve
@@ -50,12 +49,6 @@ def main(argv: list[str] | None = None) -> int:
         serve(settings, host=args.host, port=args.port)
         return 0
 
-    if args.command == "bench":
-        map_sizes = tuple(float(value) for value in args.maps.split(","))
-        rows = run_benchmark(map_sizes_km=map_sizes, views_per_map=args.views, settings=settings, seed=args.seed)
-        print(format_table(rows))
-        return 0
-
     if args.command == "segment":
         from peakle.segmentation import compare, load_rgb, render_overlay
 
@@ -90,11 +83,6 @@ def _build_parser(settings: AppSettings) -> argparse.ArgumentParser:
         type=int,
         default=settings.optimization.max_iterations,
     )
-
-    bench_parser = subparsers.add_parser("bench", help="Pose-recovery benchmark (prior sweep, map sizes)")
-    bench_parser.add_argument("--maps", default="14,50", help="Comma-separated map sizes in km")
-    bench_parser.add_argument("--views", type=int, default=4, help="Test views per map")
-    bench_parser.add_argument("--seed", type=int, default=settings.random_seed)
 
     segment_parser = subparsers.add_parser("segment", help="Compare skyline-extraction methods on a photo")
     segment_parser.add_argument("image", type=Path, help="Path to an image")

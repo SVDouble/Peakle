@@ -329,15 +329,16 @@ def _median_centered_shift_chamfer(
 
 
 def _provisional_verdict(s: OrientationSolve, cap_px: float) -> str:
-    """Calibrated on the 60-sample GeoPose3K benchmark (scripts/calibrate_verdict.py; recalibrated
-    2026-07-05 after the top-K-polish/±50°-pitch solver change): 0 wrong of 47 confirmations,
-    recall 65%.  MUST be recalibrated after any solver/search change — the diagnostics'
-    distributions move with the search geometry (the previous gate produced 2 false CONFIRMED
-    after the solver fix).  100% precision on the bench is not a field guarantee.
+    """Calibrated on the clean-manual-274 GeoPose3K benchmark (scripts/calibrate_verdict.py,
+    2026-07-06, 543 solves): 0 wrong of 160 confirmations, recall 44%.  SNR (terrain
+    self-distinctiveness vs fit residual) is the load-bearing gate — the previous alias-led gate
+    passed a narrow-FOV doppelgänger (alias 2.3, snr 3.8... err +21°) at 99.2% precision; the
+    tightened combination removes it at a recall cost.  MUST be recalibrated after any
+    solver/search change; 100% precision on the bench is not a field guarantee.
     """
 
     if s.coverage < 0.25 or s.chamfer_px > 0.5 * cap_px:
         return "REJECTED"
-    if s.alias_ratio >= 1.5 and s.chamfer_px <= 20.0 and s.snr >= 2.0:
+    if s.alias_ratio >= 1.05 and s.well_width_deg <= 20.0 and s.chamfer_px <= 15.0 and s.snr >= 3.0:
         return "CONFIRMED"
     return "AMBIGUOUS"

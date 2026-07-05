@@ -1,4 +1,6 @@
-"""Fit a camera pose from an extracted outline and decide if it matches a view.
+"""DEPRECATED (v1): superseded by peakle.localize.solve.curve_chamfer and peakle.localize.outline_score. Kept only for the alignment-lab web app. Do not build new code on this.
+
+Fit a camera pose from an extracted outline and decide if it matches a view.
 
 Given a skyline outline (from `segmentation` on a photo, or from a synthetic
 render) this fits a pose with the existing solver and scores how well the pose's
