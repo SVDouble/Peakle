@@ -269,7 +269,7 @@ def example_chamfer(sample, profile, out: Path) -> dict:
     for tag, yaw in [("right", sample.yaw_gt_deg), ("wrong", (sample.yaw_gt_deg + 120) % 360)]:
         best = (np.inf, None)
         for dv in range(-260, 261, 10):
-            rows = profile.rows_cyl(w, h, sample.fov_deg, yaw, 0.0) + dv
+            rows = profile.rows_cyl_tan(w, h, sample.fov_deg, yaw, 0.0) + dv
             c = curve_chamfer(obs, rows, cap=60.0)
             if c < best[0]:
                 best = (c, rows)
@@ -282,7 +282,7 @@ def example_chamfer(sample, profile, out: Path) -> dict:
 
 
 def example_profile(sample, profile, track_rows, h, tag, out: Path, title: str) -> dict:
-    s = solve_orientation(track_rows, h, profile, fov_deg=sample.fov_deg, projection="cyl")
+    s = solve_orientation(track_rows, h, profile, fov_deg=sample.fov_deg, projection="cyltan")
     fig, ax = plt.subplots(figsize=(8.6, 2.9))
     ax.plot(s.yaw_profile_deg, s.yaw_profile_chamfer, color=BLUE, linewidth=1.6)
     cmin = float(np.min(s.yaw_profile_chamfer))
@@ -320,7 +320,7 @@ def example_multihyp(sample, profile, out: Path) -> dict:
         c = cands[name]
         layers.append((c.rows, color, 3))
         if c.coverage >= 0.25:
-            s = solve_orientation(c.rows, h, profile, fov_deg=sample.fov_deg, projection="cyl")
+            s = solve_orientation(c.rows, h, profile, fov_deg=sample.fov_deg, projection="cyltan")
             stats[name] = {"coverage": round(c.coverage, 2), "chamfer": round(s.chamfer_px, 1),
                            "yaw_err": round((s.yaw_deg - sample.yaw_gt_deg + 180) % 360 - 180, 1), "verdict": s.verdict}
     _draw_lines(rgb, layers, "hypotheses: blue-dominant detector (red) vs bright detector (blue); GT skyline green").save(

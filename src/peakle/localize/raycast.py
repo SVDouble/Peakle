@@ -29,11 +29,14 @@ def _elevation_angle_grid(
     cam_z: float,
     step: float,
     d_max: float | None,
+    cam_e: float = 0.0,
+    cam_n: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Max-terrain-elevation-angle machinery shared by both projections.
 
     Returns ``(el, ds)`` where ``el[i, j]`` is the terrain elevation angle (radians, -inf when the
-    sample falls outside the DEM) seen along azimuth ``az_rad[i]`` at distance ``ds[j]``.
+    sample falls outside the DEM) seen along azimuth ``az_rad[i]`` at distance ``ds[j]`` from the
+    camera at local-ENU ``(cam_e, cam_n, cam_z)``.
     """
 
     xm = np.asarray(terrain.x_m, float)
@@ -44,8 +47,8 @@ def _elevation_angle_grid(
     if d_max is None:
         d_max = 0.95 * min(xm[-1] - xm[0], ym[-1] - ym[0]) / 2
     ds = np.arange(step, d_max, step)
-    east = ds[None, :] * np.sin(az_rad)[:, None]
-    north = ds[None, :] * np.cos(az_rad)[:, None]
+    east = cam_e + ds[None, :] * np.sin(az_rad)[:, None]
+    north = cam_n + ds[None, :] * np.cos(az_rad)[:, None]
     ci = (east - x0) / dx
     ri = (north - y0) / dy
     inb = (ci >= 0) & (ci <= len(xm) - 1) & (ri >= 0) & (ri <= len(ym) - 1)
@@ -62,10 +65,12 @@ def horizon_elevation(
     cam_z: float,
     step: float = 30.0,
     d_max: float | None = None,
+    cam_e: float = 0.0,
+    cam_n: float = 0.0,
 ) -> np.ndarray:
     """Horizon elevation angle (radians) per azimuth; NaN where no DEM sample was hit."""
 
-    el, _ = _elevation_angle_grid(terrain, az_rad, cam_z, step, d_max)
+    el, _ = _elevation_angle_grid(terrain, az_rad, cam_z, step, d_max, cam_e, cam_n)
     el_max = el.max(axis=1)
     return np.where(np.isfinite(el_max), el_max, np.nan)
 

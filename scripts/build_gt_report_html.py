@@ -155,8 +155,9 @@ We stream a subset from the 40&nbsp;GB archive and keep three files per sample.<
     <td>position &amp; FOV are treated as known (the product analogue: GPS + EXIF);
         <b>yaw is the scored quantity</b> (success = |yaw err| ≤ 5°)</td></tr>
 <tr><td><b>intrinsics</b> <span class="mono">info.txt</span></td>
-    <td>horizontal FOV in radians; projection is cylindrical: columns linear in azimuth, rows
-        linear in elevation</td>
+    <td>horizontal FOV in radians; projection is TRUE cylindrical: columns linear in azimuth,
+        rows linear in tan(elevation) — determined empirically (an el-linear fit needs an
+        impossible 1.79× slope on steep views; tan fits at 1.017)</td>
     <td>defines the column→azimuth mapping of every rendered hypothesis</td></tr>
 <tr><td><b>GT depth</b> <span class="mono">cyl/distance_crop.pfm</span></td>
     <td>terrain distance per pixel, rendered from the GT pose (sky ≤ 0); ships gzipped</td>
@@ -194,7 +195,7 @@ only because the crops are roll-rectified (corpus |roll|: median {c["roll_med_p9
 <tr><td><b>GT consistency</b></td>
     <td>chamfer between the GT-depth skyline and <em>our</em> DEM rendered at the GT yaw
         (vertical shift free, ±50°). High = the GT pose and our terrain disagree.</td>
-    <td class="num">median <b>{b['gt_consistency_median']}&nbsp;px</b> (clean core), 5 samples ≥ 28&nbsp;px</td></tr>
+    <td class="num">median <b>{b['gt_consistency_median']}&nbsp;px</b> (clean core), {n_flag} flagged</td></tr>
 <tr><td><b>Camera below ground</b></td>
     <td>GT elevation vs DEM ground at the GT position (we clamp to ground + 2&nbsp;m before solving)</td>
     <td class="num">13 samples &gt; 5&nbsp;m below, worst −33&nbsp;m</td></tr>
@@ -282,18 +283,20 @@ CONFIRMED under the new search geometry. Recalibration after any solver change i
 
 <section>
 <h2>5 · Weaknesses &amp; what changed today</h2>
-<h3>Fixed in this pass</h3>
-<p>① <b>Euler decode convention corrected</b>: the old decode was verified only on small-pitch samples
-where conventions are indistinguishable; brute-forcing axis orders against 35 solver-verified poses
-found <span class="mono">Rx(−g)·Rz(−b)·Ry(−a)·P</span> (max yaw error 2.5° vs 6.7° before).
-② <b>Solver: top-K basin polish</b> — the coarse vertical-shift grid could inflate the true basin past
-a smooth alias (measured: true yaw 20.7 px on the grid vs 5.1 px fine); now the 12 best basins are
-fine-polished and the best wins. One sample went from −159° error to −0.2° CONFIRMED.
-③ <b>Pitch bounds ±50°</b>: GeoPose3K crops carry vertical offsets up to ~48° (≈1.2·Euler-b); the old
-±30° bound put the true alignment outside the search for every steep-look photo.
-④ <b>GT cleanliness checks</b> (consistency, buried camera, solver consensus) run in every bench;
-the subset is pinned in a manifest; per-candidate extraction records are kept.
-Net effect: oracle success 41/60 → <b>{oracle_ok}/60</b>, flagged samples 16 → {n_flag}.</p>
+<h3>Fixed across these passes</h3>
+<p>① <b>Euler decode convention corrected</b> (brute-forced against 35 solver-verified poses →
+<span class="mono">Rx(−g)·Rz(−b)·Ry(−a)·P</span>, max yaw error 2.5° vs 6.7°).
+② <b>True-cylindrical (tan) row mapping</b> — the el-linear assumption compressed steep terrain
+("too smooth, too much sky"); the crops are linear in tan(elevation).
+③ <b>Top-K basin polish</b> — the coarse ranking could bury the true basin under grid quantisation;
+the 12 best basins are now fine-polished (one sample: −159° → −0.2° CONFIRMED).
+④ <b>Median-centred vertical-shift search</b> — scanning the full ±50°-pitch shift range at an
+affordable grid made coarse chamfers nearly random (180° flips); centring the scan at the curves'
+median offset is finer AND faster.
+⑤ <b>Pitch bounds ±50°</b> (crop offsets reach ~48° ≈ 1.2·Euler-b; ±30° excluded the truth entirely).
+⑥ <b>GT cleanliness checks</b> in every bench + pinned manifest + per-candidate extraction records.
+Net effect: oracle success 41/60 → <b>{oracle_ok}/60</b>, flagged samples 16 → {n_flag},
+GT reconstruction on clean samples reaches ~2 px with a ±125 m position polish (see the panno).</p>
 <h3>Open, in leverage order</h3>
 <p>① <b>Extraction</b> — oracle {oracle_ok}/60 vs extracted {extr_ok}/60 is now overwhelmingly the
 gap; the two colour detectors fail on haze/cloud edge cases and there is no learned fallback validated

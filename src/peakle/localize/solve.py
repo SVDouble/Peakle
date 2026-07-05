@@ -107,6 +107,19 @@ class HorizonProfile:
         el = self._el_at(az)
         return (height - 1) / 2.0 - (el - math.radians(pitch_deg)) * (height / vfov)
 
+    def rows_cyl_tan(self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+        """TRUE cylindrical projection: columns linear in azimuth, rows linear in tan(elevation).
+        This is GeoPose3K's crop geometry — fitted empirically: on a 690px-amplitude skyline the
+        el-linear mapping needs 1.79x the theoretical slope (impossible) while tan fits at 1.017.
+        Focal length is the same horizontally and vertically: f = W/hfov px per radian."""
+
+        hfov = math.radians(fov_deg)
+        f = width / hfov
+        cols = np.arange(width)
+        az = yaw_deg + np.degrees((cols - (width - 1) / 2.0) * (hfov / width))
+        el = self._el_at(az)
+        return (height - 1) / 2.0 - f * (np.tan(el) - math.tan(math.radians(pitch_deg)))
+
     def rows_pinhole(self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
         f = width / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
         cols = np.arange(width)
@@ -115,7 +128,7 @@ class HorizonProfile:
         return (height - 1) / 2.0 - f * np.tan(el - math.radians(pitch_deg))
 
     def rows(self, projection: str, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
-        fn = self.rows_cyl if projection == "cyl" else self.rows_pinhole
+        fn = {"cyl": self.rows_cyl, "cyltan": self.rows_cyl_tan, "pinhole": self.rows_pinhole}[projection]
         return fn(width, height, fov_deg, yaw_deg, pitch_deg)
 
     def pitch_from_shift(self, projection: str, width: int, height: int, fov_deg: float, dv: float) -> float:
@@ -124,6 +137,8 @@ class HorizonProfile:
         hfov = math.radians(fov_deg)
         if projection == "cyl":
             return math.degrees(dv * (hfov * height / width) / height)
+        if projection == "cyltan":
+            return math.degrees(math.atan(dv / (width / hfov)))
         f = width / (2.0 * math.tan(hfov / 2.0))
         return math.degrees(math.atan(dv / f))
 
@@ -177,12 +192,11 @@ def solve_orientation(
     best = None  # (chamfer, yaw, dv, fov, profile_ch, profile_dv)
     for fov in fovs:
         dv_max = _dv_for_pitch(projection, width, height, fov, max(abs(pitch_bounds[0]), abs(pitch_bounds[1])))
-        dvs = np.arange(-dv_max, dv_max + 1, max(4, int(dv_max / 12)))
         ch = np.full(len(yaws), np.inf)
         dv_at = np.zeros(len(yaws))
         for i, yaw in enumerate(yaws):
             base = profile.rows(projection, width, height, float(fov), float(yaw), 0.0)
-            c, dv = _best_shift_chamfer(obs, base, dvs, cap_px, shift_step=6)  # coarse ranking
+            c, dv = _median_centered_shift_chamfer(obs, base, dv_max, cap_px)  # coarse ranking
             ch[i] = c
             dv_at[i] = dv
         i = int(np.argmin(ch))
@@ -190,20 +204,14 @@ def solve_orientation(
             best = (float(ch[i]), float(yaws[i]), float(dv_at[i]), float(fov), ch.copy(), dv_at.copy())
 
     _, _, _, fov0, prof_ch, prof_dv = best
-    dv_step_used = max(
-        4.0, _dv_for_pitch(projection, width, height, fov0, max(abs(pitch_bounds[0]), abs(pitch_bounds[1]))) / 12.0
-    )
 
     def _polish(yaw_c: float, dv_c: float) -> tuple[float, float, float]:
-        """Fine (yaw, dv) around a coarse candidate; dv is two-stage (coarse step, then unit)."""
+        """Fine (yaw, dv) around a coarse candidate; dv is two-stage (local step, then unit)."""
 
         c_best, y_best, dv_pick = math.inf, yaw_c, dv_c
-        for dvs in (
-            np.arange(dv_c - max(dv_step_used, 8.0), dv_c + max(dv_step_used, 8.0) + 1e-9, 8.0),
-            None,  # placeholder replaced below with the unit scan around the stage-1 winner
-        ):
+        for dvs in (np.arange(dv_c - 36.0, dv_c + 36.01, 6.0), None):
             if dvs is None:
-                dvs = np.arange(dv_pick - 8.0, dv_pick + 8.01, 1.0)
+                dvs = np.arange(dv_pick - 6.0, dv_pick + 6.01, 1.0)
             for yaw in np.arange(y_best - yaw_step_deg, y_best + yaw_step_deg + 1e-9, yaw_step_deg / 4):
                 base = profile.rows(projection, width, height, fov0, float(yaw), 0.0)
                 c, dv = _best_shift_chamfer(obs, base, dvs, cap_px)
@@ -251,11 +259,10 @@ def solve_orientation(
     template = profile.rows(projection, width, height, fov0, yaw0, 0.0) + dv0
     self_yaws = np.arange(0.0, 360.0, max(yaw_step_deg, 2.0))
     dv_lim = _dv_for_pitch(projection, width, height, fov0, max(abs(pitch_bounds[0]), abs(pitch_bounds[1])))
-    dv_scan = np.arange(-dv_lim, dv_lim + 1, max(4, int(dv_lim / 12)))
     self_ch = np.full(len(self_yaws), np.inf)
     for i, yaw in enumerate(self_yaws):
         base = profile.rows(projection, width, height, fov0, float(yaw), 0.0)
-        self_ch[i], _ = _best_shift_chamfer(template, base, dv_scan, cap_px, shift_step=6)
+        self_ch[i], _ = _median_centered_shift_chamfer(template, base, dv_lim, cap_px)
     self_i = int(np.argmin(np.abs(((self_yaws - yaw0 + 180) % 360) - 180)))
     _, self_inside = _basin(self_yaws, self_ch, self_i)
     distinct = float(np.min(self_ch[~self_inside])) if not self_inside.all() else 0.0
@@ -284,6 +291,8 @@ def _dv_for_pitch(projection: str, width: int, height: int, fov: float, pitch_de
     hfov = math.radians(fov)
     if projection == "cyl":
         return int(math.radians(pitch_deg) * height / (hfov * height / width)) + 1
+    if projection == "cyltan":
+        return int((width / hfov) * math.tan(math.radians(pitch_deg))) + 1
     f = width / (2.0 * math.tan(hfov / 2.0))
     return int(f * math.tan(math.radians(pitch_deg))) + 1
 
@@ -299,6 +308,24 @@ def _best_shift_chamfer(
         if c < best_c:
             best_c, best_dv = float(c), float(dv)
     return best_c, best_dv
+
+
+def _median_centered_shift_chamfer(
+    obs: np.ndarray, base: np.ndarray, dv_lim: float, cap: float, shift_step: int = 6
+) -> tuple[float, float]:
+    """Chamfer with the vertical shift centred at the curves' median offset.
+
+    Scanning the full ±dv_lim range at a grid coarse enough to be affordable made coarse chamfers
+    nearly random for large pitch bounds (a ~230px dv step flipped correct solves to 180° aliases).
+    The median offset aligns the curves in O(W) regardless of crop offset; a small local scan
+    around it recovers the rest.  ``dv_lim`` only clamps the centre.
+    """
+
+    vp = np.isfinite(obs) & np.isfinite(base)
+    if vp.sum() < 0.15 * len(obs):
+        return cap, 0.0
+    dv0 = float(np.clip(np.median(obs[vp]) - np.median(base[vp]), -dv_lim, dv_lim))
+    return _best_shift_chamfer(obs, base, dv0 + np.arange(-72.0, 73.0, 24.0), cap, shift_step)
 
 
 def _provisional_verdict(s: OrientationSolve, cap_px: float) -> str:

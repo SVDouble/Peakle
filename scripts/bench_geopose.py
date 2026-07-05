@@ -124,22 +124,22 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
     oracle = _resample(oracle_raw, w_p) * (h_p / h_o)
     # GeoPose3K crops carry vertical offsets up to ~1.2·b (measured +48° worst) — the default
     # ±30° pitch bound put the true alignment OUTSIDE the search for every high-pitch sample
-    s_oracle = solve_orientation(oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyl", pitch_bounds=PITCH_BOUNDS)
+    s_oracle = solve_orientation(oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS)
     rec["oracle"] = solve_record(s_oracle, gt.yaw_gt_deg, gt.pitch_gt_deg)
 
     # GT consistency: chamfer between the GT-depth skyline and OUR DEM rendered at the GT yaw
     # (vertical shift free — GT pitch is not comparable in crop coords).  High values flag either
     # bad GT (mislocated/misoriented pose, esp. AUTO) or DEM trouble at that spot — a per-sample
     # cleanliness score that needs no human review.
-    dem_gt = profile.rows_cyl(w_p, h_p, gt.fov_deg, gt.yaw_gt_deg, 0.0)
-    dv_lim = int(math.radians(PITCH_BOUNDS[1]) * w_p / math.radians(gt.fov_deg)) + 1
+    dem_gt = profile.rows_cyl_tan(w_p, h_p, gt.fov_deg, gt.yaw_gt_deg, 0.0)
+    dv_lim = int((w_p / math.radians(gt.fov_deg)) * math.tan(math.radians(PITCH_BOUNDS[1]))) + 1
     gt_cons, _ = _best_shift_chamfer(oracle, dem_gt, np.arange(-dv_lim, dv_lim + 1, 8), 60.0)
     rec["gt_consistency_px"] = round(gt_cons, 1)
 
     # ---- extracted track: solve every skyline hypothesis, the DEM chamfer arbitrates ----
     cands = _candidates(rgb, extractor)
     solved = {
-        name: (c, solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyl", pitch_bounds=PITCH_BOUNDS))
+        name: (c, solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS))
         for name, c in cands.items()
         if c.coverage >= 0.25
     }
@@ -212,8 +212,8 @@ def _overlay(rgb, gt, profile, extracted, oracle_rows, s_extr, out_path: Path) -
 
     draw(oracle_rows, (0, 255, 90))                                                   # GT depth skyline
     draw(extracted, (255, 70, 70))                                                    # photo extraction
-    draw(profile.rows_cyl(w, h, gt.fov_deg, s_extr.yaw_deg, s_extr.pitch_deg), (255, 225, 0))   # solved
-    draw(profile.rows_cyl(w, h, gt.fov_deg, gt.yaw_gt_deg, gt.pitch_gt_deg), (0, 200, 255))     # DEM @ GT
+    draw(profile.rows_cyl_tan(w, h, gt.fov_deg, s_extr.yaw_deg, s_extr.pitch_deg), (255, 225, 0))   # solved
+    draw(profile.rows_cyl_tan(w, h, gt.fov_deg, gt.yaw_gt_deg, gt.pitch_gt_deg), (0, 200, 255))     # DEM @ GT
     dr.rectangle([0, 0, w, 18], fill=(0, 0, 0))
     dr.text(
         (4, 3),
