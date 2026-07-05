@@ -88,6 +88,31 @@ if bench_files:
 else:
     check("T7", "geopose bench results present", False, "missing", "run scripts/bench_geopose.py")
 
+# ---- T8: GT v2 invariants (refined ground truth; run scripts/build_gt_v2.py) ----
+gtv2_index = BASE / "local/derived/gt_v2/index.json"
+if gtv2_index.exists() and bench_files:
+    gtv2 = {r["name"]: r for r in json.load(open(gtv2_index))}
+    bench_names = [r["name"] for r in bench]
+    have = [n for n in bench_names if n in gtv2]
+    check("T8", "GT v2 coverage of bench", len(have) >= 0.8 * len(bench_names),
+          f"{len(have)}/{len(bench_names)}", ">=80%")
+    if have:
+        clean = [n for n in have if gtv2[n]["quality"] == "CLEAN"]
+        check("T8", "CLEAN tier fraction", len(clean) >= 0.6 * len(have), f"{len(clean)}/{len(have)}", ">=60%")
+        # oracle success vs REFINED yaw on the CLEAN tier — the number that matters
+        ok = n_tot = 0
+        by_name = {r["name"]: r for r in bench}
+        for n in clean:
+            s = by_name[n].get("oracle")
+            if isinstance(s, dict) and "yaw" in s:
+                n_tot += 1
+                if abs((s["yaw"] - gtv2[n]["yaw_deg"] + 180) % 360 - 180) <= 5.0:
+                    ok += 1
+        if n_tot:
+            check("T8", "oracle@5deg vs refined GT (CLEAN)", ok >= 0.85 * n_tot, f"{ok}/{n_tot}", ">=85%")
+else:
+    check("T8", "GT v2 index present", False, "missing", "run scripts/build_gt_v2.py")
+
 # ---- print table ----
 print(f"\n{'id':5} {'result':6} {'criterion':26} {'measured':34} threshold")
 print("-" * 96)

@@ -99,6 +99,54 @@ methodology bug; an AMBIGUOUS that was right is merely lost recall.**
    (swissALTI3D / Bavaria LiDAR) is wired into the benchmark path; SRTM/Copernicus physically
    cannot represent those ridges (measured ~19 px irreducible gap).
 
+## GT v2 — refined ground truth and the outline chain (2026-07-05)
+
+The raw GeoPose3K labels carry measured noise (yaw median 0.8° and up to >3°; GPS median ~100 m,
+p90 ~178 m; residual crop tilt ≲1°).  Scoring a solver — or worse, tuning an optimizer — against
+that noise means optimizing against garbage.  **GT v2** (`peakle.localize.gtrefine`,
+`scripts/build_gt_v2.py`) is the refined layer everything downstream must use:
+
+1. **Pose polish, contour-arbitrated.**  Joint coarse grid over yaw×position (they compensate
+   each other through near-field structure — separated scans provably settle in wrong basins),
+   vertical shift as a two-stage scan (a coarse-only dv grid adds ±4 px of quantisation noise —
+   measured to make a wrong pose outscore the exact truth), residual tilt fit, and — decisive —
+   **near-field internal contours arbitrate among skyline-equivalent pose candidates** (the
+   far-field skyline is nearly position-blind; candidates within 2× of the best chamfer each get
+   a local refinement, then the GT-depth contours pick the winner).
+2. **Corrections are reported, never hidden.**  dyaw / dE / dN / tilt land in the per-sample
+   record; `|dyaw| > 3°` or poor reconstruction ⇒ tier `SUSPECT` with reasons.  **Only CLEAN
+   samples may score solvers/extractors.**
+3. **Validation gates for the refiner itself** (`tests/unit/test_gtrefine.py`): synthetic
+   contour extraction (occlusion found, sky edge not), the grazing-incidence trap (a smooth
+   slope at shallow view angle produces huge *continuous* depth gradients — the "gap test"
+   requires terrain to dip below the ray between near and far hits, or smooth slopes drown the
+   outline set in false contours), and a full pose round-trip with an injected label error that
+   must be reported back within the measured identifiability floor (~0.4° yaw, ~50 m position on
+   the synthetic).
+
+### Outlines (internal contours): how they are produced, checked, and used
+
+- **GT side**: `distance_crop.pfm` (the dataset's own depth render) contains the true internal
+  occlusion boundaries — `gt_contour_mask` extracts |Δ log d| > 0.30 jumps; the sky boundary is
+  excluded automatically.  This is real GT supervision for outlines, not an approximation.
+- **DEM side**: `dem_contour_mask` reconstructs the same boundaries from our terrain at any pose:
+  per-pixel visible distance via the first crossing of the ray's elevation envelope, jump
+  candidates filtered by the **gap test** (occlusion ⇔ terrain dips below the ray between the
+  near crest and the far surface; steep-but-continuous slopes are rejected).
+- **Checked**: per sample GT v2 stores the DEM↔GT contour chamfer (distance-transform based,
+  capped 40 px) and the GT contour *density*; `scripts/score_v2.py` reports which samples are
+  usable for outline matching at all (density ≥ 0.3, agreement ≤ 25 px).
+- **Used**: (a) inside GT v2 itself to pin position; (b) as the scoring reference for future
+  photo-side ridge extraction (same chamfer, same caps); (c) as the optimizer's model-side
+  curves — with per-sample reliability known *in advance* from the GT v2 record, so the
+  optimizer is never tuned on outlines the DEM cannot actually reproduce.
+
+### Scoring v2
+
+`scripts/score_v2.py` joins any bench run with GT v2: success vs raw label AND vs refined yaw,
+at 5° and at 2° (meaningful only now — raw-label noise used to swamp it), split ALL / MANUAL /
+CLEAN.  The benchmark number that matters going forward is **CLEAN-tier success vs refined yaw**.
+
 ## Current measured status (2026-07-05, 60-sample run, colour extractor)
 
 Live numbers live in `local/output/*-geopose-bench/summary.md`; snapshot:
