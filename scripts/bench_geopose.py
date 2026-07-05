@@ -40,6 +40,7 @@ BASE = Path(__file__).resolve().parents[1]
 DATA = BASE / "local/data/geopose"
 TILES = BASE / "local/data/copernicus"
 MAX_W = 1152  # solve cost scales with width; ~1150 cols keeps yaw resolution well under 0.1 deg
+PITCH_BOUNDS = (-50.0, 50.0)  # GeoPose3K crop offsets reach ~48 deg (offset ~ 1.2 * Euler b)
 
 
 def ang_err(a: float, b: float) -> float:
@@ -121,7 +122,9 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
     oracle_raw = oracle_skyline(gt.depth_path)
     h_o = _pfm_height(gt.depth_path)
     oracle = _resample(oracle_raw, w_p) * (h_p / h_o)
-    s_oracle = solve_orientation(oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyl")
+    # GeoPose3K crops carry vertical offsets up to ~1.2·b (measured +48° worst) — the default
+    # ±30° pitch bound put the true alignment OUTSIDE the search for every high-pitch sample
+    s_oracle = solve_orientation(oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyl", pitch_bounds=PITCH_BOUNDS)
     rec["oracle"] = solve_record(s_oracle, gt.yaw_gt_deg, gt.pitch_gt_deg)
 
     # GT consistency: chamfer between the GT-depth skyline and OUR DEM rendered at the GT yaw
@@ -129,13 +132,14 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
     # bad GT (mislocated/misoriented pose, esp. AUTO) or DEM trouble at that spot — a per-sample
     # cleanliness score that needs no human review.
     dem_gt = profile.rows_cyl(w_p, h_p, gt.fov_deg, gt.yaw_gt_deg, 0.0)
-    gt_cons, _ = _best_shift_chamfer(oracle, dem_gt, np.arange(-500, 501, 10), 60.0)
+    dv_lim = int(math.radians(PITCH_BOUNDS[1]) * w_p / math.radians(gt.fov_deg)) + 1
+    gt_cons, _ = _best_shift_chamfer(oracle, dem_gt, np.arange(-dv_lim, dv_lim + 1, 8), 60.0)
     rec["gt_consistency_px"] = round(gt_cons, 1)
 
     # ---- extracted track: solve every skyline hypothesis, the DEM chamfer arbitrates ----
     cands = _candidates(rgb, extractor)
     solved = {
-        name: (c, solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyl"))
+        name: (c, solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyl", pitch_bounds=PITCH_BOUNDS))
         for name, c in cands.items()
         if c.coverage >= 0.25
     }

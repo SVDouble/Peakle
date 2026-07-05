@@ -5,9 +5,13 @@ Dataset: 3000+ Alpine photos with GT pose and GT-rendered depth
 CYLINDRICAL crops.  ``info.txt`` layout: line1 = MANUAL|AUTO pose-source flag, line2 = ZYZ Euler
 (a, b, g) radians, lines 3-6 = lat, lon, elevation m, horizontal FOV radians.
 
-Orientation decode (verified against a solved sample — see docs/ridge-research notes):
-``R = Rz(-g) @ Rx(-b) @ Ry(-a) @ P`` with ``P = [[0,1,0],[0,0,1],[1,0,0]]``;
+Orientation decode: ``R = Rx(-g) @ Rz(-b) @ Ry(-a) @ P`` with ``P = [[0,1,0],[0,0,1],[1,0,0]]``;
 look = R @ [1,0,0]; east = -look[2], north = look[0], up = look[1].
+Convention chosen EMPIRICALLY (2026-07-05): brute-forced axis orders/signs against 35 solver-
+verified poses; this one has max yaw error 2.5° / mean 0.7° incl. the large-|b| samples where the
+previous ``Rz(-g)Rx(-b)Ry(-a)`` decode was off by 4-7° (the two are indistinguishable for small b,
+which is how the old one originally "verified").  Note large |b| also predicts a large vertical
+crop offset (~1.2·b) — solvers must allow pitch/shift bounds of ±50° on this dataset.
 
 The AUTO flag matters: automatic poses in the dataset are not human-verified and some are simply
 wrong — benchmark scoring should be restricted to (or at least split by) MANUAL samples.
@@ -58,7 +62,7 @@ def _decode_orientation(a: float, b: float, g: float) -> tuple[float, float, flo
         return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
     perm = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]])
-    rot = rz(-g) @ rx(-b) @ ry(-a) @ perm
+    rot = rx(-g) @ rz(-b) @ ry(-a) @ perm
     look = rot @ np.array([1.0, 0.0, 0.0])
     east, north, up = -look[2], look[0], look[1]
     yaw = math.degrees(math.atan2(east, north)) % 360.0

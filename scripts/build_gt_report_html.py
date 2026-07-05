@@ -16,6 +16,8 @@ RESULTS = Path(sys.argv[2])
 digest = json.load(open(ASSETS / "digest.json"))
 audit = json.load(open(ASSETS / "audit.json"))
 rows = [r for r in json.load(open(RESULTS)) if "error" not in r]
+n_conf = sum(1 for r in rows for t in ("oracle", "extracted")
+             if isinstance(r.get(t), dict) and r[t].get("verdict") == "CONFIRMED")
 
 
 def uri(name: str) -> str:
@@ -191,15 +193,16 @@ only because the crops are roll-rectified (corpus |roll|: median {c["roll_med_p9
 <tr><th>check</th><th>what it means</th><th>result (bench-60)</th></tr>
 <tr><td><b>GT consistency</b></td>
     <td>chamfer between the GT-depth skyline and <em>our</em> DEM rendered at the GT yaw
-        (vertical shift free). High = the GT pose and our terrain disagree.</td>
-    <td class="num">median <b>8.3&nbsp;px</b> (clean core), p90 40&nbsp;px, 9 samples ≥ 27&nbsp;px</td></tr>
+        (vertical shift free, ±50°). High = the GT pose and our terrain disagree.</td>
+    <td class="num">median <b>{b['gt_consistency_median']}&nbsp;px</b> (clean core), 5 samples ≥ 28&nbsp;px</td></tr>
 <tr><td><b>Camera below ground</b></td>
     <td>GT elevation vs DEM ground at the GT position (we clamp to ground + 2&nbsp;m before solving)</td>
     <td class="num">13 samples &gt; 5&nbsp;m below, worst −33&nbsp;m</td></tr>
 <tr><td><b>Solver consensus</b></td>
     <td>oracle and extracted tracks agree with <em>each other</em> (≤10° apart) but both sit &gt;20°
         from the GT label — the label itself is the outlier</td>
-    <td class="num"><b>{len(consensus)} samples</b>, {len(man_cons)} of them MANUAL (worst −159°)</td></tr>
+    <td class="num"><b>{len(consensus)} sample(s)</b>, {len(man_cons)} MANUAL — most earlier "consensus" flags
+        turned out to be OUR decode/search bugs, since fixed (see §5)</td></tr>
 </table></div>
 {img("cleanliness_hists.png", "Left: GT consistency — a clean core with a dirty tail. Middle: GT camera altitude vs DEM ground. Right: extraction error of the winning skyline hypothesis vs the GT skyline (2 px on clean photos, 200+ px on garbage ones).", "cleanliness histograms")}
 <h3>Flagged samples ({n_flag}/60)</h3>
@@ -245,7 +248,7 @@ several near-equal notches mean the skyline genuinely fits multiple directions.
 <b>Alias ratio</b> = best rival chamfer outside the winning basin ÷ winner (the rival gets the same
 fine polish as the winner, otherwise grid quantisation fakes a margin).</p>
 {img("profile_clean.png", f"A distinctive horizon: one sharp well at the GT yaw. Solved {pc['err']:+.1f}° off GT with alias {pc['alias']} and basin width {pc['well']:.0f}° → CONFIRMED.", "sharp yaw profile")}
-{img("profile_ambiguous.png", f"A self-similar horizon (the case that once produced a false CONFIRMED): two near-equal wells ~167° apart, alias {pa['alias']}. The solver picks the wrong one ({pa['err']:+.0f}°) — and says so: AMBIGUOUS.", "ambiguous yaw profile")}
+{img("profile_ambiguous.png", f"A self-similar horizon (the case that once produced a false CONFIRMED): several near-equal wells, alias {pa['alias']}. The solver picks a wrong one ({pa['err']:+.0f}°) — and says so: {pa['verdict']}.", "ambiguous yaw profile")}
 
 <h3>4.3 · Terrain self-similarity: the SNR gate</h3>
 <p>Even with a decent alias ratio, a wrong basin can look distinct if extraction noise happens to
@@ -269,30 +272,38 @@ DEM decides; if two plausible hypotheses solve &gt;10° apart, the verdict is do
 {img("diagnostic_auc.png", "Separation power of each no-GT diagnostic on the bench. Alias ratio dominates; coverage is useless (every candidate covers most columns).", "diagnostic AUC bars")}
 <div class="callout">
 <b>The calibrated gate</b> (max recall at 100% precision on this bench):
-<span class="mono">CONFIRMED ⇔ alias ≥ 1.35 ∧ basin ≤ 10° ∧ chamfer ≤ 10 px ∧ coverage ≥ 0.25</span>.
-On the current run: <span class="ok">40 CONFIRMED, 0 wrong</span>; the price is recall — ~⅓ of correct
-solves are labelled AMBIGUOUS. Enforced in CI as acceptance test T7: <em>no wrong solve is ever CONFIRMED</em>.
+<span class="mono">CONFIRMED ⇔ alias ≥ 1.5 ∧ chamfer ≤ 20 px ∧ SNR ≥ 2 ∧ coverage ≥ 0.25</span>.
+On the current run: <span class="ok">{n_conf} CONFIRMED, 0 wrong</span>; the price is recall — ~⅓ of correct
+solves are labelled AMBIGUOUS. Enforced as acceptance test T7: <em>no wrong solve is ever CONFIRMED</em>.
+The gate was recalibrated after the solver fixes below — the previous thresholds produced 2 false
+CONFIRMED under the new search geometry. Recalibration after any solver change is part of the workflow.
 </div>
 </section>
 
 <section>
 <h2>5 · Weaknesses &amp; what changed today</h2>
 <h3>Fixed in this pass</h3>
-<p>① <b>GT consistency + camera-below-ground + solver-consensus checks</b> now run in every bench and
-land in <span class="mono">results.json</span> — dirty GT is flagged automatically instead of polluting
-the score. ② The 60-sample subset is <b>pinned in a manifest</b> so runs stay comparable as the corpus
-grows. ③ <b>Roll is decoded</b> from the GT Euler angles and reported. ④ Per-candidate extraction
-records (coverage, error vs GT skyline, solve outcome) are stored for every hypothesis, not just the
-winner.</p>
+<p>① <b>Euler decode convention corrected</b>: the old decode was verified only on small-pitch samples
+where conventions are indistinguishable; brute-forcing axis orders against 35 solver-verified poses
+found <span class="mono">Rx(−g)·Rz(−b)·Ry(−a)·P</span> (max yaw error 2.5° vs 6.7° before).
+② <b>Solver: top-K basin polish</b> — the coarse vertical-shift grid could inflate the true basin past
+a smooth alias (measured: true yaw 20.7 px on the grid vs 5.1 px fine); now the 12 best basins are
+fine-polished and the best wins. One sample went from −159° error to −0.2° CONFIRMED.
+③ <b>Pitch bounds ±50°</b>: GeoPose3K crops carry vertical offsets up to ~48° (≈1.2·Euler-b); the old
+±30° bound put the true alignment outside the search for every steep-look photo.
+④ <b>GT cleanliness checks</b> (consistency, buried camera, solver consensus) run in every bench;
+the subset is pinned in a manifest; per-candidate extraction records are kept.
+Net effect: oracle success 41/60 → <b>{oracle_ok}/60</b>, flagged samples 16 → {n_flag}.</p>
 <h3>Open, in leverage order</h3>
-<p>① <b>Extraction</b> — oracle 68% vs extracted 43% is the whole gap; the two colour detectors fail on
-haze-free/cloudy edge cases and there is no learned fallback validated yet (the SAM3 sky prompt was
-measured 300–530 px wrong on these crops — do not trust it without re-validation).
-② <b>Bench hygiene</b> — review the {n_flag} flagged samples and publish a cleaned MANUAL subset with
-both raw and clean scores. ③ <b>Internal silhouettes</b> — the GT depth's occlusion boundaries are
-unused supervision that would disambiguate self-similar horizons. ④ <b>Region bias</b> — stream
-non-Alpine samples from deeper in the archive; add foto-webcam fixed cameras as an independent pinhole
-GT source (also exercises roll ≠ 0). ⑤ <b>AUTO labels</b> — treat as weak GT only.</p>
+<p>① <b>Extraction</b> — oracle {oracle_ok}/60 vs extracted {extr_ok}/60 is now overwhelmingly the
+gap; the two colour detectors fail on haze/cloud edge cases and there is no learned fallback validated
+yet (the SAM3 sky prompt was measured 300–530 px wrong on these crops — do not trust it without
+re-validation). ② <b>Bench hygiene</b> — review the {n_flag} flagged samples and publish a cleaned
+MANUAL subset with raw and clean scores. ③ <b>Internal silhouettes</b> — the GT depth's occlusion
+boundaries are unused supervision that would disambiguate self-similar horizons. ④ <b>Corpus growth</b>
+— the full 3.1k-sample archive is downloading; CrossLocate (same group) offers ~12k more photos with
+positions for semi-automatic GT growth via CONFIRMED-verdict self-annotation; foto-webcam fixed cameras
+give an independent pinhole GT source (and exercise roll ≠ 0). ⑤ <b>AUTO labels</b> — weak GT only.</p>
 </section>
 </main>
 """

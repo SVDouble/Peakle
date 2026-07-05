@@ -172,6 +172,44 @@ def bench_charts(rows: list[dict], out: Path) -> dict:
     return {"aucs": aucs, "gt_consistency_median": round(float(np.median(gc)), 1)}
 
 
+# -------------------------------------------------------------- audit table
+def build_audit(rows: list[dict], results_path: Path, out: Path) -> list[dict]:
+    """Flag suspect samples: bad GT↔DEM agreement, buried camera, or a solver consensus that
+    contradicts the label WITHOUT the DEM contradicting it (that combination = solver failure,
+    not GT dirt — it is excluded here)."""
+
+    def ang(a):
+        return (a + 180) % 360 - 180
+
+    audit = []
+    for r in rows:
+        o, e = r.get("oracle", {}), r.get("extracted", {})
+        flags = []
+        if r.get("gt_consistency_px", 0) > 25:
+            flags.append(f"GT↔DEM mismatch {r['gt_consistency_px']:.0f}px")
+        if r.get("alt_above_ground", 0) < -20:
+            flags.append(f"camera {-r['alt_above_ground']:.0f}m below DEM ground")
+        oy, ey = o.get("yaw_err"), e.get("yaw_err")
+        if (
+            isinstance(oy, (int, float)) and isinstance(ey, (int, float)) and np.isfinite(ey)
+            and abs(oy) > 20 and abs(ang(oy - ey)) < 10 and r.get("gt_consistency_px", 0) > 25
+        ):
+            flags.append(f"solver consensus at {oy:+.0f}° from GT label")
+        if flags:
+            audit.append({"name": r["name"], "manual": r["manual"], "flags": flags,
+                          "gt_consistency": r.get("gt_consistency_px"), "oracle_err": oy})
+    audit.sort(key=lambda a: -(a["gt_consistency"] or 0))
+    overlays = results_path.parent / "overlays"
+    for a in audit[:8]:
+        src = overlays / f"{a['name']}.jpg"
+        if src.exists():
+            im = Image.open(src)
+            im.thumbnail((560, 560))
+            im.save(out / f"audit_{a['name']}.jpg", quality=78)
+    (out / "audit.json").write_text(json.dumps(audit, indent=1))
+    return audit
+
+
 # ------------------------------------------------------------- worked examples
 def _std_rgb(sample) -> np.ndarray:
     rgb = np.asarray(Image.open(sample.photo_path).convert("RGB"), np.uint8)
@@ -311,6 +349,8 @@ def main() -> None:
     digest["corpus"] = corpus_stats(out)
     print("bench-60 charts...")
     digest["bench"] = bench_charts(rows, out)
+    print("audit table...")
+    digest["n_flagged"] = len(build_audit(rows, Path(args.results).resolve(), out))
 
     print("worked examples (re-solving 3 samples)...")
     clean = load_sample(DATA / "eth_ch1_2011-10-04_15:22:47_01024")

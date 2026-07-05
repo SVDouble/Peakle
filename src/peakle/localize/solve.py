@@ -189,34 +189,59 @@ def solve_orientation(
         if best is None or ch[i] < best[0]:
             best = (float(ch[i]), float(yaws[i]), float(dv_at[i]), float(fov), ch.copy(), dv_at.copy())
 
-    cmin, yaw0, dv0, fov0, prof_ch, prof_dv = best
+    _, _, _, fov0, prof_ch, prof_dv = best
     dv_step_used = max(
         4.0, _dv_for_pitch(projection, width, height, fov0, max(abs(pitch_bounds[0]), abs(pitch_bounds[1]))) / 12.0
     )
 
     def _polish(yaw_c: float, dv_c: float) -> tuple[float, float, float]:
+        """Fine (yaw, dv) around a coarse candidate; dv is two-stage (coarse step, then unit)."""
+
         c_best, y_best, dv_pick = math.inf, yaw_c, dv_c
-        fine_dvs = np.arange(dv_c - max(dv_step_used, 8.0), dv_c + max(dv_step_used, 8.0) + 1e-9, 1.0)
-        for yaw in np.arange(yaw_c - yaw_step_deg, yaw_c + yaw_step_deg + 1e-9, yaw_step_deg / 4):
-            base = profile.rows(projection, width, height, fov0, float(yaw), 0.0)
-            c, dv = _best_shift_chamfer(obs, base, fine_dvs, cap_px)
-            if c < c_best:
-                c_best, y_best, dv_pick = float(c), float(yaw % 360.0), float(dv)
+        for dvs in (
+            np.arange(dv_c - max(dv_step_used, 8.0), dv_c + max(dv_step_used, 8.0) + 1e-9, 8.0),
+            None,  # placeholder replaced below with the unit scan around the stage-1 winner
+        ):
+            if dvs is None:
+                dvs = np.arange(dv_pick - 8.0, dv_pick + 8.01, 1.0)
+            for yaw in np.arange(y_best - yaw_step_deg, y_best + yaw_step_deg + 1e-9, yaw_step_deg / 4):
+                base = profile.rows(projection, width, height, fov0, float(yaw), 0.0)
+                c, dv = _best_shift_chamfer(obs, base, dvs, cap_px)
+                if c < c_best:
+                    c_best, y_best, dv_pick = float(c), float(yaw % 360.0), float(dv)
         return c_best, y_best, dv_pick
 
-    cmin, yaw0, dv0 = _polish(yaw0, dv0)
+    # polish the TOP-K distinct coarse basins, not just the argmin: the coarse dv grid can easily
+    # inflate the true basin past a smooth alias (measured: true yaw 20.7px on the grid vs 5.1px
+    # fine — the alias won the coarse ranking and the truth was never polished)
+    order = np.argsort(prof_ch)
+    picked: list[int] = []
+    for i in order:
+        if all(min(abs(yaws[i] - yaws[j]), 360.0 - abs(yaws[i] - yaws[j])) > 8.0 for j in picked):
+            picked.append(int(i))
+        if len(picked) >= 12:
+            break
+    cmin, yaw0, dv0 = math.inf, float(yaws[picked[0]]), float(prof_dv[picked[0]])
+    polished = []
+    for i in picked:
+        c_p, y_p, dv_p = _polish(float(yaws[i]), float(prof_dv[i]))
+        polished.append((c_p, y_p, dv_p))
+        if c_p < cmin:
+            cmin, yaw0, dv0 = c_p, y_p, dv_p
 
     pitch = profile.pitch_from_shift(projection, width, height, fov0, dv0)
-    best_i = int(np.argmin(prof_ch))
+    best_i = int(np.argmin(np.abs(((yaws - yaw0 + 180) % 360) - 180)))
     well_width, inside = _basin(yaws, prof_ch, best_i)
 
-    # honest alias margin: the strongest rival OUTSIDE the winning basin gets the same fine
-    # polish as the winner, else coarse-grid quantisation compresses the ratio toward 1
+    # honest alias margin: best POLISHED rival outside the winning basin vs the winner
     alias = 1.0
     if not inside.all():
-        rival_i = int(np.argmin(np.where(inside, np.inf, prof_ch)))
-        c_rival, _, _ = _polish(float(yaws[rival_i]), float(prof_dv[rival_i]))
-        alias = float(c_rival / cmin) if cmin > 0 else 1.0
+        rivals = [c for c, y, _ in polished
+                  if not inside[int(np.argmin(np.abs(((yaws - y + 180) % 360) - 180)))]]
+        if not rivals:  # every polished candidate fell inside the basin — polish the coarse outside best
+            rival_i = int(np.argmin(np.where(inside, np.inf, prof_ch)))
+            rivals = [_polish(float(yaws[rival_i]), float(prof_dv[rival_i]))[0]]
+        alias = float(min(rivals) / cmin) if cmin > 0 else 1.0
 
     # terrain self-distinctiveness: chamfer the SOLVED DEM window against the DEM horizon at all
     # other yaws.  If the terrain nearly repeats itself (a symmetric valley, a rolling ridge), a
@@ -277,13 +302,15 @@ def _best_shift_chamfer(
 
 
 def _provisional_verdict(s: OrientationSolve, cap_px: float) -> str:
-    """Calibrated on the 60-sample GeoPose3K benchmark (scripts/calibrate_verdict.py, 2026-07-05):
-    this gate confirmed 0 wrong solves out of 40 confirmations (recall 60-68% of correct solves).
-    Re-run the calibration when the benchmark grows; 100% precision here is not a field guarantee.
+    """Calibrated on the 60-sample GeoPose3K benchmark (scripts/calibrate_verdict.py; recalibrated
+    2026-07-05 after the top-K-polish/±50°-pitch solver change): 0 wrong of 47 confirmations,
+    recall 65%.  MUST be recalibrated after any solver/search change — the diagnostics'
+    distributions move with the search geometry (the previous gate produced 2 false CONFIRMED
+    after the solver fix).  100% precision on the bench is not a field guarantee.
     """
 
     if s.coverage < 0.25 or s.chamfer_px > 0.5 * cap_px:
         return "REJECTED"
-    if s.alias_ratio >= 1.35 and s.well_width_deg <= 10.0 and s.chamfer_px <= 10.0:
+    if s.alias_ratio >= 1.5 and s.chamfer_px <= 20.0 and s.snr >= 2.0:
         return "CONFIRMED"
     return "AMBIGUOUS"
