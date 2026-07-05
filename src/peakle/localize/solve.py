@@ -38,6 +38,8 @@ class OrientationSolve:
     snr: float                           # terrain_distinct_px / chamfer_px — fit noise vs signal
     yaw_profile_deg: np.ndarray = field(repr=False)
     yaw_profile_chamfer: np.ndarray = field(repr=False)
+    self_profile_deg: np.ndarray = field(repr=False)      # terrain self-similarity scan (see snr)
+    self_profile_chamfer: np.ndarray = field(repr=False)
     verdict: str = "UNCALIBRATED"
 
     def summary(self) -> str:
@@ -246,6 +248,8 @@ def solve_orientation(
         snr=snr,
         yaw_profile_deg=yaws,
         yaw_profile_chamfer=prof_ch,
+        self_profile_deg=self_yaws,
+        self_profile_chamfer=self_ch,
     )
     solve.verdict = _provisional_verdict(solve, cap_px)
     return solve

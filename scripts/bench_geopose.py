@@ -34,7 +34,7 @@ from PIL import Image, ImageDraw
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, oracle_skyline
-from peakle.localize.solve import HorizonProfile, OrientationSolve, solve_orientation
+from peakle.localize.solve import HorizonProfile, OrientationSolve, _best_shift_chamfer, solve_orientation
 
 BASE = Path(__file__).resolve().parents[1]
 DATA = BASE / "local/data/geopose"
@@ -98,6 +98,7 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
         "fov_deg": round(gt.fov_deg, 2),
         "gt_yaw": round(gt.yaw_gt_deg, 2),
         "gt_pitch": round(gt.pitch_gt_deg, 2),
+        "gt_roll": round(gt.roll_gt_deg, 2),
     }
 
     terrain = load_cop_around(TILES, gt.lat, gt.lon, extent_m=extent_m, grid=grid)
@@ -123,6 +124,14 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
     s_oracle = solve_orientation(oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyl")
     rec["oracle"] = solve_record(s_oracle, gt.yaw_gt_deg, gt.pitch_gt_deg)
 
+    # GT consistency: chamfer between the GT-depth skyline and OUR DEM rendered at the GT yaw
+    # (vertical shift free — GT pitch is not comparable in crop coords).  High values flag either
+    # bad GT (mislocated/misoriented pose, esp. AUTO) or DEM trouble at that spot — a per-sample
+    # cleanliness score that needs no human review.
+    dem_gt = profile.rows_cyl(w_p, h_p, gt.fov_deg, gt.yaw_gt_deg, 0.0)
+    gt_cons, _ = _best_shift_chamfer(oracle, dem_gt, np.arange(-500, 501, 10), 60.0)
+    rec["gt_consistency_px"] = round(gt_cons, 1)
+
     # ---- extracted track: solve every skyline hypothesis, the DEM chamfer arbitrates ----
     cands = _candidates(rgb, extractor)
     solved = {
@@ -130,6 +139,19 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
         for name, c in cands.items()
         if c.coverage >= 0.25
     }
+    # per-candidate detail (kept even for losers/skipped — the report reads extraction quality off it)
+    rec["candidates"] = {}
+    for name, c in cands.items():
+        both_c = np.isfinite(c.rows) & np.isfinite(oracle)
+        entry = {
+            "coverage": round(c.coverage, 3),
+            "err_vs_oracle_px": round(float(np.median(np.abs(c.rows - oracle)[both_c])), 1) if both_c.any() else None,
+        }
+        if name in solved:
+            s_c = solved[name][1]
+            entry.update(yaw_err=round(ang_err(s_c.yaw_deg, gt.yaw_gt_deg), 2), chamfer_px=round(s_c.chamfer_px, 2), verdict=s_c.verdict)
+        rec["candidates"][name] = entry
+
     if solved:
         win_name, (win_c, s_extr) = min(solved.items(), key=lambda kv: kv[1][1].chamfer_px)
         rivals = [s for _, (_, s) in solved.items() if s.chamfer_px <= 1.3 * s_extr.chamfer_px]
@@ -233,6 +255,8 @@ def main() -> None:
     ap.add_argument("--extent-km", type=float, default=90.0)
     ap.add_argument("--grid", type=int, default=3000)
     ap.add_argument("--extractor", choices=["color", "sam3"], default="color")
+    ap.add_argument("--manifest", default=str(BASE / "scripts/geopose_manifest_60.txt"),
+                    help="pinned sample list; keeps runs comparable as the corpus grows")
     args = ap.parse_args()
 
     needed = ("info.txt", "cyl/photo_crop.jpg", "cyl/distance_crop.pfm")
@@ -240,6 +264,10 @@ def main() -> None:
     if args.samples:
         want = set(args.samples.split(","))
         dirs = [d for d in dirs if d.name in want]
+    elif Path(args.manifest).exists():
+        want = [ln.strip() for ln in Path(args.manifest).read_text().splitlines() if ln.strip()]
+        by_name = {d.name: d for d in dirs}
+        dirs = [by_name[n] for n in want if n in by_name]
     dirs = dirs[: args.max_n]
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

@@ -113,5 +113,10 @@ Live numbers live in `local/output/*-geopose-bench/summary.md`; snapshot:
   detector agreement 0.71, coverage 0.57 (useless).  Chamfer ranges of correct and wrong solves
   OVERLAP — the residual alone can never be the success signal.
 - Corpus on disk: 672 complete GeoPose3K samples (130 MANUAL) via `scripts/fetch_geopose.py`;
-  the standard run uses the first 60.  TODO: pin the subset in a manifest so future runs stay
-  comparable as the corpus grows.
+  the standard run is pinned in `scripts/geopose_manifest_60.txt`.
+- **GT cleanliness is itself measured** (bench records `gt_consistency_px`, camera-below-ground,
+  solver-consensus-vs-label; report via `scripts/gt_report.py` + `build_gt_report_html.py`):
+  the core is clean (median GT↔DEM skyline consistency 8.3 px) but 16/60 samples carry flags,
+  including 7 where both solver tracks agree with each other 20–160° away from the GT label
+  (4 of them MANUAL) — the raw success rates understate the solver.  On MANUAL samples passing
+  the cleanliness checks the oracle track scores substantially higher than the raw 63%.

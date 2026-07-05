@@ -33,6 +33,7 @@ class GeoPoseSample:
     fov_deg: float
     yaw_gt_deg: float      # azimuth, 0 = North, clockwise to East
     pitch_gt_deg: float
+    roll_gt_deg: float     # image-plane roll; the solver assumes 0, so large |roll| = harder GT
 
     @property
     def photo_path(self) -> Path:
@@ -43,7 +44,7 @@ class GeoPoseSample:
         return self.root / "cyl" / "distance_crop.pfm"
 
 
-def _decode_orientation(a: float, b: float, g: float) -> tuple[float, float]:
+def _decode_orientation(a: float, b: float, g: float) -> tuple[float, float, float]:
     def rx(t):
         c, s = math.cos(t), math.sin(t)
         return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
@@ -57,18 +58,27 @@ def _decode_orientation(a: float, b: float, g: float) -> tuple[float, float]:
         return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
     perm = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]])
-    look = (rz(-g) @ rx(-b) @ ry(-a) @ perm) @ np.array([1.0, 0.0, 0.0])
+    rot = rz(-g) @ rx(-b) @ ry(-a) @ perm
+    look = rot @ np.array([1.0, 0.0, 0.0])
     east, north, up = -look[2], look[0], look[1]
     yaw = math.degrees(math.atan2(east, north)) % 360.0
     pitch = math.degrees(math.atan2(up, math.hypot(east, north)))
-    return yaw, pitch
+    # roll: angle of the camera's image-up axis (camera z in this convention: at zero Euler it
+    # maps to world up [0,1,0]) around the look direction, relative to true vertical
+    img_up = rot @ np.array([0.0, 0.0, 1.0])
+    world_up = np.array([0.0, 1.0, 0.0])
+    right = np.cross(world_up, look)
+    right = right / max(np.linalg.norm(right), 1e-9)
+    true_up = np.cross(look, right)
+    roll = math.degrees(math.atan2(float(img_up @ right), float(img_up @ true_up)))
+    return yaw, pitch, roll
 
 
 def load_sample(sample_dir: str | Path) -> GeoPoseSample:
     root = Path(sample_dir)
     lines = [ln.strip() for ln in (root / "info.txt").read_text().splitlines() if ln.strip()]
     a, b, g = (float(x) for x in lines[1].split())
-    yaw, pitch = _decode_orientation(a, b, g)
+    yaw, pitch, roll = _decode_orientation(a, b, g)
     return GeoPoseSample(
         name=root.name,
         root=root,
@@ -79,6 +89,7 @@ def load_sample(sample_dir: str | Path) -> GeoPoseSample:
         fov_deg=math.degrees(float(lines[5])),
         yaw_gt_deg=yaw,
         pitch_gt_deg=pitch,
+        roll_gt_deg=roll,
     )
 
 
