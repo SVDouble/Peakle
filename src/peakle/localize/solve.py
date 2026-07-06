@@ -40,6 +40,9 @@ class OrientationSolve:
     yaw_profile_chamfer: np.ndarray = field(repr=False)
     self_profile_deg: np.ndarray = field(repr=False)      # terrain self-similarity scan (see snr)
     self_profile_chamfer: np.ndarray = field(repr=False)
+    candidates: list[tuple[float, float, float]] = field(default_factory=list, repr=False)
+    """Polished (chamfer, yaw, dv) pose candidates, best first — rerank fodder for
+    explanation matching against typed DEM outlines."""
     verdict: str = "UNCALIBRATED"
 
     def summary(self) -> str:
@@ -282,6 +285,7 @@ def solve_orientation(
         yaw_profile_chamfer=prof_ch,
         self_profile_deg=self_yaws,
         self_profile_chamfer=self_ch,
+        candidates=sorted(polished),
     )
     solve.verdict = _provisional_verdict(solve, cap_px)
     return solve
