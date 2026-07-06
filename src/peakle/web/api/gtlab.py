@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import threading
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ from PIL import Image
 
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.geopose import load_sample, read_pfm
-from peakle.localize.gtrefine import crop_az_deg, dem_depth_image
+from peakle.localize.gtrefine import crop_az_deg, dem_depth_image, dem_skyline, quality_tier, shift_align
 from peakle.localize.photo_support import edge_mask, support_report
 from peakle.localize.typed_outlines import extract_typed_outlines
 
@@ -218,6 +219,74 @@ async def sample_meta(name: str) -> dict[str, Any]:
         await to_thread.run_sync(_build_layers, name)
     support = json.loads(support_path.read_text()) if support_path.exists() else None
     return rec | {"lat": lat, "lon": lon, "layers": LAYER_NAMES, "photo_support": support}
+
+
+@lru_cache(maxsize=3)
+def _terrain_for(name: str):
+    s = load_sample(DATA / name)
+    return load_cop_around(TILES, s.lat, s.lon, extent_m=90000.0, grid=3000)
+
+
+def _adjusted_rows(rec: dict, dyaw: float, de: float, dn: float) -> np.ndarray:
+    terrain = _terrain_for(rec["name"])
+    az = crop_az_deg(rec["width"], rec["fov_deg"], rec["yaw_deg"] + dyaw)
+    return dem_skyline(terrain, rec["cam_z_m"], az, rec["width"], rec["height"], rec["fov_deg"],
+                       rec["de_m"] + de, rec["dn_m"] + dn)
+
+
+@router.get("/gt/samples/{name}/skyline")
+async def sample_skyline(name: str, dyaw: float = 0.0, de: float = 0.0, dn: float = 0.0,
+                         dv: float = 0.0) -> dict[str, Any]:
+    """DEM skyline rows at the sample's refined pose plus manual deltas (adjust preview)."""
+
+    rec = _index().get(name)
+    if rec is None:
+        raise HTTPException(404, f"unknown sample {name}")
+    rows = await to_thread.run_sync(_adjusted_rows, rec, dyaw, de, dn)
+    shifted = rows + rec["dv_px"] + dv
+    return {"rows": [round(float(r), 1) if np.isfinite(r) else None for r in shifted]}
+
+
+@router.post("/gt/samples/{name}/adjust")
+async def save_adjust(name: str, body: dict[str, float]) -> dict[str, Any]:
+    """Persist a manual pose correction: update the record + npz, and write a sidecar
+    (local/derived/gt_v2/manual/) so future rebuilds seed from the corrected yaw."""
+
+    rec = _index().get(name)
+    if rec is None:
+        raise HTTPException(404, f"unknown sample {name}")
+    dyaw = float(body.get("dyaw", 0.0))
+    de, dn, dv = float(body.get("de", 0.0)), float(body.get("dn", 0.0)), float(body.get("dv", 0.0))
+
+    def apply() -> dict:
+        rows = _adjusted_rows(rec, dyaw, de, dn)
+        dv_total = rec["dv_px"] + dv
+        npz_path = GTV2 / f"{name}.npz"
+        z = dict(np.load(npz_path).items())
+        obs = z["gt_skyline"].astype(float)
+        cons, _ = shift_align(obs, rows, np.asarray([dv_total]), step=2)  # dv is user-set, not re-fit
+        rec.update(
+            yaw_deg=(rec["yaw_deg"] + dyaw) % 360.0,
+            dyaw_deg=rec["dyaw_deg"] + dyaw,
+            de_m=rec["de_m"] + de,
+            dn_m=rec["dn_m"] + dn,
+            dv_px=dv_total,
+            sky_cons_px=round(float(cons), 2),
+            manual_adjust=True,
+        )
+        quality, reasons = quality_tier(rec["sky_cons_px"], rec.get("contour_cons_px"), rec["dyaw_deg"], [])
+        rec.update(quality=quality, reasons=reasons)
+        z["dem_skyline"] = (rows + dv_total).astype(np.float32)
+        np.savez_compressed(npz_path, **z)
+        (GTV2 / f"{name}.json").write_text(json.dumps(rec, indent=1))
+        manual_dir = GTV2 / "manual"
+        manual_dir.mkdir(exist_ok=True)
+        (manual_dir / f"{name}.json").write_text(json.dumps(
+            {"yaw_deg": rec["yaw_deg"], "de_m": rec["de_m"], "dn_m": rec["dn_m"], "dv_px": rec["dv_px"]}
+        ))
+        return rec
+
+    return await to_thread.run_sync(apply)
 
 
 @router.get("/gt/samples/{name}/layers/{layer}.png")

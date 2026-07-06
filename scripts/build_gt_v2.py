@@ -103,9 +103,15 @@ def build_one(name: str) -> RefinedGT:
 
     terrain = load_cop_around(TILES, s.lat, s.lon, extent_m=90000.0, grid=3000)
     cam_z0 = max(s.elev_m, terrain.elevation_at(0.0, 0.0) + 2.0)
-    fit = refine_pose(terrain, cam_z0, obs, w, h, s.fov_deg, s.yaw_gt_deg, gt_dt)
+    # a manual adjustment saved from the app is a human-verified label: seed the polish
+    # from the corrected yaw instead of the original (possibly bad) dataset label
+    yaw0 = s.yaw_gt_deg
+    manual = OUT / "manual" / f"{name}.json"
+    if manual.exists():
+        yaw0 = float(json.loads(manual.read_text())["yaw_deg"])
+    fit = refine_pose(terrain, cam_z0, obs, w, h, s.fov_deg, yaw0, gt_dt)
 
-    az = crop_az_deg(w, s.fov_deg, s.yaw_gt_deg + fit["dyaw"])
+    az = crop_az_deg(w, s.fov_deg, yaw0 + fit["dyaw"])
     dem_mask = dem_contour_mask(
         terrain, fit["cam_z"], az, w, h, s.fov_deg, fit["dv"], fit["de"], fit["dn"], fit["tilt"]
     )
@@ -125,8 +131,8 @@ def build_one(name: str) -> RefinedGT:
     rec = RefinedGT(
         name=name,
         manual=s.manual,
-        yaw_deg=(s.yaw_gt_deg + fit["dyaw"]) % 360.0,
-        dyaw_deg=fit["dyaw"],
+        yaw_deg=(yaw0 + fit["dyaw"]) % 360.0,
+        dyaw_deg=((yaw0 + fit["dyaw"] - s.yaw_gt_deg + 180.0) % 360.0) - 180.0,
         de_m=fit["de"],
         dn_m=fit["dn"],
         cam_z_m=fit["cam_z"],

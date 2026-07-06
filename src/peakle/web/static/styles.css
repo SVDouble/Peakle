@@ -891,3 +891,57 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 .gt-inspect-meta b {
   color: var(--text);
 }
+
+/* --- GT pose adjust --- */
+.gt-adjust {
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
+.gt-adjust summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  user-select: none;
+}
+
+.gt-adjust .field {
+  margin-top: 4px;
+}
+
+.adjust-line {
+  fill: none;
+  stroke: #ffd24a;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.85));
+}
+
+.adjust-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.adjust-save,
+.adjust-reset {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.adjust-save:hover {
+  border-color: var(--accent);
+}
+
+.adjust-status {
+  color: var(--muted);
+  font-size: 11.5px;
+}
