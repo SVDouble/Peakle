@@ -31,6 +31,7 @@ from PIL import Image
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.geopose import load_sample, read_pfm
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image
+from peakle.localize.photo_support import edge_mask, support_report
 from peakle.localize.typed_outlines import extract_typed_outlines
 
 router = APIRouter(tags=["gtlab"])
@@ -46,7 +47,7 @@ _COLORS = {
     "gt": {"sky": (0, 230, 90), "occ": (255, 150, 30), "rib": (255, 235, 59), "cou": (232, 110, 220)},
     "dem": {"sky": (0, 200, 255), "occ": (255, 70, 70), "rib": (80, 170, 255), "cou": (170, 90, 255)},
 }
-LAYER_NAMES = ["photo", "gt_depth", "dem_depth"] + [f"{s}_{f}" for s in ("gt", "dem") for f in ("sky", "occ", "rib", "cou")]
+LAYER_NAMES = ["photo", "gt_depth", "dem_depth", "edges"] + [f"{s}_{f}" for s in ("gt", "dem") for f in ("sky", "occ", "rib", "cou")]
 
 
 def _index() -> dict[str, dict]:
@@ -154,6 +155,27 @@ def _build_layers(name: str) -> None:
     for fam, mask in (("occ", dem_typed.occlusion), ("rib", dem_typed.rib), ("cou", dem_typed.couloir)):
         (out / f"dem_{fam}.png").write_bytes(_mask_png(mask, _COLORS["dem"][fam], w, h))
 
+    # photo-edge support: which of these lines does the PHOTOGRAPH actually show?
+    edges = edge_mask(np.asarray(rgb, np.uint8))
+    if edges is not None:
+        (out / "edges.png").write_bytes(_mask_png(edges, (245, 245, 245), w, h))
+
+        def full(mask: np.ndarray) -> np.ndarray:
+            if mask.shape == (h, w):
+                return mask
+            m = Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.NEAREST)
+            return np.asarray(m) > 0
+
+        masks = {
+            "gt_sky": _rows_mask(gt_sky, w, h), "gt_occ": full(gt_typed.occlusion),
+            "gt_rib": full(gt_typed.rib), "gt_cou": full(gt_typed.couloir),
+            "dem_sky": _rows_mask(dem_sky, w, h), "dem_occ": full(dem_typed.occlusion),
+            "dem_rib": full(dem_typed.rib), "dem_cou": full(dem_typed.couloir),
+        }
+        (out / "support.json").write_text(json.dumps(
+            {k: (round(v, 3) if v is not None else None) for k, v in support_report(masks, edges).items()}
+        ))
+
 
 @router.get("/gt/samples/{name}/meta")
 async def sample_meta(name: str) -> dict[str, Any]:
@@ -161,7 +183,11 @@ async def sample_meta(name: str) -> dict[str, Any]:
     if rec is None:
         raise HTTPException(404, f"unknown sample {name}")
     lat, lon = _latlon(name)
-    return rec | {"lat": lat, "lon": lon, "layers": LAYER_NAMES}
+    support_path = LAYERS / name / "support.json"
+    if not support_path.exists():
+        await to_thread.run_sync(_build_layers, name)
+    support = json.loads(support_path.read_text()) if support_path.exists() else None
+    return rec | {"lat": lat, "lon": lon, "layers": LAYER_NAMES, "photo_support": support}
 
 
 @router.get("/gt/samples/{name}/layers/{layer}.png")

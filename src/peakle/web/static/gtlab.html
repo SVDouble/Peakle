@@ -60,6 +60,7 @@ kbd { background:var(--line); border-radius:3px; padding:0 5px; font-size:11px; 
     <div class="group"><b>Depth masks</b>
       <label class="toggle"><input type="checkbox" data-layer="gt_depth"><span class="swatch" style="background:#5aa0d0"></span>GT depth</label>
       <label class="toggle"><input type="checkbox" data-layer="dem_depth"><span class="swatch" style="background:#2a5a80"></span>DEM depth</label>
+      <label class="toggle"><input type="checkbox" data-layer="edges"><span class="swatch" style="background:#f5f5f5"></span>photo edges</label>
     </div>
     <div class="group"><b>Position</b><svg id="map" width="170" height="130"></svg></div>
     <div class="group" style="flex:1"><b>Sample</b><div id="meta">select a sample…</div></div>
@@ -117,6 +118,13 @@ function fmt(v, d = 1) { return v == null ? "–" : Number(v).toFixed(d); }
 
 async function select(name) {
   current = samples.find((s) => s.name === name);
+  fetch(`/api/gt/samples/${encodeURIComponent(name)}/meta`).then(r => r.json()).then((meta) => {
+    if (current?.name !== name || !meta.photo_support) return;
+    const sup = meta.photo_support;
+    const line = (src) => FAMS.map(([f]) => `${f} <b>${sup[`${src}_${f}`] ?? "–"}</b>`).join(" · ");
+    document.getElementById("meta").insertAdjacentHTML("beforeend",
+      `<br>photo support — GT: ${line("gt")}<br>photo support — DEM: ${line("dem")}`);
+  }).catch(() => {});
   document.querySelectorAll("#samples li").forEach((li) => li.classList.toggle("sel", li.dataset.name === name));
   document.querySelector(`#samples li[data-name="${CSS.escape(name)}"]`)?.scrollIntoView({ block: "nearest" });
   photo.src = `/api/gt/samples/${encodeURIComponent(name)}/layers/photo.png`;
