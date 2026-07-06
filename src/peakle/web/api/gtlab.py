@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ _COLORS = {
     "gt": {"sky": (0, 230, 90), "occ": (255, 150, 30), "rib": (255, 235, 59), "cou": (232, 110, 220)},
     "dem": {"sky": (0, 200, 255), "occ": (255, 70, 70), "rib": (80, 170, 255), "cou": (170, 90, 255)},
 }
+_BUILD_LOCK = threading.Lock()
 LAYER_NAMES = ["photo", "gt_depth", "dem_depth", "edges"] + [f"{s}_{f}" for s in ("gt", "dem") for f in ("sky", "occ", "rib", "cou")]
 
 
@@ -127,6 +129,13 @@ def _build_layers(name: str) -> None:
     if rec is None:
         raise HTTPException(404, f"unknown sample {name}")
     out = LAYERS / name
+    with _BUILD_LOCK:  # the viewer fires several layer requests at once — build once, serially
+        if (out / "dem_cou.png").exists():  # last layer always written (support.json may be skipped on OOM)
+            return
+        _build_layers_locked(name, rec, out)
+
+
+def _build_layers_locked(name: str, rec: dict, out) -> None:
     out.mkdir(parents=True, exist_ok=True)
     w, h = rec["width"], rec["height"]
     s = load_sample(DATA / name)

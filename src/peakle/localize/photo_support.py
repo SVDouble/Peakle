@@ -36,7 +36,10 @@ def edge_mask(rgb_uint8: np.ndarray, th: float = EDGE_TH) -> np.ndarray | None:
     det = _detector()
     if det is None:
         return None
-    emap = det.detect(rgb_uint8.astype(np.float64) / 255.0)  # detect() expects RGB in [0, 1]
+    try:
+        emap = det.detect(rgb_uint8.astype(np.float64) / 255.0)  # detect() expects RGB in [0, 1]
+    except RuntimeError:  # CUDA OOM on a shared GPU — skip edge layers rather than fail the page
+        return None
     return emap >= th
 
 

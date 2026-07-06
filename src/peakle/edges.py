@@ -60,6 +60,9 @@ class LearnedEdges:
         tensor = torch.from_numpy(np.ascontiguousarray(bgr.transpose(2, 0, 1)[None])).to(self._device)
         with torch.no_grad():
             edge = torch.sigmoid(self._model(tensor)).squeeze().detach().cpu().numpy().astype(np.float64)
+        del tensor
+        if self._device == "cuda":
+            torch.cuda.empty_cache()  # a long-lived server process must not hoard the shared GPU
         if edge.shape != (height, width):
             scaled = Image.fromarray((np.clip(edge, 0.0, 1.0) * 255).astype(np.uint8), mode="L")
             edge = np.asarray(scaled.resize((width, height), Image.BILINEAR), dtype=np.float64) / 255.0
