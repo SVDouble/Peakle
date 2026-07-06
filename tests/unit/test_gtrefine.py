@@ -152,3 +152,18 @@ def test_rows_from_el_tan_mapping():
     assert r[0] == pytest.approx((H - 1) / 2.0)
     assert (r[0] - r[2]) > 2.0 * (r[0] - r[1]) * 0.98
     assert r[0] - r[1] == pytest.approx(f * math.tan(math.radians(10.0)))
+
+
+def test_dem_depth_image_has_no_ray_march_terraces():
+    """Ray-march bin snapping turns smooth faces into depth staircases and the crease detector
+    traces every terrace edge as rib/couloir bands ('isolines') — crossing interpolation must
+    keep smooth surfaces crease-free."""
+
+    from peakle.localize.gtrefine import dem_depth_image
+    from peakle.localize.typed_outlines import extract_typed_outlines
+
+    slope = SlopeTerrain()
+    az = crop_az_deg(W, FOV, 0.0)
+    depth, *_ = dem_depth_image(slope, 60.0, az, W, H, FOV, dv=0.0, sub=2)
+    t = extract_typed_outlines(depth, min_px=12)
+    assert t.crease.sum() < 30, t.counts()

@@ -123,10 +123,18 @@ def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, t
     for c in range(n_c):
         el_pix = np.arctan(((h - 1) / 2.0 + dv + tilt_dv[c] - rows_s) / f)
         el_pix_all[:, c] = el_pix
-        idx = np.searchsorted(cummax[c], el_pix)
+        env = cummax[c]
+        idx = np.searchsorted(env, el_pix)
         hit = idx < len(ds)
         hit_idx[hit, c] = idx[hit]
-        depth[hit, c] = ds[np.clip(idx[hit], 0, len(ds) - 1)]
+        i = np.clip(idx[hit], 0, len(ds) - 1)
+        # interpolate the exact envelope-crossing distance: snapping to the 25m ray-march bin
+        # quantises depth into terraces, and the crease detector then traces every terrace edge
+        # as alternating rib/couloir bands ("isolines" — user-reported)
+        i0 = np.maximum(i - 1, 0)
+        e0, e1 = env[i0], env[i]
+        t = np.where(e1 > e0, (el_pix[hit] - e0) / np.where(e1 > e0, e1 - e0, 1.0), 1.0)
+        depth[hit, c] = ds[i0] + np.clip(t, 0.0, 1.0) * (ds[i] - ds[i0])
     return depth, hit_idx, el_pix_all, el, ds, rows_s
 
 
