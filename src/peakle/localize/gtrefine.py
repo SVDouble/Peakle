@@ -81,8 +81,9 @@ def rows_from_el(el: np.ndarray, w: int, h: int, fov_deg: float) -> np.ndarray:
     return (h - 1) / 2.0 - f * np.tan(el)
 
 
-def dem_skyline(terrain, cam_z, az_deg, w, h, fov_deg, de=0.0, dn=0.0) -> np.ndarray:
-    el = horizon_elevation(terrain, np.radians(az_deg), cam_z, step=25.0, cam_e=de, cam_n=dn)
+def dem_skyline(terrain, cam_z, az_deg, w, h, fov_deg, de=0.0, dn=0.0, patch=None) -> np.ndarray:
+    step = 10.0 if patch is not None else 25.0   # the fine patch deserves a finer ray march
+    el = horizon_elevation(terrain, np.radians(az_deg), cam_z, step=step, cam_e=de, cam_n=dn, patch=patch)
     return rows_from_el(el, w, h, fov_deg)
 
 
@@ -102,7 +103,7 @@ def gt_contour_mask(depth: np.ndarray, w: int, h: int, jump: float = CONTOUR_JUM
     return mask
 
 
-def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, tilt_deg=0.0, sub=2):
+def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, tilt_deg=0.0, sub=2, patch=None):
     """Per-pixel visible-terrain distance in crop coordinates at the given (drawn) alignment.
 
     Returns ``(depth, hit_idx, el_pix_all, el, ds, rows_s)`` on the sub-sampled pixel grid; depth
@@ -110,7 +111,8 @@ def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, t
     GT-Lab depth layer."""
 
     az_s = az_deg[::sub]
-    el, ds = _elevation_angle_grid(terrain, np.radians(az_s), cam_z, step=25.0, d_max=None, cam_e=de, cam_n=dn)
+    step = 10.0 if patch is not None else 25.0
+    el, ds = _elevation_angle_grid(terrain, np.radians(az_s), cam_z, step=step, d_max=None, cam_e=de, cam_n=dn, patch=patch)
     cummax = np.maximum.accumulate(el, axis=1)
     f = w / math.radians(fov_deg)
     rows_s = np.arange(0, h, sub)

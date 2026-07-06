@@ -31,12 +31,15 @@ def _elevation_angle_grid(
     d_max: float | None,
     cam_e: float = 0.0,
     cam_n: float = 0.0,
+    patch=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Max-terrain-elevation-angle machinery shared by both projections.
 
     Returns ``(el, ds)`` where ``el[i, j]`` is the terrain elevation angle (radians, -inf when the
     sample falls outside the DEM) seen along azimuth ``az_rad[i]`` at distance ``ds[j]`` from the
-    camera at local-ENU ``(cam_e, cam_n, cam_z)``.
+    camera at local-ENU ``(cam_e, cam_n, cam_z)``.  ``patch`` is an optional HIGH-RES local-ENU
+    elevation overlay (e.g. swissALTI3D 2 m): wherever it covers a ray sample it overrides the
+    coarse base — sub-30 m teeth on near peaks render only with it.
     """
 
     xm = np.asarray(terrain.x_m, float)
@@ -54,6 +57,14 @@ def _elevation_angle_grid(
     inb = (ci >= 0) & (ci <= len(xm) - 1) & (ri >= 0) & (ri <= len(ym) - 1)
     z = map_coordinates(elev, [ri.ravel(), ci.ravel()], order=1, mode="nearest")
     z = z.reshape(len(az_rad), len(ds))
+    if patch is not None:
+        px, py = np.asarray(patch.x_m, float), np.asarray(patch.y_m, float)
+        pelev = np.where(np.isfinite(patch.elevation_m), patch.elevation_m, -9999.0)
+        pj = (east - px[0]) / ((px[-1] - px[0]) / (len(px) - 1))
+        pi = (north - py[0]) / ((py[-1] - py[0]) / (len(py) - 1))
+        zp = map_coordinates(pelev, [pi.ravel(), pj.ravel()], order=1, mode="constant", cval=-9999.0)
+        zp = zp.reshape(z.shape)
+        z = np.where(zp > -1000, zp, z)
     drop = ds[None, :] ** 2 / (2 * EARTH_R)
     el = np.arctan2(z - cam_z - drop, ds[None, :])
     return np.where(inb, el, -np.inf), ds
@@ -67,10 +78,11 @@ def horizon_elevation(
     d_max: float | None = None,
     cam_e: float = 0.0,
     cam_n: float = 0.0,
+    patch=None,
 ) -> np.ndarray:
     """Horizon elevation angle (radians) per azimuth; NaN where no DEM sample was hit."""
 
-    el, _ = _elevation_angle_grid(terrain, az_rad, cam_z, step, d_max, cam_e, cam_n)
+    el, _ = _elevation_angle_grid(terrain, az_rad, cam_z, step, d_max, cam_e, cam_n, patch)
     el_max = el.max(axis=1)
     return np.where(np.isfinite(el_max), el_max, np.nan)
 
