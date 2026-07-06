@@ -72,3 +72,24 @@ def foreground_report(
         "dem_fg_frac": round(dem_fg, 3),
         "missing_foreground": bool(missing),
     }
+
+
+def above_band_gradient(mono: np.ndarray, rows: np.ndarray, band_px: int = 30) -> float | None:
+    """Mean |vertical mono-depth gradient| in the band ABOVE a skyline path.
+
+    Sky is depth-flat (gradient ~0); water or terrain above the path (a false skyline along a
+    lake edge or a mid-slope boundary) recedes smoothly — strong gradient.  Threshold measured
+    on real samples; used to de-trust photo skyline candidates in GT v2 building."""
+
+    h, w = mono.shape
+    grad = np.abs(np.diff(mono, axis=0))
+    vals = []
+    for c in range(w):
+        r = rows[c]
+        if not np.isfinite(r):
+            continue
+        r0 = max(int(r) - band_px, 0)
+        r1 = max(int(r) - 4, 1)
+        if r1 > r0:
+            vals.append(float(grad[r0:r1, c].mean()))
+    return float(np.median(vals)) if vals else None
