@@ -66,6 +66,7 @@ async def list_samples() -> list[dict[str, Any]]:
         {k: r.get(k) for k in (
             "name", "manual", "quality", "reasons", "sky_cons_px", "contour_cons_px",
             "dyaw_deg", "de_m", "dn_m", "tilt_deg", "yaw_deg", "fov_deg", "gt_contour_density",
+            "width", "height",
         )} | {"lat": _latlon(r["name"])[0], "lon": _latlon(r["name"])[1]}
         for r in rows
     ]

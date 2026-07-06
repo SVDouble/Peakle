@@ -26,9 +26,12 @@ aside h1 { font-size:15px; margin:0 0 2px; } aside .sub { color:var(--ink2); fon
 .chip.CLEAN { background:#12331b; color:#5fd07f; } .chip.SUSPECT { background:#3a1d1d; color:#ef8f8f; }
 main { flex:1; display:flex; flex-direction:column; min-width:0; }
 #stage-wrap { flex:1; display:flex; align-items:center; justify-content:center; padding:14px; min-height:0; }
-#stage { position:relative; max-width:100%; max-height:100%; }
+/* the stage box IS the image box: sized purely by aspect-ratio (set from the photo's real
+   dimensions in JS) and contained in the wrap — every layer, base included, fills it exactly.
+   Sizing the base by 100vh let the image run under the controls AND let the stage box diverge
+   from the photo box, shifting every overlay (user-reported). */
+#stage { position:relative; height:100%; max-width:100%; max-height:100%; }
 #stage img { position:absolute; inset:0; width:100%; height:100%; image-rendering:auto; }
-#stage img.base { position:relative; display:block; max-width:100%; max-height:calc(100vh - 170px); width:auto; height:auto; }
 #controls { border-top:1px solid var(--line); background:var(--panel); padding:10px 16px 12px;
   display:flex; gap:26px; flex-wrap:wrap; align-items:flex-start; }
 .group { display:flex; flex-direction:column; gap:3px; }
@@ -128,6 +131,7 @@ async function select(name) {
   document.querySelectorAll("#samples li").forEach((li) => li.classList.toggle("sel", li.dataset.name === name));
   document.querySelector(`#samples li[data-name="${CSS.escape(name)}"]`)?.scrollIntoView({ block: "nearest" });
   photo.src = `/api/gt/samples/${encodeURIComponent(name)}/layers/photo.png`;
+  stage.style.aspectRatio = `${current.width ?? 4} / ${current.height ?? 3}`;
   for (const img of Object.values(layerImgs)) img.style.display = "none";
   document.querySelectorAll("input[data-layer]").forEach((cb) => { if (cb.checked) setLayer(cb.dataset.layer, true); });
   const m = current;
