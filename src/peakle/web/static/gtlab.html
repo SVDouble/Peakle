@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>peakle · GT Lab</title>
+<style>
+:root { --bg:#101211; --panel:#181b1a; --line:#2a2e2c; --ink:#e8eae8; --ink2:#9aa09c;
+  --accent:#3987e5; --good:#0ca30c; --warn:#fab219; --bad:#e34948; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font:13.5px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; height:100vh; display:flex; overflow:hidden; }
+aside { width:295px; min-width:295px; border-right:1px solid var(--line); display:flex; flex-direction:column; }
+aside header { padding:12px 14px 8px; }
+aside h1 { font-size:15px; margin:0 0 2px; } aside .sub { color:var(--ink2); font-size:11.5px; }
+#search { margin:6px 12px; padding:6px 9px; background:var(--panel); color:var(--ink);
+  border:1px solid var(--line); border-radius:6px; width:calc(100% - 24px); }
+#samples { overflow-y:auto; flex:1; margin:0; padding:0 0 20px; list-style:none; }
+#samples li { padding:7px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+#samples li:hover { background:var(--panel); }
+#samples li.sel { background:#1e2e42; }
+.sname { font-family:ui-monospace,Menlo,monospace; font-size:11px; display:block;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.smeta { color:var(--ink2); font-size:11px; display:flex; gap:8px; }
+.chip { padding:0 6px; border-radius:99px; font-size:10px; font-weight:650; }
+.chip.CLEAN { background:#12331b; color:#5fd07f; } .chip.SUSPECT { background:#3a1d1d; color:#ef8f8f; }
+main { flex:1; display:flex; flex-direction:column; min-width:0; }
+#stage-wrap { flex:1; display:flex; align-items:center; justify-content:center; padding:14px; min-height:0; }
+#stage { position:relative; max-width:100%; max-height:100%; }
+#stage img { position:absolute; inset:0; width:100%; height:100%; image-rendering:auto; }
+#stage img.base { position:relative; display:block; max-width:100%; max-height:calc(100vh - 170px); width:auto; height:auto; }
+#controls { border-top:1px solid var(--line); background:var(--panel); padding:10px 16px 12px;
+  display:flex; gap:26px; flex-wrap:wrap; align-items:flex-start; }
+.group { display:flex; flex-direction:column; gap:3px; }
+.group b { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--ink2); margin-bottom:2px; }
+label.toggle { display:flex; align-items:center; gap:7px; cursor:pointer; font-size:12.5px; user-select:none; }
+label.toggle input { accent-color:var(--accent); }
+.swatch { width:11px; height:11px; border-radius:3px; display:inline-block; }
+#meta { font-size:12px; color:var(--ink2); max-width:330px; }
+#meta b { color:var(--ink); font-variant-numeric:tabular-nums; }
+#meta .reasons { color:var(--bad); }
+#map { background:var(--bg); border:1px solid var(--line); border-radius:6px; }
+kbd { background:var(--line); border-radius:3px; padding:0 5px; font-size:11px; }
+</style>
+</head>
+<body>
+<aside>
+  <header>
+    <h1>GT Lab — dataset debugger</h1>
+    <div class="sub">GT (warm colors) vs our DEM reconstruction (cool colors). <kbd>j</kbd>/<kbd>k</kbd> next/prev. Sorted worst-first.</div>
+  </header>
+  <input id="search" placeholder="filter samples…">
+  <ul id="samples"></ul>
+</aside>
+<main>
+  <div id="stage-wrap"><div id="stage"><img class="base" id="photo" alt="photo"></div></div>
+  <div id="controls">
+    <div class="group" id="g-gt"><b>Ground truth (from GT depth)</b></div>
+    <div class="group" id="g-dem"><b>DEM @ refined pose</b></div>
+    <div class="group"><b>Depth masks</b>
+      <label class="toggle"><input type="checkbox" data-layer="gt_depth"><span class="swatch" style="background:#5aa0d0"></span>GT depth</label>
+      <label class="toggle"><input type="checkbox" data-layer="dem_depth"><span class="swatch" style="background:#2a5a80"></span>DEM depth</label>
+    </div>
+    <div class="group"><b>Position</b><svg id="map" width="170" height="130"></svg></div>
+    <div class="group" style="flex:1"><b>Sample</b><div id="meta">select a sample…</div></div>
+  </div>
+</main>
+<script>
+const FAMS = [
+  ["sky", "skyline"], ["occ", "occlusion (type 1)"], ["rib", "ribs / spurs (2a)"], ["cou", "couloirs (2b)"],
+];
+const COLORS = {
+  gt:  { sky:"#00e65a", occ:"#ff961e", rib:"#ffeb3b", cou:"#e86edc" },
+  dem: { sky:"#00c8ff", occ:"#ff4646", rib:"#50aaff", cou:"#aa5aff" },
+};
+COLORS.gt.occ = "#ff961e";
+const DEFAULTS = new Set(["gt_sky", "gt_occ", "dem_sky", "dem_occ"]);
+let samples = [], current = null;
+const stage = document.getElementById("stage"), photo = document.getElementById("photo");
+const layerImgs = {};
+
+function buildToggles() {
+  for (const src of ["gt", "dem"]) {
+    const host = document.getElementById(`g-${src}`);
+    for (const [fam, label] of FAMS) {
+      const id = `${src}_${fam}`;
+      const lab = document.createElement("label");
+      lab.className = "toggle";
+      lab.innerHTML = `<input type="checkbox" data-layer="${id}" ${DEFAULTS.has(id) ? "checked" : ""}>` +
+        `<span class="swatch" style="background:${COLORS[src][fam]}"></span>${label}`;
+      host.appendChild(lab);
+    }
+  }
+  document.querySelectorAll("input[data-layer]").forEach((cb) =>
+    cb.addEventListener("change", () => setLayer(cb.dataset.layer, cb.checked)));
+}
+
+function setLayer(layer, on) {
+  if (!current) return;
+  let img = layerImgs[layer];
+  if (on) {
+    if (!img) {
+      img = document.createElement("img");
+      img.alt = layer;
+      if (layer.endsWith("_depth")) img.style.opacity = 0.75;
+      stage.appendChild(img);
+      layerImgs[layer] = img;
+    }
+    img.src = `/api/gt/samples/${encodeURIComponent(current.name)}/layers/${layer}.png`;
+    img.style.display = "";
+  } else if (img) {
+    img.style.display = "none";
+  }
+}
+
+function fmt(v, d = 1) { return v == null ? "–" : Number(v).toFixed(d); }
+
+async function select(name) {
+  current = samples.find((s) => s.name === name);
+  document.querySelectorAll("#samples li").forEach((li) => li.classList.toggle("sel", li.dataset.name === name));
+  document.querySelector(`#samples li[data-name="${CSS.escape(name)}"]`)?.scrollIntoView({ block: "nearest" });
+  photo.src = `/api/gt/samples/${encodeURIComponent(name)}/layers/photo.png`;
+  for (const img of Object.values(layerImgs)) img.style.display = "none";
+  document.querySelectorAll("input[data-layer]").forEach((cb) => { if (cb.checked) setLayer(cb.dataset.layer, true); });
+  const m = current;
+  document.getElementById("meta").innerHTML =
+    `<span class="sname">${m.name}</span>` +
+    `<span class="chip ${m.quality}">${m.quality}</span> ${m.manual ? "MANUAL" : "AUTO"} · fov <b>${fmt(m.fov_deg, 0)}°</b><br>` +
+    `skyline cons <b>${fmt(m.sky_cons_px)}px</b> · contours <b>${fmt(m.contour_cons_px)}px</b> · density <b>${fmt(m.gt_contour_density, 2)}</b><br>` +
+    `label corr: Δyaw <b>${fmt(m.dyaw_deg)}°</b> · pos <b>${fmt(m.de_m, 0)}E/${fmt(m.dn_m, 0)}N m</b> · tilt <b>${fmt(m.tilt_deg)}°</b><br>` +
+    (m.reasons?.length ? `<span class="reasons">${m.reasons.join("; ")}</span>` : "");
+  drawMap();
+}
+
+function drawMap() {
+  const svg = document.getElementById("map");
+  const lats = samples.map((s) => s.lat), lons = samples.map((s) => s.lon);
+  const [la0, la1, lo0, lo1] = [Math.min(...lats), Math.max(...lats), Math.min(...lons), Math.max(...lons)];
+  const X = (lo) => 8 + 154 * (lo - lo0) / Math.max(lo1 - lo0, 1e-9);
+  const Y = (la) => 122 - 114 * (la - la0) / Math.max(la1 - la0, 1e-9);
+  svg.innerHTML = samples.map((s) =>
+    `<circle cx="${X(s.lon).toFixed(1)}" cy="${Y(s.lat).toFixed(1)}" r="${s.name === current?.name ? 5 : 2}"` +
+    ` fill="${s.name === current?.name ? "#3987e5" : s.quality === "CLEAN" ? "#4a7f5a" : "#8a4a4a"}"` +
+    ` style="cursor:pointer"><title>${s.name}</title></circle>`).join("");
+  svg.querySelectorAll("circle").forEach((c, i) => c.addEventListener("click", () => select(samples[i].name)));
+}
+
+function renderList(filter = "") {
+  const ul = document.getElementById("samples");
+  ul.replaceChildren(...samples
+    .filter((s) => s.name.includes(filter))
+    .map((s) => {
+      const li = document.createElement("li");
+      li.dataset.name = s.name;
+      li.innerHTML = `<span class="sname">${s.name}</span>` +
+        `<span class="smeta"><span class="chip ${s.quality}">${s.quality}</span>` +
+        `<span>sky ${fmt(s.sky_cons_px, 0)}px</span><span>ct ${fmt(s.contour_cons_px, 0)}px</span>` +
+        `<span>Δyaw ${fmt(s.dyaw_deg)}°</span></span>`;
+      li.addEventListener("click", () => select(s.name));
+      return li;
+    }));
+}
+
+document.getElementById("search").addEventListener("input", (e) => renderList(e.target.value.trim()));
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" && e.target.type === "text") return;
+  if (e.key !== "j" && e.key !== "k") return;
+  const i = samples.findIndex((s) => s.name === current?.name);
+  const next = samples[(i + (e.key === "j" ? 1 : -1) + samples.length) % samples.length];
+  if (next) select(next.name);
+});
+
+(async () => {
+  buildToggles();
+  samples = await (await fetch("/api/gt/samples")).json();
+  renderList();
+  if (samples.length) select(samples[0].name);
+})();
+</script>
+</body>
+</html>

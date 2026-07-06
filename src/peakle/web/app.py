@@ -9,9 +9,10 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
 
 from peakle.scene.scene import Scene
+from peakle.web.api import gtlab as gtlab_api
 from peakle.web.api import scene as scene_api
 from peakle.web.api import solves as solves_api
 from peakle.web.api import views as views_api
@@ -49,8 +50,13 @@ def create_app(scene: Scene) -> FastAPI:
     app.state.scene_lock = asyncio.Lock()
 
     app.include_router(scene_api.router, prefix="/api")
+    app.include_router(gtlab_api.router, prefix="/api")
     app.include_router(views_api.router, prefix="/api")
     app.include_router(solves_api.router, prefix="/api")
+
+    @app.get("/gt", include_in_schema=False)
+    async def gt_lab() -> RedirectResponse:  # the GT-dataset debugger page
+        return RedirectResponse("/gtlab.html")
 
     static_dir = resources.files("peakle.web") / "static"
     app.mount("/", _NoCacheStaticFiles(directory=str(static_dir), html=True), name="static")

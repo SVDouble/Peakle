@@ -98,17 +98,12 @@ def gt_contour_mask(depth: np.ndarray, w: int, h: int, jump: float = CONTOUR_JUM
     return mask
 
 
-def dem_contour_mask(
-    terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, tilt_deg=0.0, sub=2, jump=CONTOUR_JUMP,
-    gap_eps_rad=0.0035,
-) -> np.ndarray:
-    """DEM occlusion boundaries in crop coordinates at the given (drawn) alignment.
+def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, tilt_deg=0.0, sub=2):
+    """Per-pixel visible-terrain distance in crop coordinates at the given (drawn) alignment.
 
-    Per column the visible-surface distance per pixel row comes from the first crossing of the
-    ray's elevation envelope.  A candidate |Δ log d| jump only counts as OCCLUSION if the terrain
-    dips below the ray between the near and far hits (the "gap test") — a smooth slope seen at
-    grazing incidence also produces huge continuous depth gradients, and without the gap test
-    those false outlines dominate (caught by the synthetic slope unit test)."""
+    Returns ``(depth, hit_idx, el_pix_all, el, ds, rows_s)`` on the sub-sampled pixel grid; depth
+    is NaN for sky.  This is the shared substrate for occlusion contours, typed creases, and the
+    GT-Lab depth layer."""
 
     az_s = az_deg[::sub]
     el, ds = _elevation_angle_grid(terrain, np.radians(az_s), cam_z, step=25.0, d_max=None, cam_e=de, cam_n=dn)
@@ -128,6 +123,25 @@ def dem_contour_mask(
         hit = idx < len(ds)
         hit_idx[hit, c] = idx[hit]
         depth[hit, c] = ds[np.clip(idx[hit], 0, len(ds) - 1)]
+    return depth, hit_idx, el_pix_all, el, ds, rows_s
+
+
+def dem_contour_mask(
+    terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, tilt_deg=0.0, sub=2, jump=CONTOUR_JUMP,
+    gap_eps_rad=0.0035,
+) -> np.ndarray:
+    """DEM occlusion boundaries in crop coordinates at the given (drawn) alignment.
+
+    Per column the visible-surface distance per pixel row comes from the first crossing of the
+    ray's elevation envelope.  A candidate |Δ log d| jump only counts as OCCLUSION if the terrain
+    dips below the ray between the near and far hits (the "gap test") — a smooth slope seen at
+    grazing incidence also produces huge continuous depth gradients, and without the gap test
+    those false outlines dominate (caught by the synthetic slope unit test)."""
+
+    depth, hit_idx, el_pix_all, el, ds, rows_s = dem_depth_image(
+        terrain, cam_z, az_deg, w, h, fov_deg, dv, de, dn, tilt_deg, sub
+    )
+    n_r, n_c = depth.shape
 
     logd = np.log(depth)
     edge = np.zeros((n_r, n_c), bool)
