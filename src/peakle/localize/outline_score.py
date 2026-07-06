@@ -96,5 +96,5 @@ def rows_to_mask(rows: np.ndarray, h: int) -> np.ndarray:
     w = len(rows)
     mask = np.zeros((h, w), bool)
     ok = np.isfinite(rows) & (rows >= 0) & (rows < h)
-    mask[rows[ok].round().astype(int), np.arange(w)[ok]] = True
+    mask[np.clip(rows[ok].round().astype(int), 0, h - 1), np.arange(w)[ok]] = True
     return mask
