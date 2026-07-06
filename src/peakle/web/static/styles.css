@@ -682,3 +682,212 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   height: 3px;
   border-radius: 999px;
 }
+
+/* --- GT dataset panel --- */
+.gt-panel .gt-block {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.gt-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gt-lab-link {
+  color: var(--accent);
+  font-size: 11.5px;
+  text-decoration: none;
+}
+
+.gt-lab-link:hover {
+  text-decoration: underline;
+}
+
+.gt-search {
+  margin-top: 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.gt-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  gap: 3px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  align-content: start;
+}
+
+.gt-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.gt-row:hover {
+  background: var(--panel-strong);
+}
+
+.gt-row.sel {
+  border-color: rgba(240, 199, 94, 0.5);
+  background: rgba(240, 199, 94, 0.08);
+}
+
+.gt-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.gt-name {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gt-metrics {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gt-metrics .over {
+  color: #ef8f8f;
+  font-weight: 650;
+}
+
+.gt-metrics .on-map {
+  color: #8ee08e;
+  font-size: 9.5px;
+}
+
+.chip {
+  padding: 0 6px;
+  border-radius: 99px;
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.chip.CLEAN {
+  background: #1c3323;
+  color: #8ee08e;
+}
+
+.chip.SUSPECT {
+  background: #3a1d1d;
+  color: #ef8f8f;
+}
+
+/* --- GT spots on the 3D map --- */
+.gt-spot {
+  pointer-events: auto;
+  width: 34px;
+  height: 26px;
+  border: 2px solid rgba(142, 224, 142, 0.85);
+  border-radius: 5px;
+  overflow: hidden;
+  background: #06070a;
+  cursor: pointer;
+  transform: translate(-50%, -100%);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+.gt-spot.suspect {
+  border-color: rgba(208, 122, 106, 0.85);
+}
+
+.gt-spot.sel {
+  width: 52px;
+  height: 40px;
+  border-color: var(--accent);
+  z-index: 5;
+}
+
+.gt-spot:hover {
+  border-color: var(--accent);
+}
+
+.gt-spot img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.camera-label.gt-camera {
+  border-color: rgba(240, 199, 94, 0.7);
+}
+
+/* --- GT sample inspection (Inspect tab) --- */
+.gt-overlays {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.gt-overlays .gt-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.gt-inspect-controls {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gt-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.gt-toggles .toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.gt-toggles input {
+  accent-color: var(--accent);
+}
+
+.gt-inspect-meta {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gt-inspect-meta b {
+  color: var(--text);
+}

@@ -1,23 +1,48 @@
 "use strict";
 
-// Camera panel: shows the selected view's rendered image with the observed
-// skyline contour and, when a solve is selected, the predicted skyline overlaid.
+// Inspect panel: for a placed view, the rendered image with observed vs
+// predicted skyline; for a selected GT sample, the photograph with the dataset's
+// outline layers (GT / DEM / photo edges / depth) toggleable on top.
 
 import { api } from "../api.js";
 import { el, fitContainBox, setBox, svgElement } from "../format.js";
+
+// Layer groups exposed as toggles; each maps to the GT Lab layer PNGs.
+const GT_GROUPS = [
+  ["gt", "GT outlines", ["gt_sky", "gt_occ", "gt_rib", "gt_cou"]],
+  ["dem", "DEM outlines", ["dem_sky", "dem_occ", "dem_rib", "dem_cou"]],
+  ["edges", "Photo edges", ["edges"]],
+  ["depth", "DEM depth", ["dem_depth"]],
+];
 
 export function setupCameraPanel(store, root) {
   const image = el("img", { class: "camera-image", alt: "Rendered view" });
   const overlay = svgElement("svg", { class: "camera-overlay" });
   overlay.setAttribute("preserveAspectRatio", "none");
-  const box = el("div", { class: "frame-box camera-box" }, [image, overlay]);
-  const placeholder = el("p", { class: "control-hint", text: "Select or place a view to see its image." });
+  const gtOverlays = el("div", { class: "gt-overlays" });
+  const box = el("div", { class: "frame-box camera-box" }, [image, overlay, gtOverlays]);
+  const placeholder = el("p", { class: "control-hint", text: "Select a view or a GT sample to inspect it." });
   const legend = el("div", { class: "camera-image-legend" }, [
     el("span", { html: '<i class="observed-swatch"></i>Observed (truth)' }),
     el("span", { html: '<i class="predicted-swatch"></i>Predicted' }),
     el("span", { html: '<i class="diff-swatch"></i>Difference' }),
   ]);
-  root.replaceChildren(el("div", { class: "camera-frame" }, [box]), legend, placeholder);
+  const gtControls = el("div", { class: "gt-inspect-controls" }, [
+    el(
+      "div",
+      { class: "gt-toggles" },
+      GT_GROUPS.map(([key, label]) => {
+        const input = el("input", { type: "checkbox" });
+        input.checked = store.gtDisplay[key];
+        input.addEventListener("change", () => store.setGtDisplay({ [key]: input.checked }));
+        return el("label", { class: `toggle toggle-${key}` }, [input, el("span", { text: label })]);
+      }),
+    ),
+    el("div", { class: "gt-inspect-meta" }),
+  ]);
+  gtControls.hidden = true;
+  root.replaceChildren(el("div", { class: "camera-frame" }, [box]), legend, gtControls, placeholder);
+  const gtMeta = gtControls.querySelector(".gt-inspect-meta");
 
   function poseNonce(view) {
     const e = view.true_extrinsics;
@@ -25,13 +50,22 @@ export function setupCameraPanel(store, root) {
   }
 
   function layoutAndDraw() {
+    const gtSample = store.selectedGtSample();
+    if (gtSample) {
+      layoutGtSample(gtSample);
+      return;
+    }
+    gtControls.hidden = true;
+    gtOverlays.replaceChildren();
     const view = store.selectedView();
     if (!view) {
       box.hidden = true;
+      legend.hidden = true;
       placeholder.hidden = false;
       return;
     }
     box.hidden = false;
+    legend.hidden = false;
     placeholder.hidden = true;
 
     const frame = box.parentElement;
@@ -46,6 +80,46 @@ export function setupCameraPanel(store, root) {
       image.src = desiredSrc;
     }
     drawOverlay(view, fit);
+  }
+
+  function layoutGtSample(sample) {
+    box.hidden = false;
+    legend.hidden = true;
+    placeholder.hidden = true;
+    gtControls.hidden = false;
+    overlay.replaceChildren();
+
+    const frame = box.parentElement;
+    const fit = fitContainBox(frame.clientWidth, frame.clientHeight, (sample.width || 4) / (sample.height || 3));
+    setBox(box, fit);
+
+    const desiredSrc = api.gtLayerUrl(sample.name, "photo");
+    if (image.dataset.src !== desiredSrc) {
+      image.dataset.src = desiredSrc;
+      image.src = desiredSrc;
+    }
+
+    const layers = GT_GROUPS.filter(([key]) => store.gtDisplay[key]).flatMap(([, , names]) => names);
+    const want = layers.map((layer) => api.gtLayerUrl(sample.name, layer));
+    const have = [...gtOverlays.children].map((node) => node.dataset.src);
+    if (want.join("|") !== have.join("|")) {
+      gtOverlays.replaceChildren(
+        ...want.map((src) => {
+          const img = el("img", { class: "gt-layer", alt: "" });
+          img.dataset.src = src;
+          img.src = src;
+          return img;
+        }),
+      );
+    }
+
+    const num = (value, digits = 1) => (value === null || value === undefined ? "–" : value.toFixed(digits));
+    gtMeta.innerHTML =
+      `<span class="chip ${sample.quality}">${sample.quality}</span> ` +
+      `sky <b>${num(sample.sky_cons_px)}px</b> vs ${sample.obs_source ?? "pfm"}` +
+      (sample.pfm_cons_px != null ? ` · pfm <b>${num(sample.pfm_cons_px)}px</b>` : "") +
+      ` · ct <b>${num(sample.contour_cons_px)}px</b> · Δyaw <b>${num(sample.dyaw_deg)}°</b>` +
+      ` · fov <b>${num(sample.fov_deg, 0)}°</b>`;
   }
 
   function drawOverlay(view, fit) {
@@ -98,5 +172,7 @@ export function setupCameraPanel(store, root) {
   resizeObserver.observe(root);
   store.on("selection", layoutAndDraw);
   store.on("views", layoutAndDraw);
+  store.on("gt", layoutAndDraw);
+  store.on("gt-display", layoutAndDraw);
   layoutAndDraw();
 }

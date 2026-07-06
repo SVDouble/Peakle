@@ -8,6 +8,7 @@ import { buildLayout } from "./layout.js";
 import { store } from "./store.js";
 import { setupCameraPanel } from "./panels/camera-image.js";
 import { setupConfigPanel } from "./panels/config.js";
+import { setupGtPanel } from "./panels/gt.js";
 import { setupMapPanel } from "./panels/map/viewer.js";
 import { setupSolvePanel } from "./panels/solve.js";
 import { setupViewsPanel } from "./panels/views.js";
@@ -16,6 +17,7 @@ const PANEL_SETUP = {
   map: setupMapPanel,
   config: setupConfigPanel,
   views: setupViewsPanel,
+  gt: setupGtPanel,
   camera: setupCameraPanel,
   solve: setupSolvePanel,
 };
@@ -32,6 +34,8 @@ async function main() {
   for (const [name, setup] of Object.entries(PANEL_SETUP)) {
     wirePanel(layout, name, setup);
   }
+  // Dev console handle: inspect state and dispatch actions from the browser.
+  window.peakle = { store };
   await store.init();
 }
 

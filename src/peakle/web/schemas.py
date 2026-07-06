@@ -35,6 +35,20 @@ class SceneConfigRequest(BaseModel):
     default_strategy: StrategyName = "powell"
 
 
+class SceneFocusRequest(BaseModel):
+    """Request to recenter the map on a geographic point (clears views).
+
+    Attributes:
+        lat_deg: Latitude of the new map centre.
+        lon_deg: Longitude of the new map centre.
+        extent_m: Square window size in meters.
+    """
+
+    lat_deg: float = Field(ge=-90.0, le=90.0)
+    lon_deg: float = Field(ge=-180.0, le=180.0)
+    extent_m: float = Field(default=24000.0, ge=2000.0, le=120000.0)
+
+
 class ViewCreateRequest(BaseModel):
     """Request to place a camera and create a view.
 

@@ -11,6 +11,7 @@ import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame, verticalFovDeg } from "../../geometry.js";
 import { el, fitContainBox } from "../../format.js";
 import { buildSelectionLayer } from "./cameras.js";
+import { buildGtSpotsLayer } from "./gt-spots.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
 const CAMERA_INITIAL_POSITION = new THREE.Vector3(0.1, 1.55, 2.65);
@@ -84,6 +85,8 @@ export function setupMapPanel(store, root) {
   let peakLabels = [];
   let selectionLabels = [];
   let selectionLayer = null;
+  let gtSpotsLayer = null;
+  let gtSpotLabels = [];
   let mode = "map";
   // Two raycasters: `raycaster` stays unbounded for click-to-place picking, while
   // `occlusionRaycaster` gets its near/far rewritten every frame for label hiding.
@@ -111,6 +114,7 @@ export function setupMapPanel(store, root) {
     applyDisplay();
     peakLabels = addPeakLabels(scene, store.peaks, frame);
     rebuildSelection();
+    rebuildGtSpots();
   }
 
   function applyDisplay() {
@@ -126,11 +130,14 @@ export function setupMapPanel(store, root) {
       return;
     }
     if (selectionLayer) {
-      // The camera labels are CSS2DObjects nested inside marker groups, so
-      // removing the layer group does not fire their own `removed` event and
-      // their DOM nodes would otherwise leak. Detach them explicitly.
-      disposeLabelElements(selectionLayer);
       scene.remove(selectionLayer);
+    }
+    // Sweep every camera label out of the DOM regardless of which flow removed
+    // its object: CSS2DObjects nested in marker groups never fire `removed` when
+    // an ancestor leaves the scene, and labels still in the new layer re-append
+    // themselves on the next render pass. This makes stale labels impossible.
+    for (const node of labelRenderer.domElement.querySelectorAll(".camera-label")) {
+      node.remove();
     }
     selectionLayer = buildSelectionLayer(store.terrain, frame, store.views, store.selectedViewId, store.selectedSolve());
     scene.add(selectionLayer);
@@ -143,6 +150,30 @@ export function setupMapPanel(store, root) {
     if (mode !== "map") {
       applyPov(mode);
     }
+  }
+
+  function rebuildGtSpots() {
+    if (!frame || !store.terrain) {
+      return;
+    }
+    if (gtSpotsLayer) {
+      scene.remove(gtSpotsLayer);
+    }
+    // Same wholesale DOM sweep as camera labels: chips of removed spots must not
+    // survive a rebuild; live ones re-append on the next render pass.
+    for (const node of labelRenderer.domElement.querySelectorAll(".gt-spot")) {
+      node.remove();
+    }
+    gtSpotsLayer = buildGtSpotsLayer(store.terrain, frame, store.gtSamples, store.selectedGtName, (name) =>
+      store.selectGtSample(name),
+    );
+    scene.add(gtSpotsLayer);
+    gtSpotLabels = [];
+    gtSpotsLayer.traverse((object) => {
+      if (object.isCSS2DObject) {
+        gtSpotLabels.push(object);
+      }
+    });
   }
 
   function applyPov(nextMode) {
@@ -176,14 +207,6 @@ export function setupMapPanel(store, root) {
     // resize() recomputes the letterbox box for the new mode and sets the matching aspect.
     resize();
     hint.textContent = `Looking through the ${nextMode} camera of ${view.label}.`;
-  }
-
-  function disposeLabelElements(root) {
-    root.traverse((object) => {
-      if (object.isCSS2DObject && object.element?.parentNode) {
-        object.element.remove();
-      }
-    });
   }
 
   function syncPovButtons() {
@@ -247,7 +270,7 @@ export function setupMapPanel(store, root) {
     const target = new THREE.Vector3();
     const direction = new THREE.Vector3();
     const projected = new THREE.Vector3();
-    for (const label of [...peakLabels, ...selectionLabels]) {
+    for (const label of [...peakLabels, ...selectionLabels, ...gtSpotLabels]) {
       const anchor = label.userData.occlusionAnchor ?? label;
       anchor.getWorldPosition(target);
       projected.copy(target).project(camera);
@@ -310,6 +333,7 @@ export function setupMapPanel(store, root) {
   store.on("display", applyDisplay);
   store.on("views", rebuildSelection);
   store.on("selection", rebuildSelection);
+  store.on("gt", rebuildGtSpots);
   store.on("placing", () => {
     viewport.classList.toggle("placing", store.placing);
     if (mode === "map") {

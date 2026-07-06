@@ -1,8 +1,8 @@
 "use strict";
 
-// Dockview layout: a large 3D map on the left and a stacked control column on the
-// right (config, views, camera image, solve inspector). Every panel host gets a
-// stable id so the panel modules can find and populate it.
+// Dockview layout: the 3D map dominates; a narrow right rail carries two tabbed
+// groups — Views | GT data | Setup on top, Inspect | Solve below. Every panel
+// host gets a stable id so the panel modules can find and populate it.
 
 import { createDockview, themeAbyss } from "dockview-core";
 
@@ -10,7 +10,8 @@ const PANELS = [
   { id: "map", title: "Map" },
   { id: "config", title: "Setup" },
   { id: "views", title: "Views" },
-  { id: "camera", title: "Camera" },
+  { id: "gt", title: "GT data" },
+  { id: "camera", title: "Inspect" },
   { id: "solve", title: "Solve" },
 ];
 
@@ -38,16 +39,17 @@ export function buildLayout(rootElement) {
     panels,
   });
 
-  // Right column: two tabbed groups instead of four cramped stacked panels.
-  // Top tabs Views|Setup (Views is the main workspace); bottom tabs Camera|Solve.
+  // The map is the app: give it ~72% of the width. The right rail stacks the
+  // work tabs (Views | GT data | Setup — Setup is rarely touched, so it rides
+  // last) over the inspector tabs (Inspect | Solve).
   const groups = [
-    leaf(Math.round(width * 0.62), panel("map")),
+    leaf(Math.round(width * 0.72), panel("map")),
     {
       type: "branch",
-      size: Math.round(width * 0.38),
+      size: Math.round(width * 0.28),
       data: [
-        leaf(Math.round(height * 0.5), panel("views"), panel("config")),
-        leaf(Math.round(height * 0.5), panel("camera"), panel("solve")),
+        leaf(Math.round(height * 0.52), panel("views"), panel("gt"), panel("config")),
+        leaf(Math.round(height * 0.48), panel("camera"), panel("solve")),
       ],
     },
   ];

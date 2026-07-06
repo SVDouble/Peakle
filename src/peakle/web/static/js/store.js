@@ -19,6 +19,13 @@ class Store {
     // Client-side map appearance, applied live by the viewer (never round-trips
     // to the server). `shadingMode` is one of terrain-mesh.js' SHADING_MODES ids.
     this.display = { shadingMode: "relief", contours: true };
+    // GT dataset slice: samples load lazily on first use; selecting a GT sample
+    // and selecting a view are mutually exclusive (one inspector).
+    this.gtSamples = null;
+    this.gtError = null;
+    this.selectedGtName = null;
+    this.gtDisplay = { gt: true, dem: true, edges: false, depth: false };
+    this._gtLoading = false;
     this._listeners = new Map();
   }
 
@@ -51,6 +58,14 @@ class Store {
 
   selectedSolve() {
     return this.selectedSolveId ? (this.solveCache.get(this.selectedSolveId) ?? null) : null;
+  }
+
+  gtByName(name) {
+    return this.gtSamples?.find((sample) => sample.name === name) ?? null;
+  }
+
+  selectedGtSample() {
+    return this.selectedGtName ? this.gtByName(this.selectedGtName) : null;
   }
 
   // --- actions ---
@@ -118,6 +133,10 @@ class Store {
     const view = this.viewById(id);
     this.selectedSolveId = view && view.solves.length ? view.solves[view.solves.length - 1].id : null;
     this.placing = false;
+    if (this.selectedGtName) {
+      this.selectedGtName = null;
+      this.emit("gt");
+    }
     this.emit("selection");
     // Load the latest solve's full trace into the cache so the map and inspector
     // can show its prediction (summaries in the view list omit the trace).
@@ -138,6 +157,51 @@ class Store {
   setPlacing(active) {
     this.placing = active;
     this.emit("placing");
+  }
+
+  async loadGtSamples() {
+    if (this.gtSamples || this._gtLoading) {
+      return;
+    }
+    this._gtLoading = true;
+    try {
+      this.gtSamples = await api.listGtSamples();
+      this.gtError = null;
+    } catch (error) {
+      this.gtSamples = [];
+      this.gtError = error.message;
+    } finally {
+      this._gtLoading = false;
+    }
+    this.emit("gt");
+  }
+
+  selectGtSample(name) {
+    this.selectedGtName = name;
+    if (name) {
+      this.selectedViewId = null;
+      this.selectedSolveId = null;
+      this.placing = false;
+    }
+    this.emit("gt");
+    this.emit("selection");
+  }
+
+  setGtDisplay(changes) {
+    this.gtDisplay = { ...this.gtDisplay, ...changes };
+    this.emit("gt-display");
+  }
+
+  async focusScene(latDeg, lonDeg, extentM) {
+    this.scene = await api.focusScene(latDeg, lonDeg, extentM);
+    [this.terrain, this.peaks, this.views] = await Promise.all([api.getTerrain(), api.getPeaks(), api.listViews()]);
+    this.selectedViewId = null;
+    this.selectedSolveId = null;
+    this.solveCache.clear();
+    this.emit("scene");
+    this.emit("views");
+    this.emit("selection");
+    this.emit("gt");
   }
 
   setDisplay(changes) {

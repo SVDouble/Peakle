@@ -227,7 +227,32 @@ async def sample_layer(name: str, layer: str) -> Response:
     if "/" in name or ".." in name:
         raise HTTPException(400, "bad sample name")
     path = LAYERS / name / f"{layer}.png"
+    # always run the build check: it no-ops when the cache is fresh and rebuilds
+    # when the sample's record is newer than the rendered layers
+    await to_thread.run_sync(_build_layers, name)
     if not path.exists():
-        await to_thread.run_sync(_build_layers, name)
+        raise HTTPException(404, f"layer {layer} unavailable for {name}")
     return Response(path.read_bytes(), media_type="image/png",
+                    headers={"Cache-Control": "max-age=60"})
+
+
+@router.get("/gt/samples/{name}/thumb.jpg")
+async def sample_thumb(name: str) -> Response:
+    """Small photo thumbnail for map spots / lists — no layer build, just a resize."""
+
+    if "/" in name or ".." in name:
+        raise HTTPException(400, "bad sample name")
+    path = LAYERS / name / "thumb.jpg"
+    if not path.exists():
+        def build() -> None:
+            s = load_sample(DATA / name)
+            im = Image.open(s.photo_path).convert("RGB")
+            im.thumbnail((128, 128), Image.BILINEAR)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            im.save(path, "JPEG", quality=82)
+        try:
+            await to_thread.run_sync(build)
+        except FileNotFoundError:
+            raise HTTPException(404, f"unknown sample {name}") from None
+    return Response(path.read_bytes(), media_type="image/jpeg",
                     headers={"Cache-Control": "max-age=86400"})

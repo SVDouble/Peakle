@@ -198,6 +198,20 @@ class Scene:
         self._view_counter = 0
         self._solve_counter = 0
 
+    def focus_geo(self, lat_deg: float, lon_deg: float, extent_m: float = 24000.0) -> None:
+        """Recenters the map on a geographic point (Copernicus mosaic), clearing views.
+
+        This is how the app jumps to a GT sample's location: the `.hgt` provider only covers
+        hand-downloaded tiles, while the Copernicus mosaic covers the whole corpus.
+        """
+
+        from peakle.terrain.copernicus import load_copernicus_terrain
+
+        self.terrain = load_copernicus_terrain(lat_deg, lon_deg, extent_m=extent_m)
+        self._geo_focused = True
+        self.peaks = self._detect_peaks(self.terrain)
+        self.views = {}
+
     def create_view(
         self,
         east_m: float,
@@ -322,7 +336,7 @@ class Scene:
         """Detects prominent peaks; names them from OSM for real-DEM providers."""
 
         peaks = PeakDetector(self._peak_detection).detect(terrain)
-        if self.config.provider == "srtm" and peaks:
+        if (self.config.provider == "srtm" or getattr(self, "_geo_focused", False)) and peaks:
             pad = 0.01
             bbox = (
                 float(terrain.latitude_deg.min()) - pad,
@@ -330,7 +344,10 @@ class Scene:
                 float(terrain.latitude_deg.max()) + pad,
                 float(terrain.longitude_deg.max()) + pad,
             )
-            peaks = name_peaks_from_osm(peaks, bbox, DEFAULT_DEM_DIR)
+            try:
+                peaks = name_peaks_from_osm(peaks, bbox, DEFAULT_DEM_DIR)
+            except Exception:  # noqa: BLE001 — naming is cosmetic; a focus must not fail on Overpass
+                pass
         return peaks
 
     def _view_prior(self, view_id: str, extrinsics: CameraExtrinsics) -> PosePrior:

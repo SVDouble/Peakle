@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request
 from peakle.optimization.solve import AVAILABLE_STRATEGIES
 from peakle.scene.scene import Scene
 from peakle.web.payloads import peaks_payload, scene_payload, terrain_payload
-from peakle.web.schemas import SceneConfigRequest
+from peakle.web.schemas import SceneConfigRequest, SceneFocusRequest
 
 router = APIRouter(tags=["scene"])
 
@@ -41,6 +41,16 @@ async def put_scene_config(body: SceneConfigRequest, request: Request) -> dict[s
             body.horizontal_fov_deg,
             body.default_strategy,
         )
+    return scene_payload(scene)
+
+
+@router.put("/scene/focus")
+async def put_scene_focus(body: SceneFocusRequest, request: Request) -> dict[str, Any]:
+    """Recenters the map on a lat/lon (Copernicus mosaic), clearing views."""
+
+    scene = _scene(request)
+    async with request.app.state.scene_lock:
+        await to_thread.run_sync(scene.focus_geo, body.lat_deg, body.lon_deg, body.extent_m)
     return scene_payload(scene)
 
 

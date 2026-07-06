@@ -44,6 +44,12 @@ def terrain_payload(terrain: TerrainMap) -> dict[str, Any]:
         "elevation_min_m": float(terrain.elevation_m.min()),
         "elevation_max_m": float(terrain.elevation_m.max()),
         "elevation_m": terrain.elevation_m.round(1).tolist(),
+        # geographic corners so clients can map lat/lon (e.g. GT sample spots) into
+        # the local east/north frame; linear across the window is plenty accurate
+        "lat_min_deg": float(terrain.latitude_deg.min()),
+        "lat_max_deg": float(terrain.latitude_deg.max()),
+        "lon_min_deg": float(terrain.longitude_deg.min()),
+        "lon_max_deg": float(terrain.longitude_deg.max()),
     }
 
 

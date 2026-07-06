@@ -30,6 +30,8 @@ async function request(method, path, body) {
 export const api = {
   getScene: () => request("GET", "/api/scene"),
   setConfig: (config) => request("PUT", "/api/scene/config", config),
+  focusScene: (latDeg, lonDeg, extentM) =>
+    request("PUT", "/api/scene/focus", { lat_deg: latDeg, lon_deg: lonDeg, ...(extentM ? { extent_m: extentM } : {}) }),
   getTerrain: () => request("GET", "/api/terrain"),
   getPeaks: () => request("GET", "/api/peaks"),
   getAlgorithms: () => request("GET", "/api/algorithms"),
@@ -40,6 +42,10 @@ export const api = {
   patchView: (id, changes) => request("PATCH", `/api/views/${id}`, changes),
   deleteView: (id) => request("DELETE", `/api/views/${id}`),
   viewImageUrl: (id) => `/api/views/${id}/image`,
+
+  listGtSamples: () => request("GET", "/api/gt/samples"),
+  gtThumbUrl: (name) => `/api/gt/samples/${encodeURIComponent(name)}/thumb.jpg`,
+  gtLayerUrl: (name, layer) => `/api/gt/samples/${encodeURIComponent(name)}/layers/${layer}.png`,
 
   listSolves: (viewId) => request("GET", `/api/views/${viewId}/solves`),
   getSolve: (viewId, solveId) => request("GET", `/api/views/${viewId}/solves/${solveId}`),
