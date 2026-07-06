@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import label as cc_label
+from scipy.ndimage import maximum_filter
 
 JUMP_LOG = 0.30          # |Δ log d| that counts as an occlusion jump (matches gtrefine)
 CREASE_K_MAD = 6.0       # crease threshold in robust MADs of the response
@@ -126,9 +127,17 @@ def extract_typed_outlines(
         return TypedOutlines(occlusion=occlusion, rib=empty, couloir=empty.copy())
     mad = float(np.median(np.abs(mags - np.median(mags)))) or 1e-9
     th = max(k_mad * mad, floor)
-    # centre NEARER than flanks -> log-depth local minimum -> positive second difference = rib;
-    # rib and couloir are mutually exclusive by construction (one signed response per pixel)
-    rib = _drop_small(valid & (resp > th), min_px)
-    couloir = _drop_small(valid & (resp < -th), min_px)
+    # centre NEARER than flanks -> log-depth local minimum -> positive second difference = rib
+    pos = valid & (resp > th)
+    neg = valid & (resp < -th)
+    # OPPOSITE-PAIR SUPPRESSION: bilinear DEM cells make the ray-sampled depth piecewise linear,
+    # so its second derivative WIGGLES at cell boundaries — equal-and-opposite rib/couloir twins
+    # 1-2px apart (measured: 82% of rib px had a couloir within 2px).  A real terrain fold is an
+    # isolated single-sign vertex; a wiggle is a balanced pair — drop both members of a pair.
+    mag = np.abs(np.nan_to_num(resp))
+    pos_mag_near = maximum_filter(np.where(pos, mag, 0.0), size=5)
+    neg_mag_near = maximum_filter(np.where(neg, mag, 0.0), size=5)
+    rib = _drop_small(pos & (neg_mag_near < 0.6 * mag), min_px)
+    couloir = _drop_small(neg & (pos_mag_near < 0.6 * mag), min_px)
     couloir &= ~rib
     return TypedOutlines(occlusion=occlusion, rib=rib, couloir=couloir)

@@ -90,3 +90,19 @@ def test_foreground_ground_folds_are_ignored():
     depth[120:, :] = 60.0            # foreground ground band
     t = extract_typed_outlines(depth)
     assert t.occlusion.sum() == 0 and t.crease.sum() == 0, t.counts()
+
+
+def test_bilinear_cell_wiggles_are_suppressed_but_isolated_folds_survive():
+    # piecewise-linear depth with kinks every 6 px (bilinear DEM cells): alternating +/- second
+    # derivatives = balanced rib/couloir twins -> both dropped; an isolated strong V survives
+    cols = np.arange(W, dtype=float)
+    seg = (cols // 6).astype(int)
+    slope = np.where(seg % 2 == 0, 8.0, -8.0)            # zig-zag: alternating kink signs
+    zig = 3000.0 + np.cumsum(slope * np.ones(W))
+    row = zig + 45.0 * np.abs(cols - 150.0) * (np.abs(cols - 150.0) < 30)   # one real V at 150
+    depth = np.tile(row, (H, 1))
+    t = extract_typed_outlines(depth)
+    rib_cols = np.nonzero(t.rib.any(axis=0))[0]
+    assert len(rib_cols) > 0 and np.all(np.abs(rib_cols - 150) <= 3), rib_cols
+    other = t.crease.copy(); other[:, 140:160] = False
+    assert other.sum() < 0.001 * H * W, t.counts()
