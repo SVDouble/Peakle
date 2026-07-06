@@ -59,6 +59,10 @@ class RefinedGT:
     width: int
     height: int
     fov_deg: float
+    obs_source: str = "pfm"            # what the pose polish fitted: "photo" (detected skyline,
+                                       # preferred — the pfm has registration outliers) or "pfm"
+    obs_support: float | None = None   # DexiNed edge support of the chosen observation curve
+    pfm_offset_px: float | None = None  # median |pfm skyline - detected skyline| (registration health)
     quality: str = field(default="CLEAN")
     reasons: list[str] = field(default_factory=list)
 
@@ -303,10 +307,12 @@ def refine_pose(terrain, cam_z, obs, w, h, fov_deg, yaw_label, gt_dt=None):
     }
 
 
-def quality_tier(sky_cons: float, contour_cons: float | None, dyaw: float) -> tuple[str, list[str]]:
+def quality_tier(
+    sky_cons: float, contour_cons: float | None, dyaw: float, extra_reasons: list[str] | None = None
+) -> tuple[str, list[str]]:
     """CLEAN samples may score solvers/extractors; everything else is quarantined with reasons."""
 
-    reasons = []
+    reasons = list(extra_reasons or [])
     if sky_cons > GATE_SKY_PX:
         reasons.append(f"skyline reconstruction {sky_cons:.0f}px > {GATE_SKY_PX:.0f}")
     if contour_cons is not None and contour_cons > GATE_CONTOUR_PX:

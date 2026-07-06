@@ -29,6 +29,9 @@ from PIL import Image
 from scipy.ndimage import distance_transform_edt
 
 from peakle.localize.copdem import load_cop_around
+from peakle.localize.extract import extract_candidates
+from peakle.localize.outline_score import rows_to_mask
+from peakle.localize.photo_support import edge_mask, family_support
 from peakle.localize.geopose import load_sample, oracle_skyline, read_pfm
 from peakle.localize.gtrefine import (
     RefinedGT,
@@ -63,6 +66,32 @@ def build_one(name: str) -> RefinedGT:
         np.nan,
     )
 
+    # PREFER THE DETECTED PHOTO SKYLINE as the refinement target: the pfm skyline is a good
+    # starting point but carries registration outliers ("large outliers where the gt skyline is
+    # way off"); the photo is the truth.  Trust a detected candidate only on photo-internal
+    # evidence (coverage + DexiNed edge support) — never by comparing to the pfm.
+    rgb = np.asarray(Image.open(s.photo_path).convert("RGB").resize((w, h), Image.BILINEAR), np.uint8)
+    edges = edge_mask(rgb)
+    obs_source, obs_support, pfm_offset = "pfm", None, None
+    if edges is not None:
+        best = None
+        for cand in extract_candidates(rgb).values():
+            if cand.coverage < 0.5:
+                continue
+            sup = family_support(rows_to_mask(cand.rows, h), edges)
+            if sup is not None and (best is None or sup * cand.coverage > best[0]):
+                best = (sup * cand.coverage, sup, cand)
+        if best is not None:
+            _, sup, cand = best
+            both = np.isfinite(cand.rows) & np.isfinite(obs)
+            if both.sum() > 0.3 * w:
+                pfm_offset = float(np.median(np.abs((cand.rows - obs)[both])))
+            if cand.coverage >= 0.8 and sup >= 0.6:
+                obs = np.where(np.isfinite(cand.rows), cand.rows, np.nan)
+                obs_source, obs_support = "photo", round(sup, 3)
+            else:
+                obs_support = round(sup, 3)
+
     gt_mask = gt_contour_mask(depth, w, h)
     gt_dt = distance_transform_edt(~gt_mask) if gt_mask.sum() >= 200 else None
 
@@ -77,7 +106,10 @@ def build_one(name: str) -> RefinedGT:
 
     terrain_cols = np.isfinite(obs).sum()
     density = float(gt_mask.any(axis=0).sum() / max(terrain_cols, 1))
-    quality, reasons = quality_tier(fit["cons"], fit["ccons"], fit["dyaw"])
+    extra = []
+    if obs_source == "pfm" and pfm_offset is not None and pfm_offset > 15.0:
+        extra.append(f"pfm registration off {pfm_offset:.0f}px and photo skyline untrusted")
+    quality, reasons = quality_tier(fit["cons"], fit["ccons"], fit["dyaw"], extra)
 
     rec = RefinedGT(
         name=name,
@@ -95,12 +127,15 @@ def build_one(name: str) -> RefinedGT:
         width=w,
         height=h,
         fov_deg=s.fov_deg,
+        obs_source=obs_source,
+        obs_support=obs_support,
+        pfm_offset_px=(round(pfm_offset, 1) if pfm_offset is not None else None),
         quality=quality,
         reasons=reasons,
     )
     np.savez_compressed(
         OUT / f"{name}.npz",
-        gt_skyline=obs.astype(np.float32),
+        gt_skyline=obs.astype(np.float32),  # the OBSERVATION the pose was refined against
         dem_skyline=(fit["rows"] + fit["dv"]).astype(np.float32),
         gt_contours=np.packbits(gt_mask),
         dem_contours=np.packbits(dem_mask),
@@ -115,6 +150,8 @@ def main() -> None:
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--samples", default=None)
     ap.add_argument("--manual", action="store_true", help="all MANUAL samples in the corpus")
+    ap.add_argument("--all", action="store_true", help="every complete sample in the corpus")
+    ap.add_argument("--force", action="store_true", help="rebuild samples that already have records")
     ap.add_argument("--max-n", type=int, default=10**9)
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -130,13 +167,16 @@ def main() -> None:
             if info.exists() and info.read_text().splitlines()[0].strip().upper().startswith("MANUAL"):
                 if (d / "cyl/photo_crop.jpg").exists() and (d / "cyl/distance_crop.pfm").exists():
                     names.append(d.name)
+    elif args.all:
+        names = [d.name for d in sorted(DATA.iterdir())
+                 if (d / "cyl/photo_crop.jpg").exists() and (d / "cyl/distance_crop.pfm").exists()]
     else:
-        raise SystemExit("pass --manifest, --samples or --manual")
+        raise SystemExit("pass --manifest, --samples, --manual or --all")
     names = names[: args.max_n]
 
     done = skipped = failed = 0
     for i, name in enumerate(names):
-        if (OUT / f"{name}.json").exists():
+        if not args.force and (OUT / f"{name}.json").exists():
             skipped += 1
             continue
         t0 = time.time()
