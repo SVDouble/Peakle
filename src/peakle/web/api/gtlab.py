@@ -53,10 +53,20 @@ LAYER_NAMES = ["photo", "gt_depth", "dem_depth", "edges"] + [f"{s}_{f}" for s in
 
 
 def _index() -> dict[str, dict]:
-    p = GTV2 / "index.json"
-    if not p.exists():
-        raise HTTPException(503, "GT v2 index missing — run scripts/build_gt_v2.py first")
-    return {r["name"]: r for r in json.loads(p.read_text())}
+    # read per-sample records, not index.json: a rebuild updates records one by one and only
+    # rewrites the index at the very end — the lab should show fresh metrics as they land
+    records = {}
+    for p in GTV2.glob("*.json"):
+        if p.name == "index.json":
+            continue
+        try:
+            r = json.loads(p.read_text())
+            records[r["name"]] = r
+        except (json.JSONDecodeError, KeyError):
+            continue  # record mid-write by the builder
+    if not records:
+        raise HTTPException(503, "no GT v2 records — run scripts/build_gt_v2.py first")
+    return records
 
 
 @router.get("/gt/samples")
@@ -136,7 +146,11 @@ def _build_layers(name: str) -> None:
         raise HTTPException(404, f"unknown sample {name}")
     out = LAYERS / name
     with _BUILD_LOCK:  # the viewer fires several layer requests at once — build once, serially
-        if (out / "dem_cou.png").exists():  # last layer always written (support.json may be skipped on OOM)
+        # sentinel: last layer always written (support.json may be skipped on OOM); a record
+        # rewritten by a rebuild after the layers were built invalidates the cache
+        sentinel = out / "dem_cou.png"
+        rec_file = GTV2 / f"{name}.json"
+        if sentinel.exists() and (not rec_file.exists() or sentinel.stat().st_mtime >= rec_file.stat().st_mtime):
             return
         _build_layers_locked(name, rec, out)
 

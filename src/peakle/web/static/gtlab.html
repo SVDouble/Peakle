@@ -21,7 +21,9 @@ aside h1 { font-size:15px; margin:0 0 2px; } aside .sub { color:var(--ink2); fon
 #samples li.sel { background:#1e2e42; }
 .sname { font-family:ui-monospace,Menlo,monospace; font-size:11px; display:block;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.smeta { color:var(--ink2); font-size:11px; display:flex; gap:8px; }
+.smeta { color:var(--ink2); font-size:11px; display:flex; gap:8px; font-variant-numeric:tabular-nums; }
+.smeta .over { color:var(--bad); font-weight:650; }
+.smeta .src { color:var(--warn); font-size:9.5px; font-weight:700; letter-spacing:.05em; align-self:center; }
 .chip { padding:0 6px; border-radius:99px; font-size:10px; font-weight:650; }
 .chip.CLEAN { background:#12331b; color:#5fd07f; } .chip.SUSPECT { background:#3a1d1d; color:#ef8f8f; }
 main { flex:1; display:flex; flex-direction:column; min-width:0; }
@@ -166,11 +168,13 @@ function renderList(filter = "") {
     .map((s) => {
       const li = document.createElement("li");
       li.dataset.name = s.name;
+      const met = (label, v, gate) => v == null ? "" :
+        `<span${v > gate ? ' class="over"' : ""}>${label} ${fmt(v, v >= 10 ? 0 : 1)}</span>`;
       li.innerHTML = `<span class="sname">${s.name}</span>` +
         `<span class="smeta"><span class="chip ${s.quality}">${s.quality}</span>` +
-        `<span>sky ${fmt(s.sky_cons_px, 0)}${s.pfm_cons_px != null ? "/" + fmt(s.pfm_cons_px, 0) : ""}px</span>` +
-        `<span>ct ${fmt(s.contour_cons_px, 0)}px</span>` +
-        `<span>Δyaw ${fmt(s.dyaw_deg)}°</span></span>`;
+        met("sky", s.sky_cons_px, 15) + met("pfm", s.pfm_cons_px, 15) +
+        met("ct", s.contour_cons_px, 25) + met("Δyaw", s.dyaw_deg == null ? null : Math.abs(s.dyaw_deg), 3) +
+        (s.obs_source === "photo" ? `<span class="src">PH</span>` : "") + `</span>`;
       li.addEventListener("click", () => select(s.name));
       return li;
     }));
