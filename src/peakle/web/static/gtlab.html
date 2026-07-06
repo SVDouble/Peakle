@@ -138,7 +138,9 @@ async function select(name) {
   document.getElementById("meta").innerHTML =
     `<span class="sname">${m.name}</span>` +
     `<span class="chip ${m.quality}">${m.quality}</span> ${m.manual ? "MANUAL" : "AUTO"} · fov <b>${fmt(m.fov_deg, 0)}°</b><br>` +
-    `skyline cons <b>${fmt(m.sky_cons_px)}px</b> · contours <b>${fmt(m.contour_cons_px)}px</b> · density <b>${fmt(m.gt_contour_density, 2)}</b><br>` +
+    `skyline cons <b>${fmt(m.sky_cons_px)}px</b> vs ${m.obs_source ?? "pfm"}` +
+    (m.pfm_cons_px != null ? ` · vs pfm <b>${fmt(m.pfm_cons_px)}px</b>` : "") +
+    ` · contours <b>${fmt(m.contour_cons_px)}px</b> · density <b>${fmt(m.gt_contour_density, 2)}</b><br>` +
     `label corr: Δyaw <b>${fmt(m.dyaw_deg)}°</b> · pos <b>${fmt(m.de_m, 0)}E/${fmt(m.dn_m, 0)}N m</b> · tilt <b>${fmt(m.tilt_deg)}°</b><br>` +
     (m.reasons?.length ? `<span class="reasons">${m.reasons.join("; ")}</span>` : "");
   drawMap();
@@ -166,7 +168,8 @@ function renderList(filter = "") {
       li.dataset.name = s.name;
       li.innerHTML = `<span class="sname">${s.name}</span>` +
         `<span class="smeta"><span class="chip ${s.quality}">${s.quality}</span>` +
-        `<span>sky ${fmt(s.sky_cons_px, 0)}px</span><span>ct ${fmt(s.contour_cons_px, 0)}px</span>` +
+        `<span>sky ${fmt(s.sky_cons_px, 0)}${s.pfm_cons_px != null ? "/" + fmt(s.pfm_cons_px, 0) : ""}px</span>` +
+        `<span>ct ${fmt(s.contour_cons_px, 0)}px</span>` +
         `<span>Δyaw ${fmt(s.dyaw_deg)}°</span></span>`;
       li.addEventListener("click", () => select(s.name));
       return li;

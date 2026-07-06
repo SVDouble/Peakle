@@ -63,10 +63,16 @@ def _index() -> dict[str, dict]:
 async def list_samples() -> list[dict[str, Any]]:
     """All GT v2 samples with quality metrics, worst reconstruction first."""
 
-    rows = sorted(_index().values(), key=lambda r: -(r["sky_cons_px"] or 0))
+    # order by the WORST of the two reconstruction metrics: vs the chosen obs target AND vs the
+    # pfm render — a photo-rescued sample must not hide its pfm registration error (and vice versa)
+    def worst(r: dict) -> float:
+        return max(r.get("sky_cons_px") or 0, r.get("pfm_cons_px") or 0)
+
+    rows = sorted(_index().values(), key=lambda r: -worst(r))
     return [
         {k: r.get(k) for k in (
-            "name", "manual", "quality", "reasons", "sky_cons_px", "contour_cons_px",
+            "name", "manual", "quality", "reasons", "sky_cons_px", "pfm_cons_px", "obs_source",
+            "contour_cons_px",
             "dyaw_deg", "de_m", "dn_m", "tilt_deg", "yaw_deg", "fov_deg", "gt_contour_density",
             "width", "height",
         )} | {"lat": _latlon(r["name"])[0], "lon": _latlon(r["name"])[1]}

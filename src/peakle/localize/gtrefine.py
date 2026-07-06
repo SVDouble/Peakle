@@ -63,6 +63,7 @@ class RefinedGT:
                                        # preferred — the pfm has registration outliers) or "pfm"
     obs_support: float | None = None   # DexiNed edge support of the chosen observation curve
     pfm_offset_px: float | None = None  # median |pfm skyline - detected skyline| (registration health)
+    pfm_cons_px: float | None = None   # reconstruction vs the pfm render (two-terrain-model metric)
     quality: str = field(default="CLEAN")
     reasons: list[str] = field(default_factory=list)
 

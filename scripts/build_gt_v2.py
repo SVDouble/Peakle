@@ -40,6 +40,7 @@ from peakle.localize.gtrefine import (
     gt_contour_mask,
     quality_tier,
     refine_pose,
+    shift_align,
 )
 
 BASE = Path(__file__).resolve().parents[1]
@@ -66,13 +67,16 @@ def build_one(name: str) -> RefinedGT:
         np.nan,
     )
 
-    # PREFER THE DETECTED PHOTO SKYLINE as the refinement target: the pfm skyline is a good
-    # starting point but carries registration outliers ("large outliers where the gt skyline is
-    # way off"); the photo is the truth.  Trust a detected candidate only on photo-internal
-    # evidence (coverage + DexiNed edge support) — never by comparing to the pfm.
+    # HYBRID observation targeting.  The pfm skyline is the CLEANEST target (a render: complete,
+    # noise-free) and our DEM can match it to ~1px — so it stays the DEFAULT.  But it carries
+    # registration outliers ("large outliers where the gt skyline is way off"); ONLY when the
+    # trusted detected photo skyline DISAGREES with the pfm does the photo become the target.
+    # (Re-anchoring every sample to the photo raised the whole cons distribution by the photo's
+    # trees/extraction noise floor — measured, reverted.)
     rgb = np.asarray(Image.open(s.photo_path).convert("RGB").resize((w, h), Image.BILINEAR), np.uint8)
     edges = edge_mask(rgb)
     obs_source, obs_support, pfm_offset = "pfm", None, None
+    pfm_obs = obs.copy()
     if edges is not None:
         best = None
         for cand in extract_candidates(rgb).values():
@@ -83,14 +87,16 @@ def build_one(name: str) -> RefinedGT:
                 best = (sup * cand.coverage, sup, cand)
         if best is not None:
             _, sup, cand = best
+            obs_support = round(sup, 3)
             both = np.isfinite(cand.rows) & np.isfinite(obs)
             if both.sum() > 0.3 * w:
                 pfm_offset = float(np.median(np.abs((cand.rows - obs)[both])))
-            if cand.coverage >= 0.8 and sup >= 0.6:
+            if (
+                pfm_offset is not None and pfm_offset > 10.0
+                and cand.coverage >= 0.8 and sup >= 0.6
+            ):
                 obs = np.where(np.isfinite(cand.rows), cand.rows, np.nan)
-                obs_source, obs_support = "photo", round(sup, 3)
-            else:
-                obs_support = round(sup, 3)
+                obs_source = "photo"
 
     gt_mask = gt_contour_mask(depth, w, h)
     gt_dt = distance_transform_edt(~gt_mask) if gt_mask.sum() >= 200 else None
@@ -103,6 +109,11 @@ def build_one(name: str) -> RefinedGT:
     dem_mask = dem_contour_mask(
         terrain, fit["cam_z"], az, w, h, s.fov_deg, fit["dv"], fit["de"], fit["dn"], fit["tilt"]
     )
+
+    # secondary metric: reconstruction vs the pfm render, ALWAYS — keeps distributions comparable
+    # across targeting modes (vs-photo cons carries a trees/extraction noise floor the DEM can't
+    # reproduce; vs-pfm cons is the two-terrain-model agreement)
+    pfm_cons, _ = shift_align(pfm_obs, fit["rows"], fit["dv"] + np.arange(-40.0, 41.0, 2.0), step=2)
 
     terrain_cols = np.isfinite(obs).sum()
     density = float(gt_mask.any(axis=0).sum() / max(terrain_cols, 1))
@@ -130,6 +141,7 @@ def build_one(name: str) -> RefinedGT:
         obs_source=obs_source,
         obs_support=obs_support,
         pfm_offset_px=(round(pfm_offset, 1) if pfm_offset is not None else None),
+        pfm_cons_px=round(float(pfm_cons), 2),
         quality=quality,
         reasons=reasons,
     )
