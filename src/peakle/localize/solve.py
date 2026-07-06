@@ -87,9 +87,13 @@ def curve_chamfer(
 class HorizonProfile:
     """The one-time 360° horizon of a position, resampleable into any camera."""
 
-    def __init__(self, terrain, cam_up_m: float, step: float = 30.0, d_max: float | None = None):
+    def __init__(
+        self, terrain, cam_up_m: float, step: float = 30.0, d_max: float | None = None,
+        cam_e: float = 0.0, cam_n: float = 0.0,
+    ):
         self.az_deg = np.arange(0.0, 360.0, AZ_STEP_DEG)
-        el = horizon_elevation(terrain, np.radians(self.az_deg), cam_up_m, step=step, d_max=d_max)
+        el = horizon_elevation(terrain, np.radians(self.az_deg), cam_up_m, step=step, d_max=d_max,
+                               cam_e=cam_e, cam_n=cam_n)
         self.el = el  # radians, NaN where the DEM had no sample
         self.cam_up_m = cam_up_m
 

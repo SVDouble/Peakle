@@ -123,7 +123,10 @@ export function setupSolvePanel(store, root) {
     const solve = store.selectedSolve();
     if (view && solve && view.solves.some((s) => s.id === solve.id)) {
       blurb.textContent = strategyBlurb(solve.strategy);
-      status.textContent = `${strategyLabel(solve.strategy)} · ${solve.result.evaluations} evaluations`;
+      const d = solve.result.diagnostics;
+      status.textContent =
+        `${strategyLabel(solve.strategy)} · ${solve.result.evaluations} evaluations` +
+        (d ? ` · ${d.verdict} (alias ${d.alias_ratio} · snr ${d.snr} · well ${d.well_width_deg}°)` : "");
       if (solve.id !== shownSolveId) {
         shownSolveId = solve.id;
         animate(solve, view);

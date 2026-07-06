@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from peakle.optimization.solve import STRATEGIES
 from peakle.scene.providers import PROVIDER_KINDS
 
-StrategyName = Literal["powell", "nelder", "evolution", "global"]
+StrategyName = Literal["powell", "nelder", "evolution", "global", "horizon"]
 ProviderName = Literal["demo", "srtm"]
 assert set(STRATEGIES) == set(get_args(StrategyName))  # noqa: S101 - keep schema and solver list in sync
 assert set(PROVIDER_KINDS) == set(get_args(ProviderName))  # noqa: S101 - keep schema and provider list in sync

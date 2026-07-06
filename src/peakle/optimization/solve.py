@@ -9,6 +9,9 @@ are recomputed at full resolution.
 
 from __future__ import annotations
 
+import math
+from typing import Any
+
 import numpy as np
 from numpy.typing import NDArray
 from pydantic import BaseModel
@@ -27,7 +30,7 @@ from peakle.rendering.rasterizer import SyntheticRenderer
 SOLVE_SAMPLE_WIDTH = 360
 SOLVE_TARGET_COLUMNS = 22
 MAX_TRACE_FRAMES = 60
-STRATEGIES = ("powell", "nelder", "evolution", "global")
+STRATEGIES = ("powell", "nelder", "evolution", "global", "horizon")
 
 AVAILABLE_STRATEGIES = [
     {
@@ -49,6 +52,13 @@ AVAILABLE_STRATEGIES = [
         "name": "global",
         "label": "Global (no prior)",
         "blurb": "Prior-free: 360 deg horizon correlation across the whole map for position + yaw, then local refine.",
+    },
+    {
+        "name": "horizon",
+        "label": "Horizon (validated)",
+        "blurb": "The ray-cast 360 deg horizon solver validated on GeoPose3K: median-centered "
+                 "shift chamfer with top-K basin polish and honesty diagnostics "
+                 "(alias ratio, SNR, verdict). Solves yaw/pitch at the prior position.",
     },
 ]
 
@@ -119,6 +129,7 @@ class PoseSolveResult(BaseModel):
     predicted_profile_full: list[float | None]
     candidates: list[PoseCandidate]
     trace: list[SolveFrame]
+    diagnostics: dict[str, Any] | None = None
 
 
 def solve_pose(
@@ -151,6 +162,9 @@ def solve_pose(
     if strategy not in STRATEGIES:
         msg = f"unknown strategy {strategy!r}; expected one of {STRATEGIES}"
         raise ValueError(msg)
+
+    if strategy == "horizon":
+        return _solve_horizon(terrain, contour, intrinsics, prior, truth)
 
     renderer = SyntheticRenderer()
     reduced = _reduced_intrinsics(intrinsics, SOLVE_SAMPLE_WIDTH)
@@ -215,6 +229,104 @@ def solve_pose(
         candidates=candidates,
         trace=_subsample_frames(traced.frames, MAX_TRACE_FRAMES),
     )
+
+
+
+
+def _solve_horizon(
+    terrain: TerrainMap,
+    contour: SkylineContour,
+    intrinsics: CameraIntrinsics,
+    prior: PosePrior,
+    truth: CameraExtrinsics | None,
+) -> PoseSolveResult:
+    """The validated peakle.localize horizon solver, adapted to the workbench.
+
+    Orientation-only by design: the 360° elevation profile is computed once at the
+    prior position and every (yaw, pitch) hypothesis is a resampling of it, scored
+    with the median-centered shift chamfer + top-K basin polish. Its honesty
+    diagnostics (alias ratio, SNR, verdict) ride along in ``diagnostics``.
+    """
+
+    from peakle.localize.solve import HorizonProfile, solve_orientation
+
+    position = prior.position
+    width, height = intrinsics.width_px, intrinsics.height_px
+    hfov_deg = math.degrees(2.0 * math.atan(width / (2.0 * intrinsics.focal_length_px)))
+    obs = contour.to_profile()
+
+    grid_step = float(min(terrain.x_m[1] - terrain.x_m[0], terrain.y_m[1] - terrain.y_m[0]))
+    profile = HorizonProfile(
+        terrain, position.up_m, step=max(grid_step / 2.0, 10.0),
+        cam_e=position.east_m, cam_n=position.north_m,
+    )
+    solve = solve_orientation(obs, height, profile, fov_deg=hfov_deg, projection="pinhole")
+
+    def extrinsics_at(yaw_deg: float, pitch_deg: float) -> CameraExtrinsics:
+        return CameraExtrinsics(
+            position=position, yaw_deg=((yaw_deg + 180.0) % 360.0) - 180.0, pitch_deg=pitch_deg, roll_deg=0.0
+        )
+
+    estimate_extrinsics = extrinsics_at(solve.yaw_deg, solve.pitch_deg)
+    metrics = FitMetrics(
+        score=solve.chamfer_px,
+        contour_mae_px=solve.chamfer_px,
+        contour_p95_px=solve.chamfer_px,
+        valid_columns=int(round(solve.coverage * width)),
+        iterations=1,
+        success=True,
+        message=f"verdict {solve.verdict}",
+        confidence=0.9 if solve.verdict == "CONFIRMED" else 0.4,
+        position_error_m=None,
+        yaw_error_deg=None,
+        pitch_error_deg=None,
+    )
+    estimate = PoseEstimate(extrinsics=estimate_extrinsics, metrics=metrics)
+    if truth is not None:
+        estimate = add_synthetic_truth_metrics(estimate, truth)
+
+    reduced = _reduced_intrinsics(intrinsics, SOLVE_SAMPLE_WIDTH)
+    observed_reduced = _reduce_profile(obs, intrinsics, reduced)
+    predicted_reduced = profile.rows_pinhole(
+        reduced.width_px, reduced.height_px, hfov_deg, solve.yaw_deg, solve.pitch_deg
+    )
+    predicted_full = profile.rows_pinhole(width, height, hfov_deg, solve.yaw_deg, solve.pitch_deg)
+
+    candidates = [
+        PoseCandidate(extrinsics=extrinsics_at(yaw, solve.pitch_deg), score=float(chamfer))
+        for chamfer, yaw, _dv in (solve.candidates or [(solve.chamfer_px, solve.yaw_deg, 0.0)])[:8]
+    ]
+    frame = SolveFrame(
+        east_m=position.east_m,
+        north_m=position.north_m,
+        up_m=position.up_m,
+        yaw_deg=estimate_extrinsics.yaw_deg,
+        pitch_deg=solve.pitch_deg,
+        score=solve.chamfer_px,
+        evaluations=int(len(solve.yaw_profile_deg)),
+        profile=_jsonable_profile(predicted_reduced),
+    )
+    return PoseSolveResult(
+        strategy="horizon",
+        estimate=estimate,
+        evaluations=int(len(solve.yaw_profile_deg)),
+        sample_width=reduced.width_px,
+        sample_height=reduced.height_px,
+        observed_profile=_jsonable_profile(observed_reduced),
+        predicted_profile=_jsonable_profile(predicted_reduced),
+        predicted_profile_full=_jsonable_profile(predicted_full),
+        candidates=candidates,
+        trace=[frame],
+        diagnostics={
+            "verdict": solve.verdict,
+            "chamfer_px": round(solve.chamfer_px, 2),
+            "alias_ratio": round(solve.alias_ratio, 2),
+            "snr": round(solve.snr, 1),
+            "well_width_deg": round(solve.well_width_deg, 1),
+            "coverage": round(solve.coverage, 2),
+        },
+    )
+
 
 
 class _TracedSolve:
