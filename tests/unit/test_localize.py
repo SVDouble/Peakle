@@ -124,3 +124,22 @@ def test_ambiguous_terrain_is_not_confirmed():
     s = solve_orientation(obs, H, prof, fov_deg=60.0, projection="cyl")
     assert s.verdict != "CONFIRMED", s.summary()
     assert s.well_width_deg > 45.0 or s.alias_ratio < 1.1, s.summary()
+
+
+def test_dp_skyline_follows_strong_edge_chain():
+    """The DP trace must follow a continuous high-score chain and ignore brighter isolated
+    specks (clouds) that a per-column argmax would jump to."""
+
+    import numpy as np
+
+    from peakle.localize.extract import _dp_skyline
+
+    h, w = 120, 200
+    score = np.zeros((h, w))
+    true_rows = (60 + 12 * np.sin(np.linspace(0, 3, w))).astype(int)
+    score[true_rows, np.arange(w)] = 0.6
+    rng = np.random.default_rng(0)
+    score[rng.integers(5, 25, 40), rng.integers(0, w, 40)] = 0.9   # bright isolated specks above
+    rows = _dp_skyline(score)
+    err = np.abs(rows - true_rows)
+    assert np.median(err) <= 1.0 and err.max() <= 6.0, (np.median(err), err.max())

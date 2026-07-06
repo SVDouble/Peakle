@@ -107,6 +107,75 @@ def extract_skyline(rgb: np.ndarray) -> ExtractedSkyline:
     return ExtractedSkyline(rows=rows, coverage=float(np.isfinite(rows).mean()), agreement=agreement)
 
 
+def _dp_skyline(score: np.ndarray, max_step: int = 3, step_penalty: float = 0.02) -> np.ndarray:
+    """Highest-scoring left-to-right path through a per-pixel score map (one row per column).
+
+    Classic DP skyline trace: transitions limited to ±``max_step`` rows per column with a small
+    jump penalty.  Pure function of the score map — unit-testable without any learned model.
+    """
+
+    h, w = score.shape
+    acc = score[:, 0].copy()
+    back = np.zeros((h, w), np.int16)
+    offsets = np.arange(-max_step, max_step + 1)
+    for c in range(1, w):
+        stack = np.full((len(offsets), h), -np.inf)
+        for k, off in enumerate(offsets):
+            src_lo, src_hi = max(0, -off), min(h, h - off)
+            stack[k, src_lo:src_hi] = acc[src_lo + off : src_hi + off] - step_penalty * abs(off)
+        best_k = np.argmax(stack, axis=0)
+        acc = stack[best_k, np.arange(h)] + score[:, c]
+        back[:, c] = offsets[best_k]
+    rows = np.empty(w, float)
+    r = int(np.argmax(acc))
+    for c in range(w - 1, -1, -1):
+        rows[c] = r
+        r = int(np.clip(r + back[r, c], 0, h - 1))
+    return rows
+
+
+def learned_skyline(rgb: np.ndarray) -> ExtractedSkyline | None:
+    """DexiNed-driven skyline: DP trace over edge response + a sky-above prior.
+
+    The colour detectors fail outright on ~40% of photos (measured: 104/165 extracted-track
+    failures had >40px extraction error); DexiNed marks the sky-terrain boundary at R_sky 0.95
+    but needs a global path constraint to not wander onto valley edges — the DP supplies it, and
+    the sky prior (fraction of blue-dominant pixels above the row) breaks cloud-edge ties.
+    Returns None when torch/kornia are unavailable.
+    """
+
+    from peakle.localize.photo_support import edge_mask as _unused  # noqa: F401 - ensures module presence
+    from peakle.localize.photo_support import _detector
+
+    det = _detector()
+    if det is None:
+        return None
+    emap = det.detect(rgb.astype(np.float64) / 255.0)
+    h, w = emap.shape
+    sky_a, _ = _color_sky_masks(rgb)
+    valid = _valid_mask(rgb)
+    # the warped-crop black borders are themselves strong artificial edges — erode them away
+    core = valid.copy()
+    for _ in range(3):
+        er = core.copy()
+        er[1:, :] &= core[:-1, :]
+        er[:-1, :] &= core[1:, :]
+        er[:, 1:] &= core[:, :-1]
+        er[:, :-1] &= core[:, 1:]
+        core = er
+    skyness = np.cumsum(sky_a & valid, axis=0) / np.maximum(np.cumsum(valid, axis=0), 1)
+    rows = _dp_skyline(np.where(core, emap, 0.0) + 0.55 * skyness)
+    rows[~core[np.clip(rows.astype(int), 0, h - 1), np.arange(w)]] = np.nan
+    fin = np.isfinite(rows)
+    if fin.sum() >= 7:
+        rows[fin] = median_filter(rows[fin], 7)
+    # agreement vs the colour candidates (cross-detector consistency, as elsewhere)
+    ca = _skyline_from_sky_mask(sky_a, valid)
+    both = np.isfinite(rows) & np.isfinite(ca)
+    agreement = float((both & (np.abs(rows - ca) <= 3.0)).sum() / max(both.sum(), 1)) if both.any() else 0.0
+    return ExtractedSkyline(rows=rows, coverage=float(np.isfinite(rows).mean()), agreement=agreement)
+
+
 def extract_candidates(rgb: np.ndarray) -> dict[str, ExtractedSkyline]:
     """Independent skyline hypotheses for multi-hypothesis solving.
 
@@ -122,10 +191,17 @@ def extract_candidates(rgb: np.ndarray) -> dict[str, ExtractedSkyline]:
     rows_b = _skyline_from_sky_mask(sky_b, valid)
     both = np.isfinite(rows_a) & np.isfinite(rows_b)
     agreement = float((both & (np.abs(rows_a - rows_b) <= 3.0)).sum() / max(both.sum(), 1)) if both.any() else 0.0
-    return {
+    out = {
         "blue": ExtractedSkyline(rows=rows_a, coverage=float(np.isfinite(rows_a).mean()), agreement=agreement),
         "bright": ExtractedSkyline(rows=rows_b, coverage=float(np.isfinite(rows_b).mean()), agreement=agreement),
     }
+    try:
+        learned = learned_skyline(rgb)
+    except Exception:
+        learned = None
+    if learned is not None:
+        out["dexined"] = learned
+    return out
 
 
 def extract_skyline_from_mask(sky_mask: np.ndarray, rgb: np.ndarray) -> ExtractedSkyline:
