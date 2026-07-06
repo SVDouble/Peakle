@@ -154,6 +154,15 @@ def learned_skyline(rgb: np.ndarray) -> ExtractedSkyline | None:
     h, w = emap.shape
     sky_a, _ = _color_sky_masks(rgb)
     valid = _valid_mask(rgb)
+    # the sky prior must use only sky CONNECTED TO THE IMAGE TOP: a lake below a meadow ridge is
+    # blue-dominant too, and rewarded it drags the DP onto the water's edge as a confident false
+    # skyline (measured on a look-down-over-Walensee sample: 'skyline' = meadow/lake boundary,
+    # DexiNed support 1.0) — top-connectivity is what separates sky from water
+    lab, _n = label(sky_a & valid)
+    col_has_valid = valid.any(axis=0)
+    top_rows = np.where(col_has_valid, valid.argmax(axis=0), 0)
+    top_ids = np.unique(lab[top_rows[np.arange(w)[col_has_valid]], np.arange(w)[col_has_valid]])
+    sky_a = np.isin(lab, top_ids[top_ids > 0])
     # the warped-crop black borders are themselves strong artificial edges — erode them away
     core = valid.copy()
     for _ in range(3):
@@ -164,8 +173,19 @@ def learned_skyline(rgb: np.ndarray) -> ExtractedSkyline | None:
         er[:, :-1] &= core[:, 1:]
         core = er
     skyness = np.cumsum(sky_a & valid, axis=0) / np.maximum(np.cumsum(valid, axis=0), 1)
-    rows = _dp_skyline(np.where(core, emap, 0.0) + 0.55 * skyness)
+    # SIGNED prior: sky above rewards, TERRAIN above punishes — a true skyline has only sky
+    # above it, a lake/water edge has the whole far shore above (measured false skyline on a
+    # look-down-over-lake shot with DexiNed support 1.0)
+    rows = _dp_skyline(np.where(core, emap, 0.0) + 0.55 * (2.0 * skyness - 1.0))
     rows[~core[np.clip(rows.astype(int), 0, h - 1), np.arange(w)]] = np.nan
+    # fail-safe: if the chosen path does NOT have overwhelmingly sky above it, this photo has no
+    # trustworthy learned skyline (water/haze scene) — halve coverage so the pose refinement
+    # falls back to the pfm instead of chasing a false boundary
+    fin0 = np.isfinite(rows)
+    if fin0.any():
+        path_sky = float(np.mean(skyness[np.clip(rows[fin0].astype(int), 0, h - 1), np.arange(w)[fin0]]))
+        if path_sky < 0.6:
+            rows[np.arange(w) % 2 == 1] = np.nan  # thin to force coverage below trust thresholds
     fin = np.isfinite(rows)
     if fin.sum() >= 7:
         rows[fin] = median_filter(rows[fin], 7)
