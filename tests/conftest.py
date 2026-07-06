@@ -25,4 +25,4 @@ def small_settings() -> AppSettings:
 def scene(small_settings: AppSettings) -> Scene:
     """Returns a freshly built small scene."""
 
-    return Scene.from_settings(small_settings)
+    return Scene.from_settings(small_settings, provider="demo")  # hermetic: no DEM/OSM

@@ -26,7 +26,7 @@ from peakle.optimization.solve import PoseSolveResult, solve_pose
 from peakle.rendering.rasterizer import RenderArrays, SyntheticRenderer
 from peakle.scene.providers import ProviderKind, build_provider
 from peakle.scene.state import build_intrinsics, noisy_prior
-from peakle.terrain.dem import DEFAULT_DEM_DIR
+from peakle.terrain.dem import DEFAULT_DEM_DIR, find_hgt_tile
 from peakle.terrain.gazetteer import name_peaks_from_osm
 from peakle.terrain.peak_detection import PeakDetector
 
@@ -137,11 +137,22 @@ class Scene:
         self._solve_counter = 0
 
     @classmethod
-    def from_settings(cls, settings: AppSettings) -> Scene:
-        """Builds a scene from application settings."""
+    def from_settings(cls, settings: AppSettings, provider: ProviderKind | None = None) -> Scene:
+        """Builds a scene from application settings.
 
+        ``provider=None`` auto-selects: the REAL map (srtm) when DEM tiles are available (user
+        preference for the app), else the synthetic demo terrain.  Tests pin ``provider="demo"``
+        to stay deterministic and offline.
+        """
+
+        if provider is None:
+            try:
+                find_hgt_tile(DEFAULT_DEM_DIR)
+                provider = "srtm"
+            except (FileNotFoundError, StopIteration, ValueError):
+                provider = "demo"
         config = SceneConfig(
-            provider="demo",
+            provider=provider,
             seed=settings.random_seed,
             image_width=settings.render.image_width,
             image_height=settings.render.image_height,
