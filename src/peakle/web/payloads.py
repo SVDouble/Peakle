@@ -77,6 +77,10 @@ def view_payload(view: View) -> dict[str, Any]:
         "prior": view.prior.model_dump(mode="json") if view.prior else None,
         "contour": view.contour.model_dump(mode="json"),
         "image_url": f"/api/views/{view.id}/image",
+        "source": view.source,
+        "gt_name": view.gt_name,
+        # a GT-derived view has a reference photograph; the inspector shows it instead of the render
+        "photo_url": f"/api/views/{view.id}/photo" if view.reference_photo is not None else None,
         "solves": [solve_summary(solve) for solve in view.solves.values()],
     }
 

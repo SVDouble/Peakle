@@ -42,10 +42,12 @@ export const api = {
   patchView: (id, changes) => request("PATCH", `/api/views/${id}`, changes),
   deleteView: (id) => request("DELETE", `/api/views/${id}`),
   viewImageUrl: (id) => `/api/views/${id}/image`,
+  viewPhotoUrl: (id) => `/api/views/${id}/photo`,
 
   listGtSamples: () => request("GET", "/api/gt/samples"),
   gtThumbUrl: (name) => `/api/gt/samples/${encodeURIComponent(name)}/thumb.jpg`,
   gtLayerUrl: (name, layer) => `/api/gt/samples/${encodeURIComponent(name)}/layers/${layer}.png`,
+  openGtView: (name) => request("POST", `/api/gt/samples/${encodeURIComponent(name)}/open-view`),
 
   listSolves: (viewId) => request("GET", `/api/views/${viewId}/solves`),
   getSolve: (viewId, solveId) => request("GET", `/api/views/${viewId}/solves/${solveId}`),

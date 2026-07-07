@@ -142,6 +142,7 @@ def solve_pose(
     truth: CameraExtrinsics | None = None,
     seed: int | None = None,
     use_position_prior: bool = True,
+    projection: str = "pinhole",
 ) -> PoseSolveResult:
     """Recovers a full camera pose from an observed contour and a prior.
 
@@ -150,10 +151,12 @@ def solve_pose(
         contour: Observed skyline contour at full image resolution.
         intrinsics: Known camera intrinsics.
         prior: Noisy pose prior.
-        strategy: One of `powell`, `nelder`, or `evolution`.
+        strategy: One of `powell`, `nelder`, `evolution`, `global`, `horizon`.
         terrain_stride: Terrain subsampling stride for the objective.
         truth: Optional ground-truth pose for error metrics.
         seed: Optional seed for stochastic strategies.
+        projection: Crop geometry for the `horizon` strategy ("pinhole" for a
+            synthetic camera, "cyltan" for a GeoPose3K crop / materialized GT view).
 
     Returns:
         The estimated pose, fit metrics, and a convergence trace.
@@ -164,7 +167,7 @@ def solve_pose(
         raise ValueError(msg)
 
     if strategy == "horizon":
-        return _solve_horizon(terrain, contour, intrinsics, prior, truth)
+        return _solve_horizon(terrain, contour, intrinsics, prior, truth, projection=projection)
 
     renderer = SyntheticRenderer()
     reduced = _reduced_intrinsics(intrinsics, SOLVE_SAMPLE_WIDTH)
@@ -237,6 +240,7 @@ def _solve_horizon(
     intrinsics: CameraIntrinsics,
     prior: PosePrior,
     truth: CameraExtrinsics | None,
+    projection: str = "pinhole",
 ) -> PoseSolveResult:
     """The validated peakle.localize horizon solver, adapted to the workbench.
 
@@ -244,6 +248,11 @@ def _solve_horizon(
     prior position and every (yaw, pitch) hypothesis is a resampling of it, scored
     with the median-centered shift chamfer + top-K basin polish. Its honesty
     diagnostics (alias ratio, SNR, verdict) ride along in ``diagnostics``.
+
+    ``projection`` is "pinhole" for a synthetic placed camera and "cyltan" for a
+    GeoPose3K crop (a materialized GT view) — the crop geometry is truly cylindrical
+    with rows linear in tan(elevation), and solving it as a pinhole recovers the
+    wrong yaw.
     """
 
     from peakle.localize.solve import HorizonProfile, solve_orientation
@@ -252,6 +261,8 @@ def _solve_horizon(
     width, height = intrinsics.width_px, intrinsics.height_px
     hfov_deg = math.degrees(2.0 * math.atan(width / (2.0 * intrinsics.focal_length_px)))
     obs = contour.to_profile()
+    # cyltan crops carry large vertical offsets (up to ~48°); a pinhole camera does not
+    pitch_bounds = (-50.0, 50.0) if projection == "cyltan" else (-30.0, 30.0)
 
     grid_step = float(min(terrain.x_m[1] - terrain.x_m[0], terrain.y_m[1] - terrain.y_m[0]))
     profile = HorizonProfile(
@@ -261,7 +272,7 @@ def _solve_horizon(
         cam_e=position.east_m,
         cam_n=position.north_m,
     )
-    solve = solve_orientation(obs, height, profile, fov_deg=hfov_deg, projection="pinhole")
+    solve = solve_orientation(obs, height, profile, fov_deg=hfov_deg, projection=projection, pitch_bounds=pitch_bounds)
 
     def extrinsics_at(yaw_deg: float, pitch_deg: float) -> CameraExtrinsics:
         return CameraExtrinsics(
@@ -288,10 +299,10 @@ def _solve_horizon(
 
     reduced = _reduced_intrinsics(intrinsics, SOLVE_SAMPLE_WIDTH)
     observed_reduced = _reduce_profile(obs, intrinsics, reduced)
-    predicted_reduced = profile.rows_pinhole(
-        reduced.width_px, reduced.height_px, hfov_deg, solve.yaw_deg, solve.pitch_deg
+    predicted_reduced = profile.rows(
+        projection, reduced.width_px, reduced.height_px, hfov_deg, solve.yaw_deg, solve.pitch_deg
     )
-    predicted_full = profile.rows_pinhole(width, height, hfov_deg, solve.yaw_deg, solve.pitch_deg)
+    predicted_full = profile.rows(projection, width, height, hfov_deg, solve.yaw_deg, solve.pitch_deg)
 
     candidates = [
         PoseCandidate(extrinsics=extrinsics_at(yaw, solve.pitch_deg), score=float(chamfer))

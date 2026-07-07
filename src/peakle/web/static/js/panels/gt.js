@@ -140,6 +140,27 @@ export function setupGtPanel(store, root) {
             focus.disabled = false;
           }
         });
+        // Open the sample as a real scene View (photo + refined pose) — then it lists, POVs,
+        // adjusts and SOLVES like any placed camera.
+        const openView = el("button", {
+          type: "button",
+          class: "icon-button",
+          title: "Open as a camera view (solvable)",
+          text: "→",
+        });
+        openView.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          openView.disabled = true;
+          hint.textContent = `opening ${s.name} as a view…`;
+          try {
+            await store.openGtView(s.name);
+            hint.textContent = `opened ${s.name} — see the Views tab`;
+          } catch (error) {
+            hint.textContent = error.message;
+          } finally {
+            openView.disabled = false;
+          }
+        });
         li.append(
           el("div", { class: "gt-row-main" }, [
             el("span", { class: "gt-name", text: s.name }),
@@ -153,7 +174,7 @@ export function setupGtPanel(store, root) {
                 (inBounds(s) ? '<span class="on-map">on map</span>' : ""),
             }),
           ]),
-          focus,
+          el("div", { class: "gt-row-actions" }, [focus, openView]),
         );
         li.addEventListener("click", () => store.selectGtSample(s.name));
         return li;

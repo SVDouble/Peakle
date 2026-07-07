@@ -106,6 +106,12 @@ class View(BaseModel):
     contour: SkylineContour
     render_arrays: RenderArrays
     solves: dict[str, Solve] = {}
+    # A view can carry a reference photograph and a known/prior pose — that is what makes it
+    # "ground truth". A placed synthetic camera has neither (source "placed"); a view materialized
+    # from a GT sample carries the photo (reference_photo) and the corpus name (gt_name).
+    source: str = "placed"
+    gt_name: str | None = None
+    reference_photo: Any = None  # PIL.Image for GT-derived views, else None
 
 
 class Scene:
@@ -248,17 +254,31 @@ class Scene:
         if truth is None:
             msg = f"view {view_id!r} has no placement to edit"
             raise ValueError(msg)
-        rebuilt = self._build_view(
+        eye = current.eye_height_m if eye_height_m is None else eye_height_m
+        e_m = truth.position.east_m if east_m is None else east_m
+        n_m = truth.position.north_m if north_m is None else north_m
+        up_m = self.terrain.elevation_at(e_m, n_m) + eye
+        extrinsics = CameraExtrinsics(
+            position=LocalPoint(east_m=e_m, north_m=n_m, up_m=up_m),
+            yaw_deg=truth.yaw_deg if yaw_deg is None else yaw_deg,
+            pitch_deg=truth.pitch_deg if pitch_deg is None else pitch_deg,
+            roll_deg=0.0,
+        )
+        # Rebuild with the VIEW's own intrinsics/source/photo (a GT view keeps its sample intrinsics
+        # and photograph when its pose is edited); the contour is re-detected from the new render
+        # for placed views, but a GT view keeps its photo-derived observed contour.
+        rebuilt = self._construct_view(
             view_id,
             label if label is not None else current.label,
-            truth.position.east_m if east_m is None else east_m,
-            truth.position.north_m if north_m is None else north_m,
-            truth.yaw_deg if yaw_deg is None else yaw_deg,
-            truth.pitch_deg if pitch_deg is None else pitch_deg,
-            current.eye_height_m if eye_height_m is None else eye_height_m,
+            current.intrinsics,
+            extrinsics,
+            eye,
+            contour=current.contour if current.source == "gt" else None,
+            source=current.source,
+            gt_name=current.gt_name,
+            reference_photo=current.reference_photo,
         )
-        pose_unchanged = rebuilt.true_extrinsics == truth
-        if pose_unchanged:
+        if rebuilt.true_extrinsics == truth:
             rebuilt = rebuilt.model_copy(update={"solves": current.solves, "prior": current.prior})
         self.views[view_id] = rebuilt
         return rebuilt
@@ -289,6 +309,9 @@ class Scene:
             truth=view.true_extrinsics,
             seed=seed,
             use_position_prior=use_position_prior,
+            # a GT-derived view is a GeoPose3K crop (truly cylindrical, rows ∝ tan el); a placed
+            # synthetic camera is a pinhole render
+            projection="cyltan" if view.source == "gt" else "pinhole",
         )
         solve = Solve(
             id=f"solve-{self._solve_counter:02d}",
@@ -300,6 +323,47 @@ class Scene:
         )
         view.solves[solve.id] = solve
         return solve
+
+    def add_gt_view(
+        self,
+        name: str,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        contour: SkylineContour,
+        reference_photo: Any,
+        label: str | None = None,
+    ) -> View:
+        """Materialize a GT sample as a scene View at its refined pose (call AFTER focus_geo).
+
+        The view carries the photograph (``reference_photo``) and the observed skyline extracted
+        from it (``contour``); its ``true_extrinsics`` is the refined dataset pose in the now-local
+        frame, with the sample's own ``intrinsics``. From here it is an ordinary View — it lists,
+        POVs, adjusts and SOLVES like any placed camera, which is the whole point.
+        """
+
+        self._view_counter += 1
+        view_id = f"view-{self._view_counter:02d}"
+        eye_height_m = extrinsics.position.up_m - self.terrain.elevation_at(
+            extrinsics.position.east_m, extrinsics.position.north_m
+        )
+        # A GT view's position is KNOWN (the sample's GPS + refinement) — so its prior is exact, not
+        # noisy: the horizon solver recovers orientation AT the prior position, and a GPS-noise
+        # offset there flips the recovered yaw.
+        prior = PosePrior(
+            position=extrinsics.position,
+            yaw_deg=extrinsics.yaw_deg,
+            pitch_deg=extrinsics.pitch_deg,
+            horizontal_sigma_m=1.0,
+            vertical_sigma_m=1.0,
+            yaw_sigma_deg=1.0,
+            pitch_sigma_deg=1.0,
+        )
+        view = self._construct_view(
+            view_id, label or name, intrinsics, extrinsics, eye_height_m,
+            contour=contour, source="gt", gt_name=name, reference_photo=reference_photo, prior=prior,
+        )
+        self.views[view_id] = view
+        return view
 
     def _build_view(
         self,
@@ -318,18 +382,39 @@ class Scene:
             pitch_deg=pitch_deg,
             roll_deg=0.0,
         )
-        render = self.renderer.render(self.terrain, self.intrinsics, extrinsics)
-        contour = self.detector.detect(render)
-        prior = self._view_prior(view_id, extrinsics)
+        return self._construct_view(view_id, label, self.intrinsics, extrinsics, eye_height_m)
+
+    def _construct_view(
+        self,
+        view_id: str,
+        label: str,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        eye_height_m: float,
+        *,
+        contour: SkylineContour | None = None,
+        source: str = "placed",
+        gt_name: str | None = None,
+        reference_photo: Any = None,
+        prior: PosePrior | None = None,
+    ) -> View:
+        """Render the DEM at ``extrinsics`` and assemble a View (contour detected if not given)."""
+
+        render = self.renderer.render(self.terrain, intrinsics, extrinsics)
+        if prior is None:
+            prior = self._view_prior(view_id, extrinsics)
         return View(
             id=view_id,
             label=label,
-            intrinsics=self.intrinsics,
+            intrinsics=intrinsics,
             true_extrinsics=extrinsics,
             eye_height_m=eye_height_m,
             prior=prior,
-            contour=contour,
+            contour=contour if contour is not None else self.detector.detect(render),
             render_arrays=render,
+            source=source,
+            gt_name=gt_name,
+            reference_photo=reference_photo,
         )
 
     def _detect_peaks(self, terrain: TerrainMap) -> list[Peak]:

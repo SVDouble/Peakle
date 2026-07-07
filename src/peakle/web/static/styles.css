@@ -1069,3 +1069,9 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   height: 100%;
   object-fit: fill;
 }
+
+.gt-row-actions {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}

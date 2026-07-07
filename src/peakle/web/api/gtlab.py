@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import threading
 from functools import lru_cache
 from pathlib import Path
@@ -27,14 +28,20 @@ from typing import Any
 
 import numpy as np
 from anyio import to_thread
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from PIL import Image
 
+from peakle.domain.camera import CameraExtrinsics
+from peakle.domain.contours import ImagePoint, SkylineContour
+from peakle.domain.coordinates import LocalPoint
 from peakle.localize.copdem import load_cop_around
+from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, read_pfm
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image, dem_skyline, quality_tier, shift_align
 from peakle.localize.photo_support import edge_mask, support_report
 from peakle.localize.typed_outlines import extract_typed_outlines
+from peakle.scene.state import build_intrinsics
+from peakle.web.payloads import view_payload
 
 router = APIRouter(tags=["gtlab"])
 
@@ -119,6 +126,48 @@ def _latlon(name: str) -> tuple[float, float]:
         return s.lat, s.lon
     except Exception:
         return float("nan"), float("nan")
+
+
+def _open_gt_view(scene, name: str):
+    """Materialize a GT sample into the scene as a View: focus the map on it, build the sample's
+    intrinsics + refined pose (local) + photo-extracted observed skyline, and add the view.
+
+    Runs in a worker thread (focus loads terrain; extraction may touch the GPU)."""
+
+    rec = _index().get(name)
+    if rec is None:
+        raise HTTPException(404, f"unknown sample {name}")
+    s = load_sample(DATA / name)
+    w, h, fov = rec["width"], rec["height"], rec["fov_deg"]
+    photo = Image.open(s.photo_path).convert("RGB").resize((w, h), Image.Resampling.BILINEAR)
+
+    # observed skyline extracted from the photograph (so the materialized view is solvable)
+    rgb = np.asarray(photo, np.uint8)
+    cands = [c for c in extract_candidates(rgb).values() if c.coverage >= 0.25]
+    rows = max(cands, key=lambda c: c.coverage).rows if cands else np.full(w, np.nan)
+    points = [ImagePoint(x_px=float(c), y_px=float(rows[c])) for c in range(w) if np.isfinite(rows[c])]
+    contour = SkylineContour(image_width_px=w, image_height_px=h, points=points, source="photo")
+
+    intrinsics = build_intrinsics(w, h, fov)
+    pitch_deg = math.degrees(math.atan((rec.get("dv_px") or 0.0) / (w / math.radians(fov))))  # cyltan dv -> pitch
+    extrinsics = CameraExtrinsics(
+        position=LocalPoint(east_m=rec["de_m"], north_m=rec["dn_m"], up_m=rec["cam_z_m"]),
+        yaw_deg=rec["yaw_deg"],
+        pitch_deg=pitch_deg,
+        roll_deg=0.0,
+    )
+    scene.focus_geo(s.lat, s.lon)  # GPS -> local origin; de/dn are the refinement offset
+    return scene.add_gt_view(name, intrinsics, extrinsics, contour, photo)
+
+
+@router.post("/gt/samples/{name}/open-view")
+async def open_gt_view(name: str, request: Request) -> dict[str, Any]:
+    """Open a GT sample as a scene View (photo + refined pose), returning it. Recenters the map."""
+
+    scene = request.app.state.scene
+    async with request.app.state.scene_lock:
+        view = await to_thread.run_sync(_open_gt_view, scene, name)
+    return view_payload(view)
 
 
 def _mask_png(mask: np.ndarray, color: tuple[int, int, int], w: int, h: int) -> bytes:

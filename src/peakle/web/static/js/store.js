@@ -221,6 +221,24 @@ class Store {
     this.emit("gt");
   }
 
+  // Materialize a GT sample as a scene View: it recenters the map (server-side), so refresh the
+  // scene state and then select the new view — from here it is an ordinary View (POV, adjust, solve).
+  async openGtView(name) {
+    const view = await api.openGtView(name);
+    [this.scene, this.terrain, this.peaks, this.views] = await Promise.all([
+      api.getScene(),
+      api.getTerrain(),
+      api.getPeaks(),
+      api.listViews(),
+    ]);
+    this.selectedGtName = null;
+    this.solveCache.clear();
+    this.emit("scene");
+    this.emit("gt");
+    this.selectView(view.id);
+    return view;
+  }
+
   setDisplay(changes) {
     this.display = { ...this.display, ...changes };
     this.emit("display");

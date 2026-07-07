@@ -89,5 +89,17 @@ async def get_view_image(view_id: str, request: Request) -> Response:
     return Response(content=buffer.getvalue(), media_type="image/png")
 
 
+@router.get("/views/{view_id}/photo")
+async def get_view_photo(view_id: str, request: Request) -> Response:
+    """Returns a GT-derived view's reference photograph as JPEG (404 for a synthetic view)."""
+
+    view = _require_view(_scene(request), view_id)
+    if view.reference_photo is None:
+        raise HTTPException(status_code=404, detail=f"view {view_id!r} has no reference photo")
+    buffer = io.BytesIO()
+    view.reference_photo.convert("RGB").save(buffer, format="JPEG", quality=88)
+    return Response(content=buffer.getvalue(), media_type="image/jpeg")
+
+
 def _apply_patch(scene: Scene, view_id: str, body: ViewPatchRequest) -> View:
     return scene.update_view(view_id, **body.model_dump(exclude_unset=True))

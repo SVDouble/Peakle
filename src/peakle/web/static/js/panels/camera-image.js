@@ -225,7 +225,11 @@ export function setupCameraPanel(store, root) {
     setBox(box, fit);
     overlay.setAttribute("viewBox", `0 0 ${fit.width} ${fit.height}`);
 
-    const desiredSrc = `${api.viewImageUrl(view.id)}?p=${encodeURIComponent(poseNonce(view))}`;
+    // A GT-derived view shows its PHOTOGRAPH as the base image (with the observed/predicted
+    // skyline SVG on top); a synthetic view shows its DEM render.
+    const desiredSrc = view.photo_url
+      ? view.photo_url
+      : `${api.viewImageUrl(view.id)}?p=${encodeURIComponent(poseNonce(view))}`;
     if (image.dataset.src !== desiredSrc) {
       image.dataset.src = desiredSrc;
       image.src = desiredSrc;
