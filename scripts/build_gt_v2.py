@@ -91,10 +91,7 @@ def build_one(name: str) -> RefinedGT:
             both = np.isfinite(cand.rows) & np.isfinite(obs)
             if both.sum() > 0.3 * w:
                 pfm_offset = float(np.median(np.abs((cand.rows - obs)[both])))
-            if (
-                pfm_offset is not None and pfm_offset > 10.0
-                and cand.coverage >= 0.8 and sup >= 0.6
-            ):
+            if pfm_offset is not None and pfm_offset > 10.0 and cand.coverage >= 0.8 and sup >= 0.6:
                 obs = np.where(np.isfinite(cand.rows), cand.rows, np.nan)
                 obs_source = "photo"
 
@@ -126,7 +123,12 @@ def build_one(name: str) -> RefinedGT:
     extra = []
     if obs_source == "pfm" and pfm_offset is not None and pfm_offset > 15.0:
         extra.append(f"pfm registration off {pfm_offset:.0f}px and photo skyline untrusted")
-    quality, reasons = quality_tier(fit["cons"], fit["ccons"], fit["dyaw"], extra)
+    # GT-vs-photo check (user-requested): does the observed skyline actually lie on the photo's
+    # own edges?  Feeds the photo-targeting confirmation gate in quality_tier.
+    sky_support = family_support(rows_to_mask(obs, h), edges) if edges is not None else None
+    quality, reasons = quality_tier(
+        fit["cons"], fit["ccons"], fit["dyaw"], extra, obs_source=obs_source, sky_support=sky_support
+    )
 
     rec = RefinedGT(
         name=name,
@@ -146,6 +148,7 @@ def build_one(name: str) -> RefinedGT:
         fov_deg=s.fov_deg,
         obs_source=obs_source,
         obs_support=obs_support,
+        sky_support=(round(sky_support, 3) if sky_support is not None else None),
         pfm_offset_px=(round(pfm_offset, 1) if pfm_offset is not None else None),
         pfm_cons_px=round(float(pfm_cons), 2),
         quality=quality,
@@ -186,8 +189,11 @@ def main() -> None:
                 if (d / "cyl/photo_crop.jpg").exists() and (d / "cyl/distance_crop.pfm").exists():
                     names.append(d.name)
     elif args.all:
-        names = [d.name for d in sorted(DATA.iterdir())
-                 if (d / "cyl/photo_crop.jpg").exists() and (d / "cyl/distance_crop.pfm").exists()]
+        names = [
+            d.name
+            for d in sorted(DATA.iterdir())
+            if (d / "cyl/photo_crop.jpg").exists() and (d / "cyl/distance_crop.pfm").exists()
+        ]
     else:
         raise SystemExit("pass --manifest, --samples, --manual or --all")
     names = names[: args.max_n]
@@ -202,14 +208,14 @@ def main() -> None:
             rec = build_one(name)
             done += 1
             print(
-                f"[{i+1}/{len(names)}] {name}: {rec.quality} sky={rec.sky_cons_px} "
-                f"ct={rec.contour_cons_px} dyaw={rec.dyaw_deg:+.1f} ({time.time()-t0:.0f}s)",
+                f"[{i + 1}/{len(names)}] {name}: {rec.quality} sky={rec.sky_cons_px} "
+                f"ct={rec.contour_cons_px} dyaw={rec.dyaw_deg:+.1f} ({time.time() - t0:.0f}s)",
                 flush=True,
             )
         except Exception as exc:
             failed += 1
             traceback.print_exc()
-            print(f"[{i+1}/{len(names)}] {name}: FAILED {exc}", flush=True)
+            print(f"[{i + 1}/{len(names)}] {name}: FAILED {exc}", flush=True)
 
     index = []
     for j in sorted(OUT.glob("*.json")):

@@ -30,7 +30,7 @@ from peakle.localize.raycast import _elevation_angle_grid, horizon_elevation
 from peakle.localize.solve import _best_shift_chamfer
 
 PITCH_LIM_DEG = 50.0
-CONTOUR_JUMP = 0.30          # |Δ log distance| that counts as an occlusion boundary
+CONTOUR_JUMP = 0.30  # |Δ log distance| that counts as an occlusion boundary
 CONTOUR_CAP_PX = 40.0
 
 # quality gates — initial values derived from the bench-60 distribution (skyline cons median 5px,
@@ -38,6 +38,13 @@ CONTOUR_CAP_PX = 40.0
 GATE_SKY_PX = 15.0
 GATE_CONTOUR_PX = 25.0
 GATE_DYAW_DEG = 3.0
+# Photo-targeted samples bypass the pfm render, so the detected photo skyline is the SOLE fit
+# target — a strong foreground edge (tree canopy, roofline) can pass as the skyline and pull the
+# pose off while the skyline chamfer still looks fine.  They must be independently confirmed: the
+# observed skyline must lie on real photo edges, AND the internal contours must agree (a tighter
+# bar than the pfm-targeted GATE_CONTOUR_PX, since contours are the ONLY cross-check available).
+GATE_PHOTO_SUPPORT = 0.5
+GATE_PHOTO_CONTOUR_PX = 18.0
 
 
 @dataclass
@@ -45,25 +52,26 @@ class RefinedGT:
     name: str
     manual: bool
     # refined pose (label + correction)
-    yaw_deg: float               # refined yaw = label + dyaw
+    yaw_deg: float  # refined yaw = label + dyaw
     dyaw_deg: float
     de_m: float
     dn_m: float
     cam_z_m: float
-    dv_px: float                 # vertical crop offset at the standard width
+    dv_px: float  # vertical crop offset at the standard width
     tilt_deg: float
     # agreement of the reconstruction with the dataset's own lines
     sky_cons_px: float
     contour_cons_px: float | None
-    gt_contour_density: float    # fraction of terrain columns that carry an internal GT contour
+    gt_contour_density: float  # fraction of terrain columns that carry an internal GT contour
     width: int
     height: int
     fov_deg: float
-    obs_source: str = "pfm"            # what the pose polish fitted: "photo" (detected skyline,
-                                       # preferred — the pfm has registration outliers) or "pfm"
-    obs_support: float | None = None   # DexiNed edge support of the chosen observation curve
+    obs_source: str = "pfm"  # what the pose polish fitted: "photo" (detected skyline,
+    # preferred — the pfm has registration outliers) or "pfm"
+    obs_support: float | None = None  # DexiNed edge support of the chosen observation curve
+    sky_support: float | None = None  # fraction of the OBSERVED skyline lying on photo edges (GT-vs-photo)
     pfm_offset_px: float | None = None  # median |pfm skyline - detected skyline| (registration health)
-    pfm_cons_px: float | None = None   # reconstruction vs the pfm render (two-terrain-model metric)
+    pfm_cons_px: float | None = None  # reconstruction vs the pfm render (two-terrain-model metric)
     quality: str = field(default="CLEAN")
     reasons: list[str] = field(default_factory=list)
 
@@ -83,7 +91,7 @@ def rows_from_el(el: np.ndarray, w: int, h: int, fov_deg: float) -> np.ndarray:
 
 
 def dem_skyline(terrain, cam_z, az_deg, w, h, fov_deg, de=0.0, dn=0.0, patch=None) -> np.ndarray:
-    step = 10.0 if patch is not None else 25.0   # the fine patch deserves a finer ray march
+    step = 10.0 if patch is not None else 25.0  # the fine patch deserves a finer ray march
     el = horizon_elevation(terrain, np.radians(az_deg), cam_z, step=step, cam_e=de, cam_n=dn, patch=patch)
     return rows_from_el(el, w, h, fov_deg)
 
@@ -113,7 +121,9 @@ def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, t
 
     az_s = az_deg[::sub]
     step = 10.0 if patch is not None else 25.0
-    el, ds = _elevation_angle_grid(terrain, np.radians(az_s), cam_z, step=step, d_max=None, cam_e=de, cam_n=dn, patch=patch)
+    el, ds = _elevation_angle_grid(
+        terrain, np.radians(az_s), cam_z, step=step, d_max=None, cam_e=de, cam_n=dn, patch=patch
+    )
     cummax = np.maximum.accumulate(el, axis=1)
     f = w / math.radians(fov_deg)
     rows_s = np.arange(0, h, sub)
@@ -142,7 +152,18 @@ def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, t
 
 
 def dem_contour_mask(
-    terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, tilt_deg=0.0, sub=2, jump=CONTOUR_JUMP,
+    terrain,
+    cam_z,
+    az_deg,
+    w,
+    h,
+    fov_deg,
+    dv,
+    de=0.0,
+    dn=0.0,
+    tilt_deg=0.0,
+    sub=2,
+    jump=CONTOUR_JUMP,
     gap_eps_rad=0.0035,
 ) -> np.ndarray:
     """DEM occlusion boundaries in crop coordinates at the given (drawn) alignment.
@@ -169,7 +190,7 @@ def dem_contour_mask(
         if i_lo < 0 or i_hi - i_lo < 3:
             continue
         ray_el = min(el_pix_all[r, c], el_pix_all[r + 1, c])
-        if np.min(el[c, i_lo + 1 : i_hi]) < ray_el - gap_eps_rad:   # true gap behind the near crest
+        if np.min(el[c, i_lo + 1 : i_hi]) < ray_el - gap_eps_rad:  # true gap behind the near crest
             edge[r, c] = edge[r + 1, c] = True
     # horizontal candidates (vertical silhouettes): same gap test across neighbouring columns
     cand_h = np.abs(np.diff(logd, axis=1)) > jump
@@ -312,16 +333,34 @@ def refine_pose(terrain, cam_z, obs, w, h, fov_deg, yaw_label, gt_dt=None):
 
     z = max(cam_z, terrain.elevation_at(de, dn) + 2.0)
     return {
-        "cons": float(cons), "ccons": (float(ccons) if ccons is not None else None),
-        "dyaw": float(dyaw), "de": float(de), "dn": float(dn), "dv": float(dv),
-        "tilt": float(tilt), "cam_z": float(z), "rows": rows,
+        "cons": float(cons),
+        "ccons": (float(ccons) if ccons is not None else None),
+        "dyaw": float(dyaw),
+        "de": float(de),
+        "dn": float(dn),
+        "dv": float(dv),
+        "tilt": float(tilt),
+        "cam_z": float(z),
+        "rows": rows,
     }
 
 
 def quality_tier(
-    sky_cons: float, contour_cons: float | None, dyaw: float, extra_reasons: list[str] | None = None
+    sky_cons: float,
+    contour_cons: float | None,
+    dyaw: float,
+    extra_reasons: list[str] | None = None,
+    *,
+    obs_source: str | None = None,
+    sky_support: float | None = None,
 ) -> tuple[str, list[str]]:
-    """CLEAN samples may score solvers/extractors; everything else is quarantined with reasons."""
+    """CLEAN samples may score solvers/extractors; everything else is quarantined with reasons.
+
+    ``obs_source``/``sky_support`` add the photo-targeting confirmation gate: a sample whose pose
+    was fit to the detected photo skyline (not the pfm) is CLEAN only if that skyline lies on real
+    photo edges and its internal contours agree — otherwise the "skyline" may be a foreground edge
+    (tree canopy, roofline) that fits the horizon but places the terrain wrongly.
+    """
 
     reasons = list(extra_reasons or [])
     if sky_cons > GATE_SKY_PX:
@@ -330,4 +369,10 @@ def quality_tier(
         reasons.append(f"contour agreement {contour_cons:.0f}px > {GATE_CONTOUR_PX:.0f}")
     if abs(dyaw) > GATE_DYAW_DEG:
         reasons.append(f"label yaw off by {dyaw:+.1f}° > ±{GATE_DYAW_DEG:.0f}")
+    if obs_source == "photo":
+        if sky_support is not None and sky_support < GATE_PHOTO_SUPPORT:
+            reasons.append(f"photo skyline barely on image edges (support {sky_support:.2f} < {GATE_PHOTO_SUPPORT})")
+        if contour_cons is None or contour_cons > GATE_PHOTO_CONTOUR_PX:
+            detail = "no internal contours" if contour_cons is None else f"{contour_cons:.0f}px > {GATE_PHOTO_CONTOUR_PX:.0f}"
+            reasons.append(f"photo-targeted pose unconfirmed by contours ({detail})")
     return ("CLEAN" if not reasons else "SUSPECT"), reasons

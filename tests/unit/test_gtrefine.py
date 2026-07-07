@@ -21,6 +21,7 @@ from peakle.localize.gtrefine import (
     dem_contour_mask,
     dem_skyline,
     gt_contour_mask,
+    quality_tier,
     refine_pose,
     rows_from_el,
 )
@@ -64,9 +65,9 @@ class SlopeTerrain:
 
 
 def test_gt_contour_mask_finds_the_jump_not_the_sky():
-    depth = np.full((100, 80), np.nan)         # sky
-    depth[60:, :] = 500.0                       # near slab
-    depth[40:60, :] = 5000.0                    # far slab behind it
+    depth = np.full((100, 80), np.nan)  # sky
+    depth[60:, :] = 500.0  # near slab
+    depth[40:60, :] = 5000.0  # far slab behind it
     mask = gt_contour_mask(depth, 80, 100)
     rows = np.nonzero(mask.any(axis=1))[0]
     assert len(rows) > 0
@@ -76,7 +77,7 @@ def test_gt_contour_mask_finds_the_jump_not_the_sky():
 
 
 def test_dem_contours_present_between_ridges_absent_on_smooth_slope():
-    az = crop_az_deg(W, FOV, 0.0)               # looking north
+    az = crop_az_deg(W, FOV, 0.0)  # looking north
     two = TwoRidgeTerrain()
     mask2 = dem_contour_mask(two, 50.0, az, W, H, FOV, dv=0.0)
     slope = SlopeTerrain()
@@ -116,14 +117,15 @@ def test_refine_pose_roundtrip_recovers_injected_label_error():
     # skyline-only fitting is DEGENERATE here (a 3°-wrong pose fits at 0.5 px — measured), so the
     # production path always supplies the GT internal contours; they arbitrate between the
     # skyline-equivalent pose candidates.  Build them exactly as GT depth would provide them:
-    gt_mask = dem_contour_mask(TwoRidgeTerrain() if False else terrain, cam_z, az_true, W, H, FOV,
-                               dv=-40.0, de=true_de, dn=true_dn)
+    gt_mask = dem_contour_mask(
+        TwoRidgeTerrain() if False else terrain, cam_z, az_true, W, H, FOV, dv=-40.0, de=true_de, dn=true_dn
+    )
     assert gt_mask.sum() > 100, "test terrain must have internal contours for the production path"
     gt_dt = distance_transform_edt(~gt_mask)
 
     # label is wrong by +2 deg yaw and (0,0) position; the polish must find the truth
     fit = refine_pose(terrain, cam_z, obs, W, H, FOV, yaw_label=true_yaw + 2.0, gt_dt=gt_dt)
-    assert abs((fit["dyaw"] + 2.0)) <= 0.75, fit["dyaw"]          # recovered dyaw ≈ -2.0
+    assert abs((fit["dyaw"] + 2.0)) <= 0.75, fit["dyaw"]  # recovered dyaw ≈ -2.0
     # position is identifiable only to ~50 m on this terrain (measured: a 50 m-off position
     # scores the same contour chamfer as the truth) — the tolerance reflects that floor
     assert abs(fit["de"] - true_de) <= 60.0 and abs(fit["dn"] - true_dn) <= 60.0, (fit["de"], fit["dn"])
@@ -137,9 +139,9 @@ def test_contour_chamfer_scores_alignment():
     a[50, 10:90] = True
     dt = distance_transform_edt(~a)
     aligned = np.zeros_like(a)
-    aligned[52, 10:90] = True                   # 2px off
+    aligned[52, 10:90] = True  # 2px off
     shifted = np.zeros_like(a)
-    shifted[80, 10:90] = True                   # 30px off
+    shifted[80, 10:90] = True  # 30px off
     assert contour_chamfer(aligned, dt) <= 3.0
     assert contour_chamfer(shifted, dt) >= 25.0
 
@@ -167,3 +169,18 @@ def test_dem_depth_image_has_no_ray_march_terraces():
     depth, *_ = dem_depth_image(slope, 60.0, az, W, H, FOV, dv=0.0, sub=2)
     t = extract_typed_outlines(depth, min_px=12)
     assert t.crease.sum() < 30, t.counts()
+
+
+def test_quality_tier_photo_targeting_requires_confirmation():
+    # a well-confirmed sample is CLEAN regardless of targeting
+    q, _ = quality_tier(6.0, 8.0, 1.0, obs_source="photo", sky_support=0.95)
+    assert q == "CLEAN"
+    # photo-targeted with poor contour agreement (a foreground edge masquerading as the skyline)
+    q, reasons = quality_tier(10.0, 25.0, 1.5, obs_source="photo", sky_support=0.94)
+    assert q == "SUSPECT" and any("unconfirmed by contours" in r for r in reasons)
+    # photo-targeted skyline that doesn't lie on photo edges at all
+    q, reasons = quality_tier(6.0, 8.0, 1.0, obs_source="photo", sky_support=0.2)
+    assert q == "SUSPECT" and any("image edges" in r for r in reasons)
+    # the SAME weak-contour numbers on a pfm-targeted sample stay CLEAN (pfm is its cross-check)
+    q, _ = quality_tier(10.0, 20.0, 1.5, obs_source="pfm", sky_support=None)
+    assert q == "CLEAN"
