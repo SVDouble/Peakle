@@ -36,9 +36,7 @@ from peakle.localize.gtrefine import (
     refine_pose,
 )
 
-BASE = Path(__file__).resolve().parents[1]
-DATA = BASE / "local/data/geopose"
-TILES = BASE / "local/data/copernicus"
+from peakle.localize.paths import BASE, COP_TILES_DIR as TILES, GEOPOSE_DIR as DATA
 TILE_W = 640
 GREEN, CYAN, ORANGE = (0, 230, 90), (0, 200, 255), (255, 150, 30)
 
@@ -125,8 +123,11 @@ def main() -> None:
             print("tile failed", r["name"], e)
             r["_panno"] = {"cons": float("nan"), "dE": 0, "dN": 0, "dyaw": 0.0, "tilt": 0.0}
         p = r["_panno"]
-        print(f"[{i+1}/{len(rows)}] {r['name']} cons={p['cons']} contours={p.get('ccons')} dyaw={p['dyaw']:+.1f} dE={p['dE']:+.0f} dN={p['dN']:+.0f} tilt={p['tilt']:+.1f}", flush=True)
-    rows.sort(key=lambda r: (r["_panno"]["cons"] if np.isfinite(r["_panno"]["cons"]) else 99))
+        print(
+            f"[{i + 1}/{len(rows)}] {r['name']} cons={p['cons']} contours={p.get('ccons')} dyaw={p['dyaw']:+.1f} dE={p['dE']:+.0f} dN={p['dN']:+.0f} tilt={p['tilt']:+.1f}",
+            flush=True,
+        )
+    rows.sort(key=lambda r: r["_panno"]["cons"] if np.isfinite(r["_panno"]["cons"]) else 99)
 
     cards = []
     for r in rows:
@@ -146,10 +147,10 @@ def main() -> None:
             shift += f" · contours {pan['ccons']:.0f}px"
         cards.append(
             f'<figure class="{cls}"><img src="{uri}" alt="{r["name"]}" loading="lazy">'
-            f'<figcaption><span class="mono">{r["name"].replace("_01024","")}</span>'
+            f'<figcaption><span class="mono">{r["name"].replace("_01024", "")}</span>'
             f'<span class="chip {"m" if r["manual"] else "a"}">{"MANUAL" if r["manual"] else "AUTO"}</span>'
             f'<b class="c-{cls}">{cons:.0f}px</b><span class="sub">{shift}</span>'
-            + (f'<span class="chip bad-chip">label Δyaw&gt;3°</span>' if label_sus else "")
+            + ('<span class="chip bad-chip">label Δyaw&gt;3°</span>' if label_sus else "")
             + f'<span class="sub">oracle err {o.get("yaw_err", float("nan")):+.1f}°</span>'
             f"</figcaption></figure>"
         )
@@ -199,7 +200,7 @@ Generated {datetime.now():%Y-%m-%d %H:%M} from <span class="mono">{Path(args.res
 </div>
 </main>"""
     (out / "panno.html").write_text(html)
-    print(f"-> {out}/panno.html ({(out / 'panno.html').stat().st_size/1e6:.1f} MB)")
+    print(f"-> {out}/panno.html ({(out / 'panno.html').stat().st_size / 1e6:.1f} MB)")
 
 
 if __name__ == "__main__":

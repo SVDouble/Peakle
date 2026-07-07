@@ -24,7 +24,6 @@ import math
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt
 
 from peakle.localize.raycast import _elevation_angle_grid, horizon_elevation
 from peakle.localize.solve import _best_shift_chamfer

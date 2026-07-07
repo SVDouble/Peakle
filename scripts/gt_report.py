@@ -30,10 +30,7 @@ from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, oracle_skyline, read_pfm
 from peakle.localize.solve import HorizonProfile, curve_chamfer, solve_orientation
 
-BASE = Path(__file__).resolve().parents[1]
-DATA = BASE / "local/data/geopose"
-TILES = BASE / "local/data/copernicus"
-MAX_W = 1152
+from peakle.localize.paths import BASE, COP_TILES_DIR as TILES, GEOPOSE_DIR as DATA, STD_WIDTH as MAX_W
 
 # validated reference palette (dataviz skill) — light surface
 INK, SEC, MUT = "#0b0b0b", "#52514e", "#898781"
@@ -80,8 +77,13 @@ def corpus_stats(out: Path) -> dict:
     man = [s for s in samples if s.manual]
 
     fig, ax = plt.subplots(figsize=(6.4, 5.2))
-    for sel, color, label in [(man, BLUE, f"MANUAL ({len(man)})"), ([s for s in samples if not s.manual], AQUA, f"AUTO ({len(samples)-len(man)})")]:
-        ax.scatter([s.lon for s in sel], [s.lat for s in sel], s=14, c=color, alpha=0.75, label=label, edgecolors="none")
+    for sel, color, label in [
+        (man, BLUE, f"MANUAL ({len(man)})"),
+        ([s for s in samples if not s.manual], AQUA, f"AUTO ({len(samples) - len(man)})"),
+    ]:
+        ax.scatter(
+            [s.lon for s in sel], [s.lat for s in sel], s=14, c=color, alpha=0.75, label=label, edgecolors="none"
+        )
     ax.set_xlabel("longitude (deg E)")
     ax.set_ylabel("latitude (deg N)")
     ax.set_title("Viewpoint positions — all downloaded samples")
@@ -124,8 +126,24 @@ def bench_charts(rows: list[dict], out: Path) -> dict:
 
     fig, ax = plt.subplots(figsize=(7.4, 3.0))
     rng = np.random.default_rng(0)
-    ax.scatter(ok_ch, 1 + rng.uniform(-0.16, 0.16, len(ok_ch)), s=26, c=GOOD, alpha=0.8, edgecolors="none", label=f"correct ({len(ok_ch)})")
-    ax.scatter(bad_ch, 0 + rng.uniform(-0.16, 0.16, len(bad_ch)), s=30, c=CRIT, alpha=0.8, marker="x", label=f"wrong ({len(bad_ch)})")
+    ax.scatter(
+        ok_ch,
+        1 + rng.uniform(-0.16, 0.16, len(ok_ch)),
+        s=26,
+        c=GOOD,
+        alpha=0.8,
+        edgecolors="none",
+        label=f"correct ({len(ok_ch)})",
+    )
+    ax.scatter(
+        bad_ch,
+        0 + rng.uniform(-0.16, 0.16, len(bad_ch)),
+        s=30,
+        c=CRIT,
+        alpha=0.8,
+        marker="x",
+        label=f"wrong ({len(bad_ch)})",
+    )
     ax.set_yticks([0, 1], ["wrong\n(|yaw err| > 5°)", "correct"])
     ax.set_xlabel("final chamfer residual (px)")
     ax.set_title("The residual cannot judge correctness — the ranges overlap")
@@ -151,7 +169,9 @@ def bench_charts(rows: list[dict], out: Path) -> dict:
 
     # per-feature AUC (from calibrate_verdict logic, inlined for the figure)
     feats = {"alias_ratio": False, "snr": False, "chamfer_px": True, "well_width_deg": True, "coverage": False}
-    solves = [s for r in rows for s in (r.get("oracle"), r.get("extracted")) if isinstance(s, dict) and "chamfer_px" in s]
+    solves = [
+        s for r in rows for s in (r.get("oracle"), r.get("extracted")) if isinstance(s, dict) and "chamfer_px" in s
+    ]
     aucs = {}
     for k, invert in feats.items():
         g = np.array([s[k] for s in solves if s["correct"] and np.isfinite(s.get(k, np.nan))])
@@ -191,13 +211,24 @@ def build_audit(rows: list[dict], results_path: Path, out: Path) -> list[dict]:
             flags.append(f"camera {-r['alt_above_ground']:.0f}m below DEM ground")
         oy, ey = o.get("yaw_err"), e.get("yaw_err")
         if (
-            isinstance(oy, (int, float)) and isinstance(ey, (int, float)) and np.isfinite(ey)
-            and abs(oy) > 20 and abs(ang(oy - ey)) < 10 and r.get("gt_consistency_px", 0) > 25
+            isinstance(oy, (int, float))
+            and isinstance(ey, (int, float))
+            and np.isfinite(ey)
+            and abs(oy) > 20
+            and abs(ang(oy - ey)) < 10
+            and r.get("gt_consistency_px", 0) > 25
         ):
             flags.append(f"solver consensus at {oy:+.0f}° from GT label")
         if flags:
-            audit.append({"name": r["name"], "manual": r["manual"], "flags": flags,
-                          "gt_consistency": r.get("gt_consistency_px"), "oracle_err": oy})
+            audit.append(
+                {
+                    "name": r["name"],
+                    "manual": r["manual"],
+                    "flags": flags,
+                    "gt_consistency": r.get("gt_consistency_px"),
+                    "oracle_err": oy,
+                }
+            )
     audit.sort(key=lambda a: -(a["gt_consistency"] or 0))
     overlays = results_path.parent / "overlays"
     for a in audit[:8]:
@@ -274,8 +305,11 @@ def example_chamfer(sample, profile, out: Path) -> dict:
             if c < best[0]:
                 best = (c, rows)
         cham, rows = best
-        img = _draw_lines(rgb, [(obs, GOOD, 3), (rows, YELLOW, 3)],
-                          f"DEM @ yaw {yaw:.0f}deg  |  capped symmetric chamfer = {cham:.1f}px")
+        img = _draw_lines(
+            rgb,
+            [(obs, GOOD, 3), (rows, YELLOW, 3)],
+            f"DEM @ yaw {yaw:.0f}deg  |  capped symmetric chamfer = {cham:.1f}px",
+        )
         img.save(out / f"chamfer_{tag}.jpg", quality=86)
         res[tag] = round(float(cham), 1)
     return res
@@ -300,12 +334,18 @@ def example_profile(sample, profile, track_rows, h, tag, out: Path, title: str) 
     ax.axvline(s.yaw_deg, color=VIOLET, linewidth=1.4, linestyle=":")
     ax.set_xlabel("yaw (deg)")
     ax.set_ylabel("chamfer (px)")
-    ax.set_title(f"terrain self-similarity: solved DEM window vs the rest of the horizon (min outside basin = {s.terrain_distinct_px:.0f}px)")
+    ax.set_title(
+        f"terrain self-similarity: solved DEM window vs the rest of the horizon (min outside basin = {s.terrain_distinct_px:.0f}px)"
+    )
     _save(fig, out / f"selfscan_{tag}.png")
     return {
-        "yaw": round(s.yaw_deg, 1), "err": round((s.yaw_deg - sample.yaw_gt_deg + 180) % 360 - 180, 1),
-        "chamfer": round(s.chamfer_px, 1), "well": s.well_width_deg, "alias": round(s.alias_ratio, 2),
-        "snr": round(s.snr, 1), "verdict": s.verdict,
+        "yaw": round(s.yaw_deg, 1),
+        "err": round((s.yaw_deg - sample.yaw_gt_deg + 180) % 360 - 180, 1),
+        "chamfer": round(s.chamfer_px, 1),
+        "well": s.well_width_deg,
+        "alias": round(s.alias_ratio, 2),
+        "snr": round(s.snr, 1),
+        "verdict": s.verdict,
     }
 
 
@@ -321,11 +361,15 @@ def example_multihyp(sample, profile, out: Path) -> dict:
         layers.append((c.rows, color, 3))
         if c.coverage >= 0.25:
             s = solve_orientation(c.rows, h, profile, fov_deg=sample.fov_deg, projection="cyltan")
-            stats[name] = {"coverage": round(c.coverage, 2), "chamfer": round(s.chamfer_px, 1),
-                           "yaw_err": round((s.yaw_deg - sample.yaw_gt_deg + 180) % 360 - 180, 1), "verdict": s.verdict}
-    _draw_lines(rgb, layers, "hypotheses: blue-dominant detector (red) vs bright detector (blue); GT skyline green").save(
-        out / "multihyp.jpg", quality=86
-    )
+            stats[name] = {
+                "coverage": round(c.coverage, 2),
+                "chamfer": round(s.chamfer_px, 1),
+                "yaw_err": round((s.yaw_deg - sample.yaw_gt_deg + 180) % 360 - 180, 1),
+                "verdict": s.verdict,
+            }
+    _draw_lines(
+        rgb, layers, "hypotheses: blue-dominant detector (red) vs bright detector (blue); GT skyline green"
+    ).save(out / "multihyp.jpg", quality=86)
     return stats
 
 
@@ -359,16 +403,28 @@ def main() -> None:
     digest["chamfer_demo"] = example_chamfer(clean, prof_clean, out)
     rgbc = _std_rgb(clean)
     digest["profile_clean"] = example_profile(
-        clean, prof_clean, _oracle_std(clean, rgbc.shape[1], rgbc.shape[0]), rgbc.shape[0], "clean", out,
-        "360° yaw profile — distinctive horizon (oracle skyline)")
+        clean,
+        prof_clean,
+        _oracle_std(clean, rgbc.shape[1], rgbc.shape[0]),
+        rgbc.shape[0],
+        "clean",
+        out,
+        "360° yaw profile — distinctive horizon (oracle skyline)",
+    )
 
     amb = load_sample(DATA / "eth_ch1_24945353_01024")
     prof_amb = load_profile(amb)
     rgba = _std_rgb(amb)
     cand = extract_candidates(rgba)["blue"]
     digest["profile_ambiguous"] = example_profile(
-        amb, prof_amb, cand.rows, rgba.shape[0], "ambiguous", out,
-        "360° yaw profile — self-similar horizon (extracted skyline)")
+        amb,
+        prof_amb,
+        cand.rows,
+        rgba.shape[0],
+        "ambiguous",
+        out,
+        "360° yaw profile — self-similar horizon (extracted skyline)",
+    )
 
     multi = load_sample(DATA / "eth_ch1_60648419_01024")
     digest["multihyp"] = example_multihyp(multi, load_profile(multi), out)

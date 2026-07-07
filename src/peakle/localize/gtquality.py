@@ -22,8 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-BASE = Path(__file__).resolve().parents[3]
-GTV2_DIR = BASE / "local/derived/gt_v2"
+from peakle.localize.paths import GTV2_DIR
 
 # support-gate thresholds (initial; tighten as the corpus grows)
 SKY_SUPPORT_MIN = 0.50

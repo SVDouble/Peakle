@@ -25,13 +25,11 @@ from peakle.localize.copdem import load_cop_around
 from peakle.localize.explanation import arbitrate_by_explanation
 from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, oracle_skyline
+from peakle.localize.paths import COP_TILES_DIR, GEOPOSE_DIR, STD_WIDTH
 from peakle.localize.photo_support import edge_mask
 from peakle.localize.solve import HorizonProfile, OrientationSolve, _best_shift_chamfer, solve_orientation
 
-BASE = Path(__file__).resolve().parents[3]
-GEOPOSE_DIR = BASE / "local/data/geopose"
-COP_TILES_DIR = BASE / "local/data/copernicus"
-MAX_W = 1152  # solve cost scales with width; ~1150 cols keeps yaw resolution well under 0.1 deg
+MAX_W = STD_WIDTH  # solve cost scales with width; ~1150 cols keeps yaw resolution well under 0.1 deg
 PITCH_BOUNDS = (-50.0, 50.0)  # GeoPose3K crop offsets reach ~48 deg (offset ~ 1.2 * Euler b)
 
 _SEGMENTER = None

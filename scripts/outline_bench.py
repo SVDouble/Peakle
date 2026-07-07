@@ -24,9 +24,7 @@ from PIL import Image
 from peakle.localize.extract import extract_candidates
 from peakle.localize.outline_score import rows_to_mask, score_outlines
 
-BASE = Path(__file__).resolve().parents[1]
-DATA = BASE / "local/data/geopose"
-GTV2 = BASE / "local/derived/gt_v2"
+from peakle.localize.paths import BASE, GEOPOSE_DIR as DATA, GTV2_DIR as GTV2
 
 
 def load_rgb(name: str, w: int, h: int) -> np.ndarray:
@@ -104,8 +102,14 @@ def main() -> None:
                 per_variant.setdefault(tag, []).append(s)
         for tag, scores in per_variant.items():
             med = lambda k: float(np.median([getattr(s, k) for s in scores]))
-            results[f"{ex_name} {tag}"] = [med("precision"), med("recall_skyline"), med("recall_internal"), med("f1"), len(scores)]
-        print(f"[{ex_name}] done in {time.time()-t0:.0f}s")
+            results[f"{ex_name} {tag}"] = [
+                med("precision"),
+                med("recall_skyline"),
+                med("recall_internal"),
+                med("f1"),
+                len(scores),
+            ]
+        print(f"[{ex_name}] done in {time.time() - t0:.0f}s")
 
     print(f"\n{'extractor':22} {'P':>6} {'R_sky':>6} {'R_int':>6} {'F1':>6} {'n':>4}   (medians over CLEAN samples)")
     for tag, (p, rs, ri, f1, n) in sorted(results.items(), key=lambda kv: -kv[1][3]):

@@ -17,7 +17,6 @@ import argparse
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt
@@ -27,8 +26,7 @@ from peakle.localize.geopose import load_sample, read_pfm
 from peakle.localize.gtrefine import gt_contour_mask, refine_pose
 from peakle.localize.solve import HorizonProfile, solve_orientation
 
-BASE = Path(__file__).resolve().parents[1]
-GTV2 = BASE / "local/derived/gt_v2"
+from peakle.localize.paths import BASE, GTV2_DIR as GTV2
 
 
 def is_bound_hitter(r: dict) -> bool:
@@ -60,17 +58,30 @@ def main() -> None:
             terrain = load_cop_around(BASE / "local/data/copernicus", s.lat, s.lon, 90000.0, 3000)
             cam_z0 = max(s.elev_m, terrain.elevation_at(0.0, 0.0) + 2.0)
             profile = HorizonProfile(terrain, cam_z0, step=25.0)
-            solve = solve_orientation(obs, h, profile, fov_deg=r["fov_deg"], projection="cyltan",
-                                      pitch_bounds=(-50.0, 50.0))
+            solve = solve_orientation(
+                obs, h, profile, fov_deg=r["fov_deg"], projection="cyltan", pitch_bounds=(-50.0, 50.0)
+            )
             gt_mask = gt_contour_mask(read_pfm(s.depth_path), w, h)
             gt_dt = distance_transform_edt(~gt_mask) if gt_mask.sum() >= 200 else None
             fit = refine_pose(terrain, cam_z0, obs, w, h, r["fov_deg"], solve.yaw_deg, gt_dt)
             total_dyaw = (solve.yaw_deg + fit["dyaw"] - (r["yaw_deg"] - r["dyaw_deg"]) + 180) % 360 - 180
-            print(json.dumps({
-                "name": name, "old_cons": r["sky_cons_px"], "rescued_cons": round(fit["cons"], 1),
-                "label_yaw_error_deg": round(total_dyaw, 1),
-                "solver": {"alias": round(solve.alias_ratio, 2), "snr": round(solve.snr, 1), "verdict": solve.verdict},
-            }) + f"  [{time.time()-t0:.0f}s]", flush=True)
+            print(
+                json.dumps(
+                    {
+                        "name": name,
+                        "old_cons": r["sky_cons_px"],
+                        "rescued_cons": round(fit["cons"], 1),
+                        "label_yaw_error_deg": round(total_dyaw, 1),
+                        "solver": {
+                            "alias": round(solve.alias_ratio, 2),
+                            "snr": round(solve.snr, 1),
+                            "verdict": solve.verdict,
+                        },
+                    }
+                )
+                + f"  [{time.time() - t0:.0f}s]",
+                flush=True,
+            )
         except Exception as exc:
             print(f"{name}: ERROR {exc}", flush=True)
     print(f"-> {outdir}")

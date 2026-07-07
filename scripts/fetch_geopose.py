@@ -45,7 +45,7 @@ def main() -> None:
             try:
                 with gzip.open(gz, "rb") as fin, open(gz.with_suffix(""), "wb") as fout:
                     shutil.copyfileobj(fin, fout)
-            except (EOFError, OSError):  # truncated at the byte-budget cut — incomplete sample
+            except EOFError, OSError:  # truncated at the byte-budget cut — incomplete sample
                 gz.with_suffix("").unlink(missing_ok=True)
             gz.unlink()
         if all((d / n).exists() for n in NEEDED):

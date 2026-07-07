@@ -15,7 +15,6 @@ import argparse
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -26,8 +25,7 @@ from peakle.localize.geopose import load_sample
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image
 from peakle.localize.swissdem import in_switzerland
 
-BASE = Path(__file__).resolve().parents[1]
-GTV2 = BASE / "local/derived/gt_v2"
+from peakle.localize.paths import BASE, GTV2_DIR as GTV2
 
 
 def classify(rec: dict, fg: dict | None, ch: bool) -> list[str]:
@@ -68,24 +66,42 @@ def main() -> None:
             terrain = load_cop_around(BASE / "local/data/copernicus", s.lat, s.lon, 90000.0, 3000)
             az = crop_az_deg(w, rec["fov_deg"], rec["yaw_deg"])
             depth, *_ = dem_depth_image(
-                terrain, rec["cam_z_m"], az, w, h, rec["fov_deg"], rec["dv_px"],
-                rec["de_m"], rec["dn_m"], rec["tilt_deg"], sub=4,
+                terrain,
+                rec["cam_z_m"],
+                az,
+                w,
+                h,
+                rec["fov_deg"],
+                rec["dv_px"],
+                rec["de_m"],
+                rec["dn_m"],
+                rec["tilt_deg"],
+                sub=4,
             )
             z = np.load(GTV2 / f"{name}.npz")
             mono = photo_mono_depth(rgb)
-            fg = foreground_report(mono, depth, sky_rows=z["gt_skyline"].astype(float)[::1]) if mono is not None else None
+            fg = (
+                foreground_report(mono, depth, sky_rows=z["gt_skyline"].astype(float)[::1])
+                if mono is not None
+                else None
+            )
             ch = in_switzerland(s.lat, s.lon)
             causes = classify(rec, fg, ch)
-            hdr = (f"{name}  [{rec['quality']}] sky={rec['sky_cons_px']}px ct={rec.get('contour_cons_px')} "
-                   f"obs={rec.get('obs_source')}(sup {rec.get('obs_support')}) pfm_off={rec.get('pfm_offset_px')} "
-                   f"dyaw={rec.get('dyaw_deg'):+.1f} pos=({rec.get('de_m'):+.0f},{rec.get('dn_m'):+.0f})")
+            hdr = (
+                f"{name}  [{rec['quality']}] sky={rec['sky_cons_px']}px ct={rec.get('contour_cons_px')} "
+                f"obs={rec.get('obs_source')}(sup {rec.get('obs_support')}) pfm_off={rec.get('pfm_offset_px')} "
+                f"dyaw={rec.get('dyaw_deg'):+.1f} pos=({rec.get('de_m'):+.0f},{rec.get('dn_m'):+.0f})"
+            )
             lines.append(hdr)
             for c in causes:
                 lines.append(f"    -> {c}")
             # composite for eyeballing
             im = Image.fromarray(np.clip(rgb.astype(float) * 1.1, 0, 255).astype(np.uint8))
             dr = ImageDraw.Draw(im)
-            for rows, col in ((z["gt_skyline"].astype(float), (0, 230, 90)), (z["dem_skyline"].astype(float), (0, 200, 255))):
+            for rows, col in (
+                (z["gt_skyline"].astype(float), (0, 230, 90)),
+                (z["dem_skyline"].astype(float), (0, 200, 255)),
+            ):
                 pts = [(c_, float(rows[c_])) for c_ in range(w) if np.isfinite(rows[c_]) and 0 <= rows[c_] < h]
                 if len(pts) > 1:
                     dr.line(pts, fill=col, width=2)
@@ -96,7 +112,7 @@ def main() -> None:
         except Exception as exc:
             lines.append(f"{name}: ERROR {exc}")
             print(lines[-1], flush=True)
-        lines.append(f"    [{time.time()-t0:.0f}s]")
+        lines.append(f"    [{time.time() - t0:.0f}s]")
     (outdir / "report.txt").write_text("\n".join(lines))
     print(f"-> {outdir}")
 

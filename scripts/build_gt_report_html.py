@@ -16,8 +16,12 @@ RESULTS = Path(sys.argv[2])
 digest = json.load(open(ASSETS / "digest.json"))
 audit = json.load(open(ASSETS / "audit.json"))
 rows = [r for r in json.load(open(RESULTS)) if "error" not in r]
-n_conf = sum(1 for r in rows for t in ("oracle", "extracted")
-             if isinstance(r.get(t), dict) and r[t].get("verdict") == "CONFIRMED")
+n_conf = sum(
+    1
+    for r in rows
+    for t in ("oracle", "extracted")
+    if isinstance(r.get(t), dict) and r[t].get("verdict") == "CONFIRMED"
+)
 
 
 def uri(name: str) -> str:
@@ -43,20 +47,24 @@ oracle_ok = sum(1 for r in rows if r["oracle"]["correct"])
 extr_ok = sum(1 for r in rows if r.get("extracted", {}).get("correct"))
 man_rows = [r for r in rows if r["manual"]]
 man_oracle_ok = sum(1 for r in man_rows if r["oracle"]["correct"])
-clean_man = [r for r in man_rows if r["gt_consistency_px"] <= 25 and not any(
-    a["name"] == r["name"] and any("consensus" in f for f in a["flags"]) for a in audit)]
+clean_man = [
+    r
+    for r in man_rows
+    if r["gt_consistency_px"] <= 25
+    and not any(a["name"] == r["name"] and any("consensus" in f for f in a["flags"]) for a in audit)
+]
 clean_man_ok = sum(1 for r in clean_man if r["oracle"]["correct"])
 
 audit_rows = "\n".join(
-    f"<tr><td class='mono'>{a['name'].replace('_01024','')}</td>"
+    f"<tr><td class='mono'>{a['name'].replace('_01024', '')}</td>"
     f"<td><span class='chip {'m' if a['manual'] else 'a'}'>{'MANUAL' if a['manual'] else 'AUTO'}</span></td>"
     f"<td>{'; '.join(a['flags'])}</td></tr>"
     for a in audit
 )
 
 thumbs = "".join(
-    f'<figure class="thumb"><div class="imgframe"><img src="{uri(f"audit_{a['name']}.jpg")}" alt="overlay {a['name']}"></div>'
-    f'<figcaption><span class="mono">{a["name"].replace("_01024","")}</span> — {a["flags"][0]}</figcaption></figure>'
+    f'<figure class="thumb"><div class="imgframe"><img src="{uri(f"audit_{a['name']}.jpg")}" alt="overlay {a["name"]}"></div>'
+    f'<figcaption><span class="mono">{a["name"].replace("_01024", "")}</span> — {a["flags"][0]}</figcaption></figure>'
     for a in audit[:6]
     if (ASSETS / f"audit_{a['name']}.jpg").exists()
 )
@@ -195,7 +203,7 @@ only because the crops are roll-rectified (corpus |roll|: median {c["roll_med_p9
 <tr><td><b>GT consistency</b></td>
     <td>chamfer between the GT-depth skyline and <em>our</em> DEM rendered at the GT yaw
         (vertical shift free, ±50°). High = the GT pose and our terrain disagree.</td>
-    <td class="num">median <b>{b['gt_consistency_median']}&nbsp;px</b> (clean core), {n_flag} flagged</td></tr>
+    <td class="num">median <b>{b["gt_consistency_median"]}&nbsp;px</b> (clean core), {n_flag} flagged</td></tr>
 <tr><td><b>Camera below ground</b></td>
     <td>GT elevation vs DEM ground at the GT position (we clamp to ground + 2&nbsp;m before solving)</td>
     <td class="num">13 samples &gt; 5&nbsp;m below, worst −33&nbsp;m</td></tr>
@@ -223,7 +231,7 @@ roughly a quarter of the bench carries issues, and <b>the MANUAL flag is no guar
 samples fail the consensus check with both tracks agreeing ~53–159° away from the label. Scoring
 implication: our raw oracle success ({oracle_ok}/60, {man_oracle_ok}/35 MANUAL) <em>understates</em> the
 solver — on MANUAL samples that pass both cleanliness checks it is <b>{clean_man_ok}/{len(clean_man)}
-({clean_man_ok/len(clean_man):.0%})</b>. The flagged list needs case-by-case review before being
+({clean_man_ok / len(clean_man):.0%})</b>. The flagged list needs case-by-case review before being
 excluded, so both numbers are reported.
 </div>
 </section>
@@ -313,4 +321,4 @@ give an independent pinhole GT source (and exercise roll ≠ 0). ⑤ <b>AUTO lab
 
 out = ASSETS / "report.html"
 out.write_text(html)
-print(f"-> {out}  ({out.stat().st_size/1e6:.1f} MB)")
+print(f"-> {out}  ({out.stat().st_size / 1e6:.1f} MB)")

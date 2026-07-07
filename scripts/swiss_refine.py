@@ -26,9 +26,7 @@ from peakle.localize.geopose import load_sample
 from peakle.localize.gtrefine import crop_az_deg, dem_skyline, shift_align
 from peakle.localize.swissdem import ensure_swiss_tiles, in_switzerland, load_swiss_patch
 
-BASE = Path(__file__).resolve().parents[1]
-GTV2 = BASE / "local/derived/gt_v2"
-SWISS = BASE / "local/data/swissalti"
+from peakle.localize.paths import BASE, GTV2_DIR as GTV2, SWISS_DIR as SWISS
 
 
 def refine_sample(name: str, outdir: Path) -> dict:
@@ -49,8 +47,15 @@ def refine_sample(name: str, outdir: Path) -> dict:
     def cons(dyaw, de, dn, full=False, use_patch=True):
         az = crop_az_deg(w, rec["fov_deg"], rec["yaw_deg"] + dyaw)
         rows = dem_skyline(
-            terrain, rec["cam_z_m"], az if full else az[::2], w, h, rec["fov_deg"],
-            rec["de_m"] + de, rec["dn_m"] + dn, patch=patch if use_patch else None,
+            terrain,
+            rec["cam_z_m"],
+            az if full else az[::2],
+            w,
+            h,
+            rec["fov_deg"],
+            rec["de_m"] + de,
+            rec["dn_m"] + dn,
+            patch=patch if use_patch else None,
         )
         c, dv = shift_align(obs if full else obs_half, rows, dvs, step=3)
         return c, dv, rows
@@ -87,9 +92,13 @@ def refine_sample(name: str, outdir: Path) -> dict:
             dr.line(pts, fill=col, width=2)
     im.save(outdir / f"{name}.jpg", quality=86)
     return {
-        "name": name, "cons_copernicus": round(float(c_before), 1),
-        "cons_patch_unregistered": round(float(c_unreg), 1), "cons_patch_registered": round(float(c_fine), 1),
-        "dyaw": best[1], "de": best[2], "dn": best[3],
+        "name": name,
+        "cons_copernicus": round(float(c_before), 1),
+        "cons_patch_unregistered": round(float(c_unreg), 1),
+        "cons_patch_registered": round(float(c_fine), 1),
+        "dyaw": best[1],
+        "de": best[2],
+        "dn": best[3],
     }
 
 
@@ -120,7 +129,7 @@ def main() -> None:
             rep = refine_sample(name, outdir)
         except Exception as exc:
             rep = {"name": name, "error": str(exc)}
-        print(json.dumps(rep) + f"  [{time.time()-t0:.0f}s]", flush=True)
+        print(json.dumps(rep) + f"  [{time.time() - t0:.0f}s]", flush=True)
     print(f"-> {outdir}")
 
 

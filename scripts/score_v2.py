@@ -50,7 +50,7 @@ def main() -> None:
             target = r["gt_yaw"] if ref == "raw" else g["yaw_deg"]
             if abs(ang(s["yaw"] - target)) <= tol:
                 num += 1
-        return f"{num}/{den} ({num/den:.0%})" if den else "n/a"
+        return f"{num}/{den} ({num / den:.0%})" if den else "n/a"
 
     tiers = {
         "ALL": [j for j in joined if j[1]],
@@ -58,20 +58,24 @@ def main() -> None:
         "CLEAN": [j for j in joined if j[1] and j[1]["quality"] == "CLEAN"],
         "CLEAN+MANUAL": [j for j in joined if j[1] and j[1]["quality"] == "CLEAN" and j[0]["manual"]],
     }
-    print(f"\n{'tier':14} {'n':>3}  {'oracle@5raw':>12} {'oracle@5ref':>12} {'oracle@2ref':>12}  {'extr@5ref':>10} {'extr@2ref':>10}")
+    print(
+        f"\n{'tier':14} {'n':>3}  {'oracle@5raw':>12} {'oracle@5ref':>12} {'oracle@2ref':>12}  {'extr@5ref':>10} {'extr@2ref':>10}"
+    )
     for tier, sel in tiers.items():
         print(
-            f"{tier:14} {len(sel):3}  {rate(sel,'oracle','raw',5):>12} {rate(sel,'oracle','ref',5):>12} "
-            f"{rate(sel,'oracle','ref',2):>12}  {rate(sel,'extracted','ref',5):>10} {rate(sel,'extracted','ref',2):>10}"
+            f"{tier:14} {len(sel):3}  {rate(sel, 'oracle', 'raw', 5):>12} {rate(sel, 'oracle', 'ref', 5):>12} "
+            f"{rate(sel, 'oracle', 'ref', 2):>12}  {rate(sel, 'extracted', 'ref', 5):>10} {rate(sel, 'extracted', 'ref', 2):>10}"
         )
 
     # outline availability: which samples can support contour-based matching
     dens = [g["gt_contour_density"] for _, g in joined if g]
     cts = [g["contour_cons_px"] for _, g in joined if g and g["contour_cons_px"] is not None]
     usable = sum(1 for _, g in joined if g and g["gt_contour_density"] >= 0.3 and (g["contour_cons_px"] or 99) <= 25)
-    print(f"\noutlines: GT contour density median {np.median(dens):.2f}; DEM<->GT contour agreement "
-          f"median {np.median(cts):.1f}px (n={len(cts)}); samples usable for outline matching "
-          f"(density>=0.3 & agreement<=25px): {usable}/{len(dens)}")
+    print(
+        f"\noutlines: GT contour density median {np.median(dens):.2f}; DEM<->GT contour agreement "
+        f"median {np.median(cts):.1f}px (n={len(cts)}); samples usable for outline matching "
+        f"(density>=0.3 & agreement<=25px): {usable}/{len(dens)}"
+    )
 
     sus = [(r["name"], g["reasons"]) for r, g in joined if g and g["quality"] == "SUSPECT"]
     if sus:

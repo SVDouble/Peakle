@@ -37,13 +37,10 @@ from peakle.localize.gtrefine import (
     shift_align,
 )
 from peakle.localize.outline_score import rows_to_mask
+from peakle.localize.paths import COP_TILES_DIR, GEOPOSE_DIR, GTV2_DIR, STD_WIDTH
 from peakle.localize.photo_support import edge_mask, family_support
 
-BASE = Path(__file__).resolve().parents[3]
-GEOPOSE_DIR = BASE / "local/data/geopose"
-COP_TILES_DIR = BASE / "local/data/copernicus"
-GTV2_DIR = BASE / "local/derived/gt_v2"
-MAX_W = 1152
+MAX_W = STD_WIDTH
 
 
 def build_one(
