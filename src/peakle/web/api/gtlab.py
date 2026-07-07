@@ -327,24 +327,16 @@ async def save_adjust(name: str, body: dict[str, float]) -> dict[str, Any]:
     return await to_thread.run_sync(apply)
 
 
-# --- on-demand rebuild of a set of samples (runs build_gt_v2.build_one in a worker thread) ---
+# --- on-demand rebuild of a set of samples (peakle.localize.gtbuild.build_one in a worker) ---
 _REBUILD = {"running": False, "queue": [], "done": [], "failed": [], "current": None}
 _REBUILD_LOCK = threading.Lock()
 _REBUILD_CAP = 50
 
 
-def _builder():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("gt_v2_builder", BASE / "scripts/build_gt_v2.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.build_one
-
-
 def _rebuild_worker(names: list[str]) -> None:
+    from peakle.localize.gtbuild import build_one
+
     try:
-        build_one = _builder()
         for name in names:
             _REBUILD["current"] = name
             try:
