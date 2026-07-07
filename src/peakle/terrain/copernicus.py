@@ -22,7 +22,7 @@ def load_copernicus_terrain(
     center_lat_deg: float,
     center_lon_deg: float,
     extent_m: float = 40000.0,
-    grid: int = 480,
+    grid: int = 720,  # ~56 m/cell over a 40 km window (sampled at ~28 m ≈ native 30 m, then pooled)
     tile_dir: Path = DEFAULT_COP_DIR,
 ) -> TerrainMap:
     """Square `extent_m` window centred on a lat/lon, as a `TerrainMap`.

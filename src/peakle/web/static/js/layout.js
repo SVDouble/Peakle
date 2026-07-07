@@ -39,14 +39,16 @@ export function buildLayout(rootElement) {
     panels,
   });
 
-  // The map is the app: give it ~72% of the width. The right rail stacks the
-  // work tabs (Views | GT data | Setup — Setup is rarely touched, so it rides
-  // last) over the inspector tabs (Inspect | Solve).
+  // The map is the app: it takes the great majority of the width by default. A
+  // narrow right rail stacks the work tabs (Views | GT data | Setup — Setup is
+  // rarely touched, so it rides last) over the inspector tabs (Inspect | Solve);
+  // it stays wide enough to read the sample list, and is resizable.
+  const railWidth = Math.min(360, Math.round(width * 0.2));
   const groups = [
-    leaf(Math.round(width * 0.72), panel("map")),
+    leaf(width - railWidth, panel("map")),
     {
       type: "branch",
-      size: Math.round(width * 0.28),
+      size: railWidth,
       data: [
         leaf(Math.round(height * 0.52), panel("views"), panel("gt"), panel("config")),
         leaf(Math.round(height * 0.48), panel("camera"), panel("solve")),
