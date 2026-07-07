@@ -30,7 +30,7 @@ from peakle.localize.paths import GTV2_DIR as GTV2
 def load_rgb(name: str, w: int, h: int) -> np.ndarray:
     rgb = np.asarray(Image.open(DATA / name / "cyl/photo_crop.jpg").convert("RGB"), np.uint8)
     if rgb.shape[:2] != (h, w):
-        rgb = np.asarray(Image.fromarray(rgb).resize((w, h), Image.BILINEAR), np.uint8)
+        rgb = np.asarray(Image.fromarray(rgb).resize((w, h), Image.Resampling.BILINEAR), np.uint8)
     return rgb
 
 

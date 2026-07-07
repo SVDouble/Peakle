@@ -68,7 +68,7 @@ def _index() -> dict[str, dict]:
         except json.JSONDecodeError, KeyError:
             continue  # record mid-write by the builder
     if not records:
-        raise HTTPException(503, "no GT v2 records — run scripts/build_gt_v2.py first")
+        raise HTTPException(503, "no GT v2 records — run peakle.scripts.build_gt_v2 first")
     return records
 
 
@@ -123,7 +123,7 @@ def _latlon(name: str) -> tuple[float, float]:
 
 def _mask_png(mask: np.ndarray, color: tuple[int, int, int], w: int, h: int) -> bytes:
     if mask.shape != (h, w):
-        m = Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.NEAREST)
+        m = Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.Resampling.NEAREST)
         mask = np.asarray(m) > 0
     rgba = np.zeros((h, w, 4), np.uint8)
     rgba[mask] = (*color, 255)
@@ -150,7 +150,7 @@ def _depth_png(depth: np.ndarray, w: int, h: int) -> bytes:
     rgba[..., 3] = np.where(finite, 200, 0)
     img = Image.fromarray(rgba, "RGBA")
     if img.size != (w, h):
-        img = img.resize((w, h), Image.BILINEAR)
+        img = img.resize((w, h), Image.Resampling.BILINEAR)
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)
     return buf.getvalue()
@@ -183,7 +183,7 @@ def _build_layers_locked(name: str, rec: dict, out) -> None:
     w, h = rec["width"], rec["height"]
     s = load_sample(DATA / name)
 
-    rgb = Image.open(s.photo_path).convert("RGB").resize((w, h), Image.BILINEAR)
+    rgb = Image.open(s.photo_path).convert("RGB").resize((w, h), Image.Resampling.BILINEAR)
     rgb.save(out / "photo.png", "PNG", optimize=True)
 
     z = np.load(GTV2 / f"{name}.npz")
@@ -226,7 +226,7 @@ def _build_layers_locked(name: str, rec: dict, out) -> None:
         def full(mask: np.ndarray) -> np.ndarray:
             if mask.shape == (h, w):
                 return mask
-            m = Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.NEAREST)
+            m = Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.Resampling.NEAREST)
             return np.asarray(m) > 0
 
         masks = {
@@ -328,7 +328,7 @@ async def save_adjust(name: str, body: dict[str, float]) -> dict[str, Any]:
 
 
 # --- on-demand rebuild of a set of samples (peakle.localize.gtbuild.build_one in a worker) ---
-_REBUILD = {"running": False, "queue": [], "done": [], "failed": [], "current": None}
+_REBUILD: dict[str, Any] = {"running": False, "queue": [], "done": [], "failed": [], "current": None}
 _REBUILD_LOCK = threading.Lock()
 _REBUILD_CAP = 50
 
@@ -404,7 +404,7 @@ async def sample_thumb(name: str) -> Response:
         def build() -> None:
             s = load_sample(DATA / name)
             im = Image.open(s.photo_path).convert("RGB")
-            im.thumbnail((128, 128), Image.BILINEAR)
+            im.thumbnail((128, 128), Image.Resampling.BILINEAR)
             path.parent.mkdir(parents=True, exist_ok=True)
             im.save(path, "JPEG", quality=82)
 

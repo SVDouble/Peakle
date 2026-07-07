@@ -54,7 +54,7 @@ def ensure_swiss_tiles(tile_dir: str | Path, lat: float, lon: float, radius_m: f
     tile_dir.mkdir(parents=True, exist_ok=True)
     dlat = radius_m / 111320.0
     dlon = radius_m / (111320.0 * math.cos(math.radians(lat)))
-    url = f"{STAC_ITEMS}?bbox={lon-dlon},{lat-dlat},{lon+dlon},{lat+dlat}&limit=100"
+    url = f"{STAC_ITEMS}?bbox={lon - dlon},{lat - dlat},{lon + dlon},{lat + dlat}&limit=100"
     have = 0
     try:
         with urllib.request.urlopen(url, timeout=30) as r:

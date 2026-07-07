@@ -9,7 +9,7 @@ garbage columns in the extraction from dominating the score.
 
 Every solve returns the full yaw-chamfer profile plus derived diagnostics (basin width, alias
 margin, coverage).  Thresholds behind ``verdict`` are PROVISIONAL until calibrated on the
-GeoPose3K benchmark (scripts/bench_geopose.py); treat CONFIRMED as "worth looking at", not truth,
+GeoPose3K benchmark (peakle.scripts.bench_geopose); treat CONFIRMED as "worth looking at", not truth,
 until that calibration lands.
 """
 
@@ -351,7 +351,7 @@ def _median_centered_shift_chamfer(
 
 def _provisional_verdict(s: OrientationSolve, cap_px: float) -> str:
     """Recalibrated 2026-07-07 on the combined clean-manual + bench-60 runs (both scored
-    against the hybrid-targeted GT v2; scripts/calibrate_verdict.py): 0 wrong of 105
+    against the hybrid-targeted GT v2; peakle.scripts.calibrate_verdict): 0 wrong of 105
     confirmations, recall 84% (the previous snr>=3 gate held precision 1.00 but only 44%
     recall).  The tightened alias (1.5) + narrow well (10°) pair now excludes the narrow-FOV
     doppelgänger class that originally motivated the SNR floor.  MUST be recalibrated after

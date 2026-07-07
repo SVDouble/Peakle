@@ -97,18 +97,12 @@ def load_cop_around(
     elev = np.full((grid, grid), np.nan)
     for lat0 in range(int(math.floor(lats[0])), int(math.floor(lats[-1])) + 1):
         for lon0 in range(int(math.floor(lons[0])), int(math.floor(lons[-1])) + 1):
-            path = (
-                ensure_tile(tile_dir, lat0, lon0)
-                if download
-                else _existing_tile(Path(tile_dir), lat0, lon0)
-            )
+            path = ensure_tile(tile_dir, lat0, lon0) if download else _existing_tile(Path(tile_dir), lat0, lon0)
             if path is None:
                 continue
             arr = _load_tile(path)
             hh, ww = arr.shape
-            inside = (
-                (lat_grid >= lat0) & (lat_grid < lat0 + 1) & (lon_grid >= lon0) & (lon_grid < lon0 + 1)
-            )
+            inside = (lat_grid >= lat0) & (lat_grid < lat0 + 1) & (lon_grid >= lon0) & (lon_grid < lon0 + 1)
             if not inside.any():
                 continue
             rr = (lat0 + 1 - lat_grid[inside]) * (hh - 1)

@@ -30,14 +30,14 @@ import numpy as np
 class GeoPoseSample:
     name: str
     root: Path
-    manual: bool           # pose flagged MANUAL (human-verified) vs AUTO
+    manual: bool  # pose flagged MANUAL (human-verified) vs AUTO
     lat: float
     lon: float
     elev_m: float
     fov_deg: float
-    yaw_gt_deg: float      # azimuth, 0 = North, clockwise to East
+    yaw_gt_deg: float  # azimuth, 0 = North, clockwise to East
     pitch_gt_deg: float
-    roll_gt_deg: float     # image-plane roll; the solver assumes 0, so large |roll| = harder GT
+    roll_gt_deg: float  # image-plane roll; the solver assumes 0, so large |roll| = harder GT
 
     @property
     def photo_path(self) -> Path:

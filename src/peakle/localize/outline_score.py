@@ -26,10 +26,10 @@ from scipy.ndimage import distance_transform_edt
 
 @dataclass
 class OutlineScore:
-    precision: float          # predicted px near ANY GT outline (skyline or internal)
-    recall_skyline: float     # GT skyline px near a prediction
-    recall_internal: float    # GT internal-contour px near a prediction
-    f1: float                 # harmonic mean of precision and pooled recall
+    precision: float  # predicted px near ANY GT outline (skyline or internal)
+    recall_skyline: float  # GT skyline px near a prediction
+    recall_internal: float  # GT internal-contour px near a prediction
+    f1: float  # harmonic mean of precision and pooled recall
     n_pred: int
     n_gt_skyline: int
     n_gt_internal: int

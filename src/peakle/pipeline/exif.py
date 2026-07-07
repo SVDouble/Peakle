@@ -63,7 +63,7 @@ def intrinsics_from_exif(exif: ExifData, width_px: int, height_px: int, default_
 def _gps_tags(exif: object) -> dict:
     try:
         ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)  # type: ignore[attr-defined]
-    except (AttributeError, KeyError, ValueError):
+    except AttributeError, KeyError, ValueError:
         return {}
     return {_GPS_TAGS.get(key, key): value for key, value in (ifd or {}).items()}
 
@@ -73,7 +73,7 @@ def _gps_coordinate(dms: object, ref: object) -> float | None:
         return None
     try:
         degrees, minutes, seconds = (_to_float(part) or 0.0 for part in dms)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     value = degrees + minutes / 60.0 + seconds / 3600.0
     if str(ref).upper() in {"S", "W"}:
@@ -86,7 +86,7 @@ def _to_float(value: object) -> float | None:
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 

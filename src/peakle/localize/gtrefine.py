@@ -307,6 +307,7 @@ def refine_pose(terrain, cam_z, obs, w, h, fov_deg, yaw_label, gt_dt=None):
             score, c_sky, c_ct, dv_c, rows_c = combined(dy_c, loc[1], loc[2])
             if best_e is None or score < best_e[0]:
                 best_e = (score, dy_c, loc[1], loc[2], c_sky, c_ct, dv_c, rows_c)
+        assert best_e is not None  # cand is non-empty on this branch (skyline-equivalent candidates)
         # local contour-constrained position refinement around the contour-chosen candidate
         for de_c in best_e[2] + np.asarray((-50.0, -25.0, 0.0, 25.0, 50.0)):
             for dn_c in best_e[3] + np.asarray((-50.0, -25.0, 0.0, 25.0, 50.0)):

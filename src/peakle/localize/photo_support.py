@@ -19,7 +19,7 @@ from functools import lru_cache
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
-EDGE_TH = 0.30       # DexiNed response that counts as an image edge
+EDGE_TH = 0.30  # DexiNed response that counts as an image edge
 SUPPORT_TOL_PX = 6.0  # a line pixel is supported if an edge lies within this radius
 
 

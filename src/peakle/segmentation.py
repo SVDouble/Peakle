@@ -361,11 +361,11 @@ def _salience(curve: dict, width: int) -> float:
 
 def _resize_rgb(rgb: NDArray[np.float64], width: int, height: int) -> NDArray[np.float64]:
     image = Image.fromarray((np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8), mode="RGB")
-    return np.asarray(image.resize((width, height), Image.LANCZOS), dtype=np.float64) / 255.0
+    return np.asarray(image.resize((width, height), Image.Resampling.LANCZOS), dtype=np.float64) / 255.0
 
 
 def _resize_map(values: NDArray[np.float64], width: int, height: int) -> NDArray[np.float64]:
-    image = Image.fromarray(values.astype(np.float32), mode="F").resize((width, height), Image.BILINEAR)
+    image = Image.fromarray(values.astype(np.float32), mode="F").resize((width, height), Image.Resampling.BILINEAR)
     return np.asarray(image, dtype=np.float64)
 
 

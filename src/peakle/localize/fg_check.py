@@ -17,10 +17,10 @@ from functools import lru_cache
 
 import numpy as np
 
-PHOTO_NEAR_TH = 0.22      # normalized mono depth (0 = nearest) below which a pixel is "near layer"
-PHOTO_FG_MIN = 0.08       # near layer must cover at least this fraction of terrain to matter
-DEM_NEAR_M = 1200.0       # a DEM pixel this close counts as rendered foreground
-RATIO = 0.25              # DEM foreground below this fraction of the photo's -> missing
+PHOTO_NEAR_TH = 0.22  # normalized mono depth (0 = nearest) below which a pixel is "near layer"
+PHOTO_FG_MIN = 0.08  # near layer must cover at least this fraction of terrain to matter
+DEM_NEAR_M = 1200.0  # a DEM pixel this close counts as rendered foreground
+RATIO = 0.25  # DEM foreground below this fraction of the photo's -> missing
 
 
 @lru_cache(maxsize=1)

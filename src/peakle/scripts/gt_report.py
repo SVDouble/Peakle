@@ -248,7 +248,7 @@ def _std_rgb(sample) -> np.ndarray:
     rgb = np.asarray(Image.open(sample.photo_path).convert("RGB"), np.uint8)
     if rgb.shape[1] > MAX_W:
         s = MAX_W / rgb.shape[1]
-        rgb = np.asarray(Image.fromarray(rgb).resize((MAX_W, round(rgb.shape[0] * s)), Image.BILINEAR), np.uint8)
+        rgb = np.asarray(Image.fromarray(rgb).resize((MAX_W, round(rgb.shape[0] * s)), Image.Resampling.BILINEAR), np.uint8)
     return rgb
 
 

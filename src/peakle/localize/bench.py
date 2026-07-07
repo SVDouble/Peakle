@@ -105,7 +105,7 @@ def run_sample(
     if rgb.shape[1] > MAX_W:
         s = MAX_W / rgb.shape[1]
         h2 = max(1, round(rgb.shape[0] * s))
-        rgb = np.asarray(Image.fromarray(rgb).resize((MAX_W, h2), Image.BILINEAR), np.uint8)
+        rgb = np.asarray(Image.fromarray(rgb).resize((MAX_W, h2), Image.Resampling.BILINEAR), np.uint8)
     h_p, w_p = rgb.shape[:2]
 
     # ---- oracle track (GT depth skyline, rescaled onto the standard geometry) ----

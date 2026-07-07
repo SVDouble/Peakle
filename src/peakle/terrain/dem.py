@@ -144,9 +144,9 @@ def load_dem_terrain(spec: TerrainSpec, hgt_path: Path) -> TerrainMap:
     rows = np.linspace(row_c - half_rows, row_c + half_rows, spec.grid_height)
     cols = np.linspace(col_c - half_cols, col_c + half_cols, spec.grid_width)
     row_grid, col_grid = np.meshgrid(rows, cols, indexing="ij")
-    elevation = map_coordinates(
-        dem, [row_grid.ravel(), col_grid.ravel()], order=1, mode="nearest"
-    ).reshape(spec.grid_height, spec.grid_width)
+    elevation = map_coordinates(dem, [row_grid.ravel(), col_grid.ravel()], order=1, mode="nearest").reshape(
+        spec.grid_height, spec.grid_width
+    )
 
     elev_min = float(elevation.min())
     elev_max = float(elevation.max())

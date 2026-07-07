@@ -13,8 +13,7 @@ from numpy.typing import NDArray
 
 from peakle.segmenters import Segmenter
 
-_WEIGHTS = {"mobile_sam": "mobile_sam.pt", "mobilesam": "mobile_sam.pt",
-            "sam2": "sam2.1_b.pt", "sam2.1": "sam2.1_b.pt"}
+_WEIGHTS = {"mobile_sam": "mobile_sam.pt", "mobilesam": "mobile_sam.pt", "sam2": "sam2.1_b.pt", "sam2.1": "sam2.1_b.pt"}
 
 
 class UltralyticsSamSegmenter(Segmenter):

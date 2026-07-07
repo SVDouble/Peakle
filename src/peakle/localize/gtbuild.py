@@ -74,7 +74,7 @@ def build_one(
     # trusted detected photo skyline DISAGREES with the pfm does the photo become the target.
     # (Re-anchoring every sample to the photo raised the whole cons distribution by the photo's
     # trees/extraction noise floor — measured, reverted.)
-    rgb = np.asarray(Image.open(s.photo_path).convert("RGB").resize((w, h), Image.BILINEAR), np.uint8)
+    rgb = np.asarray(Image.open(s.photo_path).convert("RGB").resize((w, h), Image.Resampling.BILINEAR), np.uint8)
     edges = edge_mask(rgb)
     obs_source, obs_support, pfm_offset = "pfm", None, None
     pfm_obs = obs.copy()

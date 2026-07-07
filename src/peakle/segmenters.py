@@ -31,9 +31,7 @@ class Segmenter(ABC):
         """Boolean sky mask (True = sky). Mountain/terrain is then ``~sky``."""
 
     @abstractmethod
-    def instance_masks(
-        self, rgb: NDArray[np.float64], threshold: float
-    ) -> list[NDArray[np.bool_]]:
+    def instance_masks(self, rgb: NDArray[np.float64], threshold: float) -> list[NDArray[np.bool_]]:
         """Region/instance masks at a detector confidence ``threshold`` in [0, 1].
         LOWER threshold ⇒ MORE, finer instances (SAM3: detection score; SAM-auto: stability/
         IoU). The shared methods below sweep several thresholds, so this is the only knob a

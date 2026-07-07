@@ -57,8 +57,8 @@ AVAILABLE_STRATEGIES = [
         "name": "horizon",
         "label": "Horizon (validated)",
         "blurb": "The ray-cast 360 deg horizon solver validated on GeoPose3K: median-centered "
-                 "shift chamfer with top-K basin polish and honesty diagnostics "
-                 "(alias ratio, SNR, verdict). Solves yaw/pitch at the prior position.",
+        "shift chamfer with top-K basin polish and honesty diagnostics "
+        "(alias ratio, SNR, verdict). Solves yaw/pitch at the prior position.",
     },
 ]
 
@@ -231,8 +231,6 @@ def solve_pose(
     )
 
 
-
-
 def _solve_horizon(
     terrain: TerrainMap,
     contour: SkylineContour,
@@ -257,8 +255,11 @@ def _solve_horizon(
 
     grid_step = float(min(terrain.x_m[1] - terrain.x_m[0], terrain.y_m[1] - terrain.y_m[0]))
     profile = HorizonProfile(
-        terrain, position.up_m, step=max(grid_step / 2.0, 10.0),
-        cam_e=position.east_m, cam_n=position.north_m,
+        terrain,
+        position.up_m,
+        step=max(grid_step / 2.0, 10.0),
+        cam_e=position.east_m,
+        cam_n=position.north_m,
     )
     solve = solve_orientation(obs, height, profile, fov_deg=hfov_deg, projection="pinhole")
 
@@ -326,7 +327,6 @@ def _solve_horizon(
             "coverage": round(solve.coverage, 2),
         },
     )
-
 
 
 class _TracedSolve:

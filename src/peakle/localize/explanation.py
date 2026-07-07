@@ -42,7 +42,7 @@ def explanation_score(
         return {"score": 0.0, "n_photo_px": 0, "explained": {k: 0.0 for k in weights}}
     credit = np.zeros(photo_mask.shape, float)
     explained = {}
-    for fam in sorted(weights, key=weights.get, reverse=True):
+    for fam in sorted(weights, key=lambda f: weights[f], reverse=True):
         mask = dem_masks.get(fam)
         if mask is None or not mask.any():
             explained[fam] = 0.0
@@ -112,7 +112,7 @@ def arbitrate_by_explanation(
         scores[name] = explanation_score(photo_edges, masks)["score"]
     if not scores:  # nothing in the slack window (shouldn't happen — best is always in)
         return min(solved.items(), key=lambda kv: kv[1][1].chamfer_px)[0], {}
-    win = max(scores, key=scores.get)
+    win = max(scores, key=lambda k: scores[k])
     return win, scores
 
 

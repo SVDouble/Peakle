@@ -27,9 +27,9 @@ from scipy.ndimage import binary_fill_holes, label, median_filter
 
 @dataclass
 class ExtractedSkyline:
-    rows: np.ndarray          # per-column skyline row, NaN where not found
-    coverage: float           # fraction of columns with a skyline
-    agreement: float          # fraction of columns where independent detectors agree (<=3 px)
+    rows: np.ndarray  # per-column skyline row, NaN where not found
+    coverage: float  # fraction of columns with a skyline
+    agreement: float  # fraction of columns where independent detectors agree (<=3 px)
 
     @property
     def width(self) -> int:
@@ -144,8 +144,8 @@ def learned_skyline(rgb: np.ndarray) -> ExtractedSkyline | None:
     Returns None when torch/kornia are unavailable.
     """
 
-    from peakle.localize.photo_support import edge_mask as _unused  # noqa: F401 - ensures module presence
     from peakle.localize.photo_support import _detector
+    from peakle.localize.photo_support import edge_mask as _unused  # noqa: F401 - ensures module presence
 
     det = _detector()
     if det is None:

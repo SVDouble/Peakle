@@ -47,7 +47,7 @@ def build_tile(rec: dict, out: Path, do_polish: bool) -> dict:
     s = load_sample(DATA / rec["name"])
     rgb = np.asarray(Image.open(s.photo_path).convert("RGB"), np.uint8)
     scale = TILE_W / rgb.shape[1]
-    rgb = np.asarray(Image.fromarray(rgb).resize((TILE_W, round(rgb.shape[0] * scale)), Image.BILINEAR), np.uint8)
+    rgb = np.asarray(Image.fromarray(rgb).resize((TILE_W, round(rgb.shape[0] * scale)), Image.Resampling.BILINEAR), np.uint8)
     h, w = rgb.shape[:2]
 
     o = oracle_skyline(s.depth_path)

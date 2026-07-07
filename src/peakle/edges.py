@@ -55,7 +55,8 @@ class LearnedEdges:
         run_width = min(self.max_width, width)
         run_height = max(1, round(height * run_width / width))
         resized = Image.fromarray((np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8), mode="RGB")
-        small = np.asarray(resized.resize((run_width, run_height), Image.LANCZOS), dtype=np.float32)  # RGB [0, 255]
+        # RGB [0, 255]
+        small = np.asarray(resized.resize((run_width, run_height), Image.Resampling.LANCZOS), dtype=np.float32)
         bgr = small[..., ::-1] - self.mean_bgr  # → BGR, mean-subtracted (official preprocessing)
         tensor = torch.from_numpy(np.ascontiguousarray(bgr.transpose(2, 0, 1)[None])).to(self._device)
         with torch.no_grad():
@@ -65,7 +66,7 @@ class LearnedEdges:
             torch.cuda.empty_cache()  # a long-lived server process must not hoard the shared GPU
         if edge.shape != (height, width):
             scaled = Image.fromarray((np.clip(edge, 0.0, 1.0) * 255).astype(np.uint8), mode="L")
-            edge = np.asarray(scaled.resize((width, height), Image.BILINEAR), dtype=np.float64) / 255.0
+            edge = np.asarray(scaled.resize((width, height), Image.Resampling.BILINEAR), dtype=np.float64) / 255.0
         return edge
 
 
@@ -111,7 +112,7 @@ class TeedEdges:
         rw = min(self.max_width, w) // 8 * 8
         rh = max(8, round(h * rw / w) // 8 * 8)
         small = np.asarray(
-            Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8)).resize((rw, rh), Image.LANCZOS),
+            Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8)).resize((rw, rh), Image.Resampling.LANCZOS),
             np.float32,
         )
         bgr = small[..., ::-1] - self.mean_bgr
@@ -119,7 +120,8 @@ class TeedEdges:
         with torch.no_grad():
             fused = torch.sigmoid(self._model(t)[-1]).squeeze().cpu().numpy().astype(np.float64)
         if fused.shape != (h, w):
-            im = Image.fromarray((np.clip(fused, 0, 1) * 255).astype(np.uint8), "L").resize((w, h), Image.BILINEAR)
+            im8 = (np.clip(fused, 0, 1) * 255).astype(np.uint8)
+            im = Image.fromarray(im8, "L").resize((w, h), Image.Resampling.BILINEAR)
             fused = np.asarray(im, np.float64) / 255.0
         return fused
 
@@ -140,7 +142,7 @@ class PrecomputedEdges:
         for ext in (".png", ".jpg"):
             p = os.path.join(self._dir, image_name + ext)
             if os.path.exists(p):
-                e = Image.open(p).convert("L").resize((shape[1], shape[0]), Image.LANCZOS)
+                e = Image.open(p).convert("L").resize((shape[1], shape[0]), Image.Resampling.LANCZOS)
                 return np.asarray(e, np.float64) / 255.0
         return None
 
@@ -165,9 +167,7 @@ def load_edge_detector(kind: str = "dexined", **kwargs) -> EdgeDetector | None:
     raise ValueError(f"unknown edge detector kind: {kind!r}")
 
 
-def estimate_edges(
-    rgb: NDArray[np.float64], detector: EdgeDetector | None = None
-) -> NDArray[np.float64] | None:
+def estimate_edges(rgb: NDArray[np.float64], detector: EdgeDetector | None = None) -> NDArray[np.float64] | None:
     """Runs the detector if given, else returns None (classical response is used)."""
 
     return detector.detect(rgb) if detector is not None else None

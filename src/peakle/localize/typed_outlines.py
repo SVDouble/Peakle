@@ -28,25 +28,25 @@ import numpy as np
 from scipy.ndimage import label as cc_label
 from scipy.ndimage import maximum_filter
 
-JUMP_LOG = 0.30          # |Δ log d| that counts as an occlusion jump (matches gtrefine)
-CREASE_K_MAD = 6.0       # crease threshold in robust MADs of the response
-CREASE_FLOOR = 0.012     # absolute floor on |second difference of log depth|
-MIN_COMPONENT_PX = 25    # drop shorter line fragments (noise)
-OCCLUSION_GUARD_PX = 2   # exclusion band around jumps when detecting creases
-MIN_NEAR_M = 250.0       # ignore outlines whose near side is closer than this: the foreground
-                         # ground the camera stands on produces genuine DEM depth folds (measured:
-                         # occlusion lines cutting across a flat ski slope) that no photo shows
-GRAZE_LOG = 0.08         # max |one-sided log-depth gradient| per px for a crease to be trusted:
-                         # near-grazing surfaces (lakes / valley floors seen edge-on) have huge
-                         # CONTINUOUS gradients whose curvature is viewing geometry, not terrain;
-                         # the same cap rejects creases straddling moderate (sub-jump) depth steps
+JUMP_LOG = 0.30  # |Δ log d| that counts as an occlusion jump (matches gtrefine)
+CREASE_K_MAD = 6.0  # crease threshold in robust MADs of the response
+CREASE_FLOOR = 0.012  # absolute floor on |second difference of log depth|
+MIN_COMPONENT_PX = 25  # drop shorter line fragments (noise)
+OCCLUSION_GUARD_PX = 2  # exclusion band around jumps when detecting creases
+MIN_NEAR_M = 250.0  # ignore outlines whose near side is closer than this: the foreground
+# ground the camera stands on produces genuine DEM depth folds (measured:
+# occlusion lines cutting across a flat ski slope) that no photo shows
+GRAZE_LOG = 0.08  # max |one-sided log-depth gradient| per px for a crease to be trusted:
+# near-grazing surfaces (lakes / valley floors seen edge-on) have huge
+# CONTINUOUS gradients whose curvature is viewing geometry, not terrain;
+# the same cap rejects creases straddling moderate (sub-jump) depth steps
 
 
 @dataclass
 class TypedOutlines:
-    occlusion: np.ndarray     # bool (H, W) — type 1 jump edges
-    rib: np.ndarray           # bool (H, W) — type 2a convex creases (spurs / counterforts)
-    couloir: np.ndarray       # bool (H, W) — type 2b concave creases (gullies)
+    occlusion: np.ndarray  # bool (H, W) — type 1 jump edges
+    rib: np.ndarray  # bool (H, W) — type 2a convex creases (spurs / counterforts)
+    couloir: np.ndarray  # bool (H, W) — type 2b concave creases (gullies)
 
     @property
     def crease(self) -> np.ndarray:
@@ -78,7 +78,7 @@ def extract_typed_outlines(
 
     d = depth.astype(float).copy()
     d[d <= 0] = np.nan
-    d[d < min_near_m] = np.nan   # foreground exclusion (see MIN_NEAR_M)
+    d[d < min_near_m] = np.nan  # foreground exclusion (see MIN_NEAR_M)
     logd = np.log(d)
 
     # --- type 1: jump edges (first differences of raw log depth) ---

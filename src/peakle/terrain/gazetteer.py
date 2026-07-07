@@ -74,11 +74,11 @@ def _load_named_peaks(bbox: tuple[float, float, float, float], cache_dir: Path) 
     if cache.exists():
         try:
             return json.loads(cache.read_text())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             pass
     try:
         named = _query_overpass(bbox)
-    except (OSError, ValueError, TimeoutError):
+    except OSError, ValueError, TimeoutError:
         return []
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -92,8 +92,7 @@ def _query_overpass(bbox: tuple[float, float, float, float]) -> list[dict]:
     south, west, north, east = bbox
     area = f"({south},{west},{north},{east})"
     query = (
-        f"[out:json][timeout:{_REQUEST_TIMEOUT_S}];"
-        f'(node["natural"="peak"]{area};node["natural"="volcano"]{area};);out;'
+        f'[out:json][timeout:{_REQUEST_TIMEOUT_S}];(node["natural"="peak"]{area};node["natural"="volcano"]{area};);out;'
     )
     data = urllib.parse.urlencode({"data": query}).encode()
     request = urllib.request.Request(OVERPASS_URL, data=data, headers={"User-Agent": "peakle/0.1"})  # noqa: S310 - fixed https host

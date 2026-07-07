@@ -60,8 +60,7 @@ def keep_by_ridge_signal(
 
 
 def filter_by_ridge_signal(
-    polys: list[Poly], sil: NDArray[np.float64], edge: NDArray[np.float64],
-    skyline: NDArray[np.float64], **kw
+    polys: list[Poly], sil: NDArray[np.float64], edge: NDArray[np.float64], skyline: NDArray[np.float64], **kw
 ) -> tuple[list[Poly], list[str]]:
     """Apply `keep_by_ridge_signal` to a list; return (kept, label-per-kept)."""
     kept, labels = [], []
