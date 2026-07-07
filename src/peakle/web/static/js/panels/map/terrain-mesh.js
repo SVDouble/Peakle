@@ -232,22 +232,27 @@ function createBasePlane(frame) {
   return plane;
 }
 
+// Returns { group, labels }. Markers (red-triangle sprites) AND text labels live in one group so
+// a rebuild can remove them all at once — previously only the labels were returned and the marker
+// sprites leaked, leaving red triangles hanging in the air after a map switch (user-reported).
 export function addPeakLabels(scene, peaks, frame) {
   const labeled = [...peaks].sort((a, b) => b.prominence_m - a.prominence_m).slice(0, MAX_PEAK_LABELS);
+  const group = new THREE.Group();
   const labels = [];
   for (const peak of labeled) {
     const point = localToScenePoint(peak.local_position, frame);
     const marker = createPeakMarker();
     marker.position.copy(point);
-    scene.add(marker);
+    group.add(marker);
     const label = createLabel(peak.name, "peak-label");
     label.position.copy(point);
     label.position.y += 0.078;
     label.userData.occlusionAnchor = marker;
-    scene.add(label);
+    group.add(label);
     labels.push(label);
   }
-  return labels;
+  scene.add(group);
+  return { group, labels };
 }
 
 function createPeakMarker() {

@@ -38,7 +38,7 @@ const GT_LAYER_GROUPS = [
     ],
   },
 ];
-const GT_LAYER_NAMES = GT_LAYER_GROUPS.flatMap((g) => g.layers.map(([layer]) => layer));
+export const GT_LAYER_NAMES = GT_LAYER_GROUPS.flatMap((g) => g.layers.map(([layer]) => layer));
 
 export function setupCameraPanel(store, root) {
   const image = el("img", { class: "camera-image", alt: "Rendered view" });

@@ -1054,3 +1054,18 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   width: 100%;
   height: 100%;
 }
+
+/* POV outline overlay (map in sync with the Inspect panel's toggles) */
+.pov-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pov-overlay .pov-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}

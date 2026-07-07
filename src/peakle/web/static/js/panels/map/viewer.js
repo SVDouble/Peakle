@@ -8,8 +8,10 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 
+import { api } from "../../api.js";
 import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame, verticalFovDeg } from "../../geometry.js";
 import { el, fitContainBox } from "../../format.js";
+import { GT_LAYER_NAMES } from "../camera-image.js";
 import { buildSelectionLayer } from "./cameras.js";
 import { buildGtSpotsLayer, geoToLocal, terrainElevationAt } from "./gt-spots.js";
 import { setupMinimap } from "./minimap.js";
@@ -27,7 +29,11 @@ export function setupMapPanel(store, root) {
   // and shrinks to the camera image's aspect ratio in POV modes (letterboxing),
   // so the through-the-lens framing matches the rendered image instead of being
   // cropped to the panel's shape.
-  const viewport = el("div", { class: "map-viewport" }, [canvas]);
+  // In True POV for a GT sample this holds the same outline layer PNGs the Inspect panel shows,
+  // so the map and the inspector stay in sync (the POV camera matches the GT pose's fov/aspect,
+  // so the photo-coordinate overlays line up with the 3D render).
+  const povOverlay = el("div", { class: "pov-overlay" });
+  const viewport = el("div", { class: "map-viewport" }, [canvas, povOverlay]);
   const frameBox = el("div", { class: "frame-box", id: "mapFrameBox" }, [viewport]);
   const hint = el("p", { class: "control-hint", id: "mapHint" });
   const povControls = el(
@@ -106,6 +112,7 @@ export function setupMapPanel(store, root) {
   let terrainMesh = null;
   let terrainControls = null;
   let peakLabels = [];
+  let peakGroup = null;
   let selectionLabels = [];
   let selectionLayer = null;
   let gtSpotsLayer = null;
@@ -125,8 +132,13 @@ export function setupMapPanel(store, root) {
     if (terrainGroup) {
       scene.remove(terrainGroup);
     }
-    for (const label of peakLabels) {
-      scene.remove(label);
+    if (peakGroup) {
+      scene.remove(peakGroup);
+    }
+    // Sweep peak-label DOM nodes wholesale: a CSS2DObject leaving the scene never removes its
+    // element, so old text would otherwise pile up (and the sprites hang) after a map switch.
+    for (const node of labelRenderer.domElement.querySelectorAll(".peak-label")) {
+      node.remove();
     }
     frame = terrainFrame(store.terrain);
     const built = createTerrainGroup(store.terrain, frame, store.peaks);
@@ -135,7 +147,9 @@ export function setupMapPanel(store, root) {
     terrainControls = built;
     scene.add(terrainGroup);
     applyDisplay();
-    peakLabels = addPeakLabels(scene, store.peaks, frame);
+    const peakBuilt = addPeakLabels(scene, store.peaks, frame);
+    peakGroup = peakBuilt.group;
+    peakLabels = peakBuilt.labels;
     rebuildSelection();
     rebuildGtSpots();
   }
@@ -244,6 +258,31 @@ export function setupMapPanel(store, root) {
     return null;
   }
 
+  // Sync the POV outline overlay with the Inspect panel: same enabled layers, same sample.
+  function updatePovOverlay() {
+    const sample = mode === "true" ? store.selectedGtSample() : null;
+    if (!sample) {
+      if (povOverlay.childElementCount) {
+        povOverlay.replaceChildren();
+      }
+      return;
+    }
+    const want = GT_LAYER_NAMES.filter((layer) => store.gtDisplay[layer]).map((layer) =>
+      api.gtLayerUrl(sample.name, layer),
+    );
+    const have = [...povOverlay.children].map((node) => node.dataset.src);
+    if (want.join("|") !== have.join("|")) {
+      povOverlay.replaceChildren(
+        ...want.map((src) => {
+          const img = el("img", { class: "pov-layer", alt: "" });
+          img.dataset.src = src;
+          img.src = src;
+          return img;
+        }),
+      );
+    }
+  }
+
   function applyPov(nextMode) {
     mode = nextMode;
     syncPovButtons();
@@ -257,6 +296,7 @@ export function setupMapPanel(store, root) {
       controls.target.copy(CAMERA_TARGET);
       controls.update();
       resize();
+      updatePovOverlay();
       hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view or GT sample, then choose a POV.";
       return;
     }
@@ -268,6 +308,7 @@ export function setupMapPanel(store, root) {
     camera.lookAt(cameraTargetScenePoint(active.pose, frame));
     // resize() recomputes the letterbox box for the new mode and sets the matching aspect.
     resize();
+    updatePovOverlay();
     hint.textContent = `Looking through the ${nextMode} camera of ${active.label}.`;
   }
 
@@ -448,6 +489,8 @@ export function setupMapPanel(store, root) {
       applyPov(mode);
     }
   });
+  // Outline toggles in the Inspect panel drive the POV overlay too (map <-> inspect in sync).
+  store.on("gt-display", updatePovOverlay);
   store.on("placing", () => {
     viewport.classList.toggle("placing", store.placing);
     if (mode === "map") {
