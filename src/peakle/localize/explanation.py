@@ -78,9 +78,57 @@ def dem_typed_masks(
     return {"sky": sky, "occ": occl, "rib": up(typed.rib), "cou": up(typed.couloir)}
 
 
+def arbitrate_by_explanation(
+    solved: dict,
+    terrain,
+    cam_z: float,
+    w: int,
+    h: int,
+    fov_deg: float,
+    photo_edges: np.ndarray,
+    chamfer_slack: float = 1.2,
+) -> tuple[str, dict]:
+    """Pick the winning skyline hypothesis by weighted explanation, chamfer-gated.
+
+    ``solved`` maps a hypothesis name to ``(candidate, OrientationSolve)``.  Among hypotheses whose
+    skyline chamfer is within ``chamfer_slack`` of the best, the one whose typed DEM outlines best
+    EXPLAIN the photo edges wins — this breaks the lake/false-skyline tie a chamfer-only winner
+    loses (a water edge fits the skyline but leaves the real ridges unexplained).  The tight 1.2
+    slack is load-bearing: on GeoPose3K bench-60 it rescued 3 lake cases with 0 regressions, while
+    a looser 1.6 slack pulled wrong candidates into the pool and broke 2 correct samples.
+
+    Returns ``(winning_name, per_hypothesis_scores)``.
+    """
+
+    if not solved:
+        return "", {}
+    best_cham = min(s.chamfer_px for _, s in solved.values())
+    scores = {}
+    for name, (_c, s) in solved.items():
+        if s.chamfer_px > chamfer_slack * max(best_cham, 1e-9):
+            continue
+        cham, yaw, dv = s.candidates[0] if s.candidates else (s.chamfer_px, s.yaw_deg, 0.0)
+        masks = dem_typed_masks(terrain, cam_z, w, h, fov_deg, yaw, dv, sub=4)
+        scores[name] = explanation_score(photo_edges, masks)["score"]
+    if not scores:  # nothing in the slack window (shouldn't happen — best is always in)
+        return min(solved.items(), key=lambda kv: kv[1][1].chamfer_px)[0], {}
+    win = max(scores, key=scores.get)
+    return win, scores
+
+
 def rerank_candidates(
-    terrain, cam_z, w, h, fov_deg, candidates, photo_mask, de=0.0, dn=0.0, tilt_deg=0.0,
-    chamfer_slack: float = 1.3, max_eval: int = 6,
+    terrain,
+    cam_z,
+    w,
+    h,
+    fov_deg,
+    candidates,
+    photo_mask,
+    de=0.0,
+    dn=0.0,
+    tilt_deg=0.0,
+    chamfer_slack: float = 1.3,
+    max_eval: int = 6,
 ) -> list[dict]:
     """Score a solver's polished (chamfer, yaw, dv) candidates by weighted explanation.
 

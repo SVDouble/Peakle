@@ -32,8 +32,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from peakle.localize.copdem import load_cop_around
+from peakle.localize.explanation import arbitrate_by_explanation
 from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, oracle_skyline
+from peakle.localize.photo_support import edge_mask
 from peakle.localize.solve import HorizonProfile, OrientationSolve, _best_shift_chamfer, solve_orientation
 
 BASE = Path(__file__).resolve().parents[1]
@@ -124,7 +126,9 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
     oracle = _resample(oracle_raw, w_p) * (h_p / h_o)
     # GeoPose3K crops carry vertical offsets up to ~1.2·b (measured +48° worst) — the default
     # ±30° pitch bound put the true alignment OUTSIDE the search for every high-pitch sample
-    s_oracle = solve_orientation(oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS)
+    s_oracle = solve_orientation(
+        oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS
+    )
     rec["oracle"] = solve_record(s_oracle, gt.yaw_gt_deg, gt.pitch_gt_deg)
 
     # GT consistency: chamfer between the GT-depth skyline and OUR DEM rendered at the GT yaw
@@ -139,7 +143,10 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
     # ---- extracted track: solve every skyline hypothesis, the DEM chamfer arbitrates ----
     cands = _candidates(rgb, extractor)
     solved = {
-        name: (c, solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS))
+        name: (
+            c,
+            solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS),
+        )
         for name, c in cands.items()
         if c.coverage >= 0.25
     }
@@ -153,11 +160,25 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
         }
         if name in solved:
             s_c = solved[name][1]
-            entry.update(yaw_err=round(ang_err(s_c.yaw_deg, gt.yaw_gt_deg), 2), chamfer_px=round(s_c.chamfer_px, 2), verdict=s_c.verdict)
+            entry.update(
+                yaw_err=round(ang_err(s_c.yaw_deg, gt.yaw_gt_deg), 2),
+                chamfer_px=round(s_c.chamfer_px, 2),
+                verdict=s_c.verdict,
+            )
         rec["candidates"][name] = entry
 
     if solved:
-        win_name, (win_c, s_extr) = min(solved.items(), key=lambda kv: kv[1][1].chamfer_px)
+        # Winner selection: among skyline hypotheses within a tight chamfer slack of the best,
+        # pick the one whose typed DEM outlines best EXPLAIN the photo edges — this disambiguates
+        # the lake/false-skyline class (a water edge fits the skyline but leaves ridges unexplained)
+        # that a chamfer-only winner loses.  Validated on bench-60: +3 correct, 0 regressions.
+        edges = edge_mask(rgb)
+        if edges is not None and len(solved) > 1:
+            win_name, expl_scores = arbitrate_by_explanation(solved, terrain, cam_z, w_p, h_p, gt.fov_deg, edges)
+            rec["extracted_explanation"] = {k: round(v, 3) for k, v in expl_scores.items()}
+        else:
+            win_name = min(solved.items(), key=lambda kv: kv[1][1].chamfer_px)[0]
+        win_c, s_extr = solved[win_name]
         rivals = [s for _, (_, s) in solved.items() if s.chamfer_px <= 1.3 * s_extr.chamfer_px]
         spread = max((abs(ang_err(a.yaw_deg, b.yaw_deg)) for a in rivals for b in rivals), default=0.0)
         rec["extracted"] = solve_record(s_extr, gt.yaw_gt_deg, gt.pitch_gt_deg)
@@ -168,7 +189,12 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path, extractor: 
             rec["extracted"]["verdict"] = "AMBIGUOUS"  # plausible hypotheses disagree on yaw
         ext_rows = win_c.rows
     else:
-        rec["extracted"] = {"correct": False, "verdict": "REJECTED", "yaw_err": float("nan"), "note": "no usable skyline"}
+        rec["extracted"] = {
+            "correct": False,
+            "verdict": "REJECTED",
+            "yaw_err": float("nan"),
+            "note": "no usable skyline",
+        }
         ext_rows = np.full(w_p, np.nan)
         s_extr = None
 
@@ -210,10 +236,10 @@ def _overlay(rgb, gt, profile, extracted, oracle_rows, s_extr, out_path: Path) -
         if len(pts) > 1:
             dr.line(pts, fill=color, width=width)
 
-    draw(oracle_rows, (0, 255, 90))                                                   # GT depth skyline
-    draw(extracted, (255, 70, 70))                                                    # photo extraction
-    draw(profile.rows_cyl_tan(w, h, gt.fov_deg, s_extr.yaw_deg, s_extr.pitch_deg), (255, 225, 0))   # solved
-    draw(profile.rows_cyl_tan(w, h, gt.fov_deg, gt.yaw_gt_deg, gt.pitch_gt_deg), (0, 200, 255))     # DEM @ GT
+    draw(oracle_rows, (0, 255, 90))  # GT depth skyline
+    draw(extracted, (255, 70, 70))  # photo extraction
+    draw(profile.rows_cyl_tan(w, h, gt.fov_deg, s_extr.yaw_deg, s_extr.pitch_deg), (255, 225, 0))  # solved
+    draw(profile.rows_cyl_tan(w, h, gt.fov_deg, gt.yaw_gt_deg, gt.pitch_gt_deg), (0, 200, 255))  # DEM @ GT
     dr.rectangle([0, 0, w, 18], fill=(0, 0, 0))
     dr.text(
         (4, 3),
@@ -227,10 +253,14 @@ def _overlay(rgb, gt, profile, extracted, oracle_rows, s_extr, out_path: Path) -
 def summarize(rows: list[dict]) -> str:
     def rate(rs, track):
         ok = [r for r in rs if r.get(track, {}).get("correct")]
-        return f"{len(ok)}/{len(rs)}" + (f" ({len(ok)/len(rs):.0%})" if rs else "")
+        return f"{len(ok)}/{len(rs)}" + (f" ({len(ok) / len(rs):.0%})" if rs else "")
 
     lines = ["# GeoPose3K orientation benchmark", ""]
-    for label, sel in [("ALL", rows), ("MANUAL", [r for r in rows if r["manual"]]), ("AUTO", [r for r in rows if not r["manual"]])]:
+    for label, sel in [
+        ("ALL", rows),
+        ("MANUAL", [r for r in rows if r["manual"]]),
+        ("AUTO", [r for r in rows if not r["manual"]]),
+    ]:
         if not sel:
             continue
         lines += [
@@ -239,7 +269,12 @@ def summarize(rows: list[dict]) -> str:
             f"- extracted-track success: **{rate(sel, 'extracted')}**",
             "",
         ]
-    lines += ["## Per-sample", "", "| sample | src | GT yaw | oracle err | extr err | extr_qual px | oracle verdict | extr verdict |", "|---|---|---|---|---|---|---|---|"]
+    lines += [
+        "## Per-sample",
+        "",
+        "| sample | src | GT yaw | oracle err | extr err | extr_qual px | oracle verdict | extr verdict |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for r in rows:
         o, e = r.get("oracle", {}), r.get("extracted", {})
         lines.append(
@@ -259,8 +294,11 @@ def main() -> None:
     ap.add_argument("--extent-km", type=float, default=90.0)
     ap.add_argument("--grid", type=int, default=3000)
     ap.add_argument("--extractor", choices=["color", "sam3"], default="color")
-    ap.add_argument("--manifest", default=str(BASE / "scripts/geopose_manifest_60.txt"),
-                    help="pinned sample list; keeps runs comparable as the corpus grows")
+    ap.add_argument(
+        "--manifest",
+        default=str(BASE / "scripts/geopose_manifest_60.txt"),
+        help="pinned sample list; keeps runs comparable as the corpus grows",
+    )
     args = ap.parse_args()
 
     needed = ("info.txt", "cyl/photo_crop.jpg", "cyl/distance_crop.pfm")
@@ -290,8 +328,8 @@ def main() -> None:
         o = rec.get("oracle", {})
         e = rec.get("extracted", {})
         print(
-            f"[{i+1}/{len(dirs)}] {d.name}: oracle {o.get('yaw_err', 'ERR'):>6} extr {e.get('yaw_err', 'ERR'):>6} "
-            f"({time.time()-t0:.0f}s)",
+            f"[{i + 1}/{len(dirs)}] {d.name}: oracle {o.get('yaw_err', 'ERR'):>6} extr {e.get('yaw_err', 'ERR'):>6} "
+            f"({time.time() - t0:.0f}s)",
             flush=True,
         )
 
