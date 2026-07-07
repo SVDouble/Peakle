@@ -33,7 +33,7 @@ export function createTerrainGroup(terrain, frame, peaks) {
   const group = new THREE.Group();
   const { mesh, setShadingMode, setContours } = createTerrainMesh(terrain, frame, peaks);
   group.add(mesh);
-  group.add(createBasePlane());
+  group.add(createBasePlane(frame));
   return { group, mesh, setShadingMode, setContours };
 }
 
@@ -133,7 +133,7 @@ varying vec3 vObjNormal;`,
       .replace(
         "#include <begin_vertex>",
         `#include <begin_vertex>
-vTerrainElevation = position.y / float(${TERRAIN_HEIGHT.toFixed(4)});
+vTerrainElevation = position.y / float(${(frame.sceneH ?? TERRAIN_HEIGHT).toFixed(4)});
 vRegionHue = regionHue;
 vObjNormal = normalize(normal);`,
       );
@@ -223,8 +223,8 @@ float peakleContour(float elevM, float interval) {
   return { material, uniforms };
 }
 
-function createBasePlane() {
-  const geometry = new THREE.PlaneGeometry(TERRAIN_WIDTH * 1.05, TERRAIN_DEPTH * 1.05);
+function createBasePlane(frame) {
+  const geometry = new THREE.PlaneGeometry((frame.sceneW ?? TERRAIN_WIDTH) * 1.05, (frame.sceneD ?? TERRAIN_DEPTH) * 1.05);
   const material = new THREE.MeshStandardMaterial({ color: 0x1f2d22, roughness: 0.95, metalness: 0, side: THREE.FrontSide });
   const plane = new THREE.Mesh(geometry, material);
   plane.rotation.x = -Math.PI / 2;

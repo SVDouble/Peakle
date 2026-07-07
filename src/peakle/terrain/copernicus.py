@@ -30,8 +30,12 @@ def load_copernicus_terrain(
     The terrain origin is the requested coordinate (a camera there sits at local 0,0).
     """
 
-    cop = load_cop_around(tile_dir, center_lat_deg, center_lon_deg, extent_m=extent_m, grid=grid)
-    elevation = cop.elevation_m.astype(np.float64)
+    # Sample at 2x the target grid and mean-pool: point-sampling a 30 m surface model at
+    # ~75 m spacing aliases badly — the mesh reads as spiky/rugged (user-reported).
+    cop = load_cop_around(tile_dir, center_lat_deg, center_lon_deg, extent_m=extent_m, grid=grid * 2)
+    elevation = cop.elevation_m.astype(np.float64).reshape(grid, 2, grid, 2).mean(axis=(1, 3))
+    x_m = cop.x_m.reshape(grid, 2).mean(axis=1)
+    y_m = cop.y_m.reshape(grid, 2).mean(axis=1)
     elev_min = float(elevation.min())
     elev_max = max(float(elevation.max()), elev_min + 1.0)
     spec = TerrainSpec(
@@ -44,13 +48,13 @@ def load_copernicus_terrain(
         max_elevation_m=elev_max,
         seed=0,
     )
-    x_grid, y_grid = np.meshgrid(cop.x_m, cop.y_m)
+    x_grid, y_grid = np.meshgrid(x_m, y_m)
     lat_grid = center_lat_deg + np.degrees(y_grid / EARTH_RADIUS_M)
     lon_grid = center_lon_deg + np.degrees(x_grid / (EARTH_RADIUS_M * np.cos(np.radians(center_lat_deg))))
     return TerrainMap(
         spec=spec,
-        x_m=cop.x_m.astype(np.float64),
-        y_m=cop.y_m.astype(np.float64),
+        x_m=x_m.astype(np.float64),
+        y_m=y_m.astype(np.float64),
         elevation_m=elevation,
         latitude_deg=lat_grid.astype(np.float64),
         longitude_deg=lon_grid.astype(np.float64),

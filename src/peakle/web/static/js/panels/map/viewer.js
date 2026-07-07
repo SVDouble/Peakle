@@ -11,7 +11,7 @@ import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame, verticalFovDeg } from "../../geometry.js";
 import { el, fitContainBox } from "../../format.js";
 import { buildSelectionLayer } from "./cameras.js";
-import { buildGtSpotsLayer } from "./gt-spots.js";
+import { buildGtSpotsLayer, terrainElevationAt } from "./gt-spots.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
 const CAMERA_INITIAL_POSITION = new THREE.Vector3(0.1, 1.55, 2.65);
@@ -88,12 +88,11 @@ export function setupMapPanel(store, root) {
   let gtSpotsLayer = null;
   let gtSpotLabels = [];
   let mode = "map";
-  // Two raycasters: `raycaster` stays unbounded for click-to-place picking, while
-  // `occlusionRaycaster` gets its near/far rewritten every frame for label hiding.
-  // Sharing one caused placement to fail, since the stale short `far` left by the
-  // occlusion pass clipped the pick ray before it reached the terrain.
+  // One raycaster, used only for click-to-place picking (a single cast per click).
+  // Label occlusion samples the elevation heightfield instead: raycasting the full
+  // terrain mesh per label per frame collapsed to ~4 fps on a focused 320x320 grid
+  // (user-reported lag).
   const raycaster = new THREE.Raycaster();
-  const occlusionRaycaster = new THREE.Raycaster();
 
   function rebuildTerrain() {
     if (!store.terrain) {
@@ -265,29 +264,43 @@ export function setupMapPanel(store, root) {
     return (Math.atan2(peak.local_position.east_m - local.east_m, peak.local_position.north_m - local.north_m) * 180) / Math.PI;
   }
 
+  // Heightfield line-of-sight: walk the camera->anchor segment and compare each
+  // sample's scene height against the terrain surface. O(steps) per label vs a
+  // full-mesh raycast; the last stretch near the anchor is skipped so a label
+  // hugging its own slope does not self-occlude.
+  const OCCLUSION_STEPS = 36;
+
+  function terrainOccludes(camPos, target) {
+    const t1 = 1 - Math.max(LABEL_OCCLUSION_MARGIN / Math.max(camPos.distanceTo(target), 1e-6), 0.04);
+    const zSpan = Math.max(frame.zMax - frame.zMin, 1);
+    for (let i = 1; i <= OCCLUSION_STEPS; i += 1) {
+      const t = (i / OCCLUSION_STEPS) * t1;
+      const x = camPos.x + (target.x - camPos.x) * t;
+      const y = camPos.y + (target.y - camPos.y) * t;
+      const z = camPos.z + (target.z - camPos.z) * t;
+      const local = sceneToLocalEastNorth({ x, z }, frame);
+      if (local.east_m < frame.xMin || local.east_m > frame.xMax || local.north_m < frame.yMin || local.north_m > frame.yMax) {
+        continue;
+      }
+      const elev = terrainElevationAt(store.terrain, local.east_m, local.north_m);
+      const surfaceY = ((elev - frame.zMin) / zSpan) * (frame.sceneH ?? 0.66);
+      if (y < surfaceY - 0.002) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function updateLabelOcclusion() {
     const cameraPosition = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
     const target = new THREE.Vector3();
-    const direction = new THREE.Vector3();
     const projected = new THREE.Vector3();
     for (const label of [...peakLabels, ...selectionLabels, ...gtSpotLabels]) {
       const anchor = label.userData.occlusionAnchor ?? label;
       anchor.getWorldPosition(target);
       projected.copy(target).project(camera);
       const inView = projected.z >= -1 && projected.z <= 1 && Math.abs(projected.x) <= 1.08 && Math.abs(projected.y) <= 1.08;
-      let occluded = false;
-      if (inView && terrainMesh) {
-        const distance = cameraPosition.distanceTo(target);
-        const rayLength = distance - LABEL_OCCLUSION_MARGIN;
-        if (rayLength > camera.near) {
-          direction.copy(target).sub(cameraPosition).normalize();
-          occlusionRaycaster.set(cameraPosition, direction);
-          occlusionRaycaster.near = camera.near;
-          occlusionRaycaster.far = rayLength;
-          occluded = occlusionRaycaster.intersectObject(terrainMesh, false).length > 0;
-        }
-      }
-      label.visible = inView && !occluded;
+      label.visible = inView && !(store.terrain && frame && terrainOccludes(cameraPosition, target));
     }
   }
 

@@ -11,7 +11,18 @@ export const TERRAIN_DEPTH = 1.72;
 export const TERRAIN_HEIGHT = 0.66;
 export const RASTER_EPSILON = 1e-8;
 
+// The scene box is derived from the terrain's REAL proportions (with mild vertical
+// emphasis), not fixed constants: squashing a square 24 km focus window into a
+// 2.35x1.72 box while stretching its relief to a fixed height made the mountains
+// read as rugged/exaggerated (user-reported).
+const SCENE_MAX_EXTENT = 3.0;
+const SCENE_Z_EMPHASIS = 1.35;
+
 export function terrainFrame(terrain) {
+  const xExtent = Math.max(terrain.x_max_m - terrain.x_min_m, 1);
+  const yExtent = Math.max(terrain.y_max_m - terrain.y_min_m, 1);
+  const zExtent = Math.max(terrain.elevation_max_m - terrain.elevation_min_m, 1);
+  const maxExtent = Math.max(xExtent, yExtent);
   return {
     xMin: terrain.x_min_m,
     xMax: terrain.x_max_m,
@@ -19,6 +30,9 @@ export function terrainFrame(terrain) {
     yMax: terrain.y_max_m,
     zMin: terrain.elevation_min_m,
     zMax: terrain.elevation_max_m,
+    sceneW: (SCENE_MAX_EXTENT * xExtent) / maxExtent,
+    sceneD: (SCENE_MAX_EXTENT * yExtent) / maxExtent,
+    sceneH: (SCENE_MAX_EXTENT * (zExtent / maxExtent)) * SCENE_Z_EMPHASIS,
   };
 }
 
@@ -34,14 +48,18 @@ export function localToScenePoint(localPoint, frame) {
   const east = normalize(localPoint.east_m, frame.xMin, frame.xMax) - 0.5;
   const north = normalize(localPoint.north_m, frame.yMin, frame.yMax) - 0.5;
   const elevation = normalize(localPoint.up_m, frame.zMin, frame.zMax);
-  return new THREE.Vector3(east * TERRAIN_WIDTH, elevation * TERRAIN_HEIGHT, -north * TERRAIN_DEPTH);
+  return new THREE.Vector3(
+    east * (frame.sceneW ?? TERRAIN_WIDTH),
+    elevation * (frame.sceneH ?? TERRAIN_HEIGHT),
+    -north * (frame.sceneD ?? TERRAIN_DEPTH),
+  );
 }
 
 // Inverse of localToScenePoint for the east/north plane (used when the user
 // clicks the terrain to place a camera).
 export function sceneToLocalEastNorth(point, frame) {
-  const east = (point.x / TERRAIN_WIDTH + 0.5) * (frame.xMax - frame.xMin) + frame.xMin;
-  const north = (-point.z / TERRAIN_DEPTH + 0.5) * (frame.yMax - frame.yMin) + frame.yMin;
+  const east = (point.x / (frame.sceneW ?? TERRAIN_WIDTH) + 0.5) * (frame.xMax - frame.xMin) + frame.xMin;
+  const north = (-point.z / (frame.sceneD ?? TERRAIN_DEPTH) + 0.5) * (frame.yMax - frame.yMin) + frame.yMin;
   return { east_m: east, north_m: north };
 }
 
