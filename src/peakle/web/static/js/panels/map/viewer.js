@@ -12,6 +12,7 @@ import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terra
 import { el, fitContainBox } from "../../format.js";
 import { buildSelectionLayer } from "./cameras.js";
 import { buildGtSpotsLayer, terrainElevationAt } from "./gt-spots.js";
+import { setupMinimap } from "./minimap.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
 const CAMERA_INITIAL_POSITION = new THREE.Vector3(0.1, 1.55, 2.65);
@@ -41,7 +42,29 @@ export function setupMapPanel(store, root) {
       }),
     ),
   );
-  root.replaceChildren(frameBox, el("div", { class: "map-hud" }, [povControls, hint]));
+  // 2D overview minimap: a collapsible Leaflet navigator in the corner. It lets
+  // the user move the heightmap anywhere (click to focus) while keeping the 3D
+  // view primary. Starts expanded; the toggle collapses it to a pill.
+  const minimapBox = el("div", { class: "minimap", id: "minimapBox" });
+  const minimapToggle = el("button", { type: "button", class: "minimap-toggle", title: "Toggle overview map", text: "🗺" });
+  const minimapWrap = el("div", { class: "minimap-wrap", id: "minimapWrap" }, [minimapToggle, minimapBox]);
+  root.replaceChildren(frameBox, minimapWrap, el("div", { class: "map-hud" }, [povControls, hint]));
+
+  let minimap = null;
+  const initMinimap = () => {
+    if (!minimap && minimapBox.clientWidth > 0) {
+      minimap = setupMinimap(store, minimapBox);
+    }
+  };
+  minimapToggle.addEventListener("click", () => {
+    minimapWrap.classList.toggle("collapsed");
+    if (!minimapWrap.classList.contains("collapsed")) {
+      requestAnimationFrame(() => {
+        initMinimap();
+        minimap?.invalidate();
+      });
+    }
+  });
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
   renderer.setClearColor(0x141512, 1);
@@ -218,6 +241,33 @@ export function setupMapPanel(store, root) {
     button.addEventListener("click", () => applyPov(button.dataset.pov));
   }
 
+  // Double-click any terrain point to recenter the geographic window there (the
+  // in-3D "move the map"): raycast the terrain, convert the hit to lat/lon via the
+  // frame's geographic corners, and focus the heightmap on it.
+  canvas.addEventListener("dblclick", (event) => {
+    if (mode !== "map" || !terrainMesh || !store.terrain?.lat_min_deg) {
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const pointer = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObject(terrainMesh, false);
+    if (!hits.length) {
+      return;
+    }
+    const local = sceneToLocalEastNorth(hits[0].point, frame);
+    const t = store.terrain;
+    const lon = t.lon_min_deg + ((local.east_m - t.x_min_m) / (t.x_max_m - t.x_min_m)) * (t.lon_max_deg - t.lon_min_deg);
+    const lat = t.lat_min_deg + ((local.north_m - t.y_min_m) / (t.y_max_m - t.y_min_m)) * (t.lat_max_deg - t.lat_min_deg);
+    hint.textContent = "Recentering map…";
+    store.focusScene(lat, lon).catch((error) => {
+      hint.textContent = error.message;
+    });
+  });
+
   // Click-to-place: raycast the terrain and create a view aimed at the tallest peak.
   let pointerDown = null;
   canvas.addEventListener("pointerdown", (event) => {
@@ -355,4 +405,6 @@ export function setupMapPanel(store, root) {
   });
   rebuildTerrain();
   syncPovButtons();
+  // The panel host has a size by the time layout settles; init on the next frame.
+  requestAnimationFrame(initMinimap);
 }

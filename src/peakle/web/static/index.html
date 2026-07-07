@@ -7,6 +7,7 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/dockview-core@6.6.1/dist/styles/dockview.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@awesome.me/webawesome@3.9.0/dist-cdn/styles/webawesome.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.1/dist/maplibre-gl.css" />
     <link rel="stylesheet" href="styles.css" />
 
     <!-- The import map must precede every module script in the document, so it
@@ -21,6 +22,8 @@
       }
     </script>
     <script type="module" src="https://cdn.jsdelivr.net/npm/@awesome.me/webawesome@3.9.0/dist-cdn/webawesome.loader.js"></script>
+    <!-- MapLibre GL JS (global maplibregl) for the WebGL 2D overview minimap. -->
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
   </head>
   <body>
     <div id="layoutRoot"></div>

@@ -149,7 +149,7 @@ class Scene:
             try:
                 find_hgt_tile(DEFAULT_DEM_DIR)
                 provider = "srtm"
-            except (FileNotFoundError, StopIteration, ValueError):
+            except FileNotFoundError, StopIteration, ValueError:
                 provider = "demo"
         config = SceneConfig(
             provider=provider,
@@ -198,7 +198,7 @@ class Scene:
         self._view_counter = 0
         self._solve_counter = 0
 
-    def focus_geo(self, lat_deg: float, lon_deg: float, extent_m: float = 24000.0) -> None:
+    def focus_geo(self, lat_deg: float, lon_deg: float, extent_m: float = 40000.0) -> None:
         """Recenters the map on a geographic point (Copernicus mosaic), clearing views.
 
         This is how the app jumps to a GT sample's location: the `.hgt` provider only covers

@@ -21,8 +21,8 @@ DEFAULT_COP_DIR = Path(__file__).resolve().parents[3] / "local/data/copernicus"
 def load_copernicus_terrain(
     center_lat_deg: float,
     center_lon_deg: float,
-    extent_m: float = 24000.0,
-    grid: int = 320,
+    extent_m: float = 40000.0,
+    grid: int = 480,
     tile_dir: Path = DEFAULT_COP_DIR,
 ) -> TerrainMap:
     """Square `extent_m` window centred on a lat/lon, as a `TerrainMap`.

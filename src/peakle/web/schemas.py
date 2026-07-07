@@ -46,7 +46,7 @@ class SceneFocusRequest(BaseModel):
 
     lat_deg: float = Field(ge=-90.0, le=90.0)
     lon_deg: float = Field(ge=-180.0, le=180.0)
-    extent_m: float = Field(default=24000.0, ge=2000.0, le=120000.0)
+    extent_m: float = Field(default=40000.0, ge=2000.0, le=120000.0)
 
 
 class ViewCreateRequest(BaseModel):
