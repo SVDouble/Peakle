@@ -31,14 +31,14 @@ class OrientationSolve:
     pitch_deg: float
     fov_deg: float
     chamfer_px: float
-    coverage: float                      # fraction of columns with an observed skyline
-    well_width_deg: float                # angular width of the chamfer basin around the solution
-    alias_ratio: float                   # best chamfer outside the basin / best chamfer (>1 good)
-    terrain_distinct_px: float           # how unlike the rest of the horizon the solved window is
-    snr: float                           # terrain_distinct_px / chamfer_px — fit noise vs signal
+    coverage: float  # fraction of columns with an observed skyline
+    well_width_deg: float  # angular width of the chamfer basin around the solution
+    alias_ratio: float  # best chamfer outside the basin / best chamfer (>1 good)
+    terrain_distinct_px: float  # how unlike the rest of the horizon the solved window is
+    snr: float  # terrain_distinct_px / chamfer_px — fit noise vs signal
     yaw_profile_deg: np.ndarray = field(repr=False)
     yaw_profile_chamfer: np.ndarray = field(repr=False)
-    self_profile_deg: np.ndarray = field(repr=False)      # terrain self-similarity scan (see snr)
+    self_profile_deg: np.ndarray = field(repr=False)  # terrain self-similarity scan (see snr)
     self_profile_chamfer: np.ndarray = field(repr=False)
     candidates: list[tuple[float, float, float]] = field(default_factory=list, repr=False)
     """Polished (chamfer, yaw, dv) pose candidates, best first — rerank fodder for
@@ -88,12 +88,18 @@ class HorizonProfile:
     """The one-time 360° horizon of a position, resampleable into any camera."""
 
     def __init__(
-        self, terrain, cam_up_m: float, step: float = 30.0, d_max: float | None = None,
-        cam_e: float = 0.0, cam_n: float = 0.0,
+        self,
+        terrain,
+        cam_up_m: float,
+        step: float = 30.0,
+        d_max: float | None = None,
+        cam_e: float = 0.0,
+        cam_n: float = 0.0,
     ):
         self.az_deg = np.arange(0.0, 360.0, AZ_STEP_DEG)
-        el = horizon_elevation(terrain, np.radians(self.az_deg), cam_up_m, step=step, d_max=d_max,
-                               cam_e=cam_e, cam_n=cam_n)
+        el = horizon_elevation(
+            terrain, np.radians(self.az_deg), cam_up_m, step=step, d_max=d_max, cam_e=cam_e, cam_n=cam_n
+        )
         self.el = el  # radians, NaN where the DEM had no sample
         self.cam_up_m = cam_up_m
 
@@ -114,7 +120,9 @@ class HorizonProfile:
         el = self._el_at(az)
         return (height - 1) / 2.0 - (el - math.radians(pitch_deg)) * (height / vfov)
 
-    def rows_cyl_tan(self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+    def rows_cyl_tan(
+        self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0
+    ) -> np.ndarray:
         """TRUE cylindrical projection: columns linear in azimuth, rows linear in tan(elevation).
         This is GeoPose3K's crop geometry — fitted empirically: on a 690px-amplitude skyline the
         el-linear mapping needs 1.79x the theoretical slope (impossible) while tan fits at 1.017.
@@ -127,14 +135,18 @@ class HorizonProfile:
         el = self._el_at(az)
         return (height - 1) / 2.0 - f * (np.tan(el) - math.tan(math.radians(pitch_deg)))
 
-    def rows_pinhole(self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+    def rows_pinhole(
+        self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0
+    ) -> np.ndarray:
         f = width / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
         cols = np.arange(width)
         az = yaw_deg + np.degrees(np.arctan((cols - (width - 1) / 2.0) / f))
         el = self._el_at(az)
         return (height - 1) / 2.0 - f * np.tan(el - math.radians(pitch_deg))
 
-    def rows(self, projection: str, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+    def rows(
+        self, projection: str, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0
+    ) -> np.ndarray:
         fn = {"cyl": self.rows_cyl, "cyltan": self.rows_cyl_tan, "pinhole": self.rows_pinhole}[projection]
         return fn(width, height, fov_deg, yaw_deg, pitch_deg)
 
@@ -193,7 +205,9 @@ def solve_orientation(
     obs = np.asarray(obs_rows, float)
     width = len(obs)
     coverage = float(np.isfinite(obs).mean())
-    fovs = [fov_deg] if isinstance(fov_deg, (int, float)) else list(np.arange(fov_deg[0], fov_deg[1] + 1e-9, fov_deg[2]))
+    fovs = (
+        [fov_deg] if isinstance(fov_deg, (int, float)) else list(np.arange(fov_deg[0], fov_deg[1] + 1e-9, fov_deg[2]))
+    )
 
     yaws = np.arange(0.0, 360.0, yaw_step_deg)
     best = None  # (chamfer, yaw, dv, fov, profile_ch, profile_dv)
@@ -251,8 +265,7 @@ def solve_orientation(
     # honest alias margin: best POLISHED rival outside the winning basin vs the winner
     alias = 1.0
     if not inside.all():
-        rivals = [c for c, y, _ in polished
-                  if not inside[int(np.argmin(np.abs(((yaws - y + 180) % 360) - 180)))]]
+        rivals = [c for c, y, _ in polished if not inside[int(np.argmin(np.abs(((yaws - y + 180) % 360) - 180)))]]
         if not rivals:  # every polished candidate fell inside the basin — polish the coarse outside best
             rival_i = int(np.argmin(np.where(inside, np.inf, prof_ch)))
             rivals = [_polish(float(yaws[rival_i]), float(prof_dv[rival_i]))[0]]
@@ -337,16 +350,16 @@ def _median_centered_shift_chamfer(
 
 
 def _provisional_verdict(s: OrientationSolve, cap_px: float) -> str:
-    """Calibrated on the clean-manual-274 GeoPose3K benchmark (scripts/calibrate_verdict.py,
-    2026-07-06, 543 solves): 0 wrong of 160 confirmations, recall 44%.  SNR (terrain
-    self-distinctiveness vs fit residual) is the load-bearing gate — the previous alias-led gate
-    passed a narrow-FOV doppelgänger (alias 2.3, snr 3.8... err +21°) at 99.2% precision; the
-    tightened combination removes it at a recall cost.  MUST be recalibrated after any
-    solver/search change; 100% precision on the bench is not a field guarantee.
+    """Recalibrated 2026-07-07 on the combined clean-manual + bench-60 runs (both scored
+    against the hybrid-targeted GT v2; scripts/calibrate_verdict.py): 0 wrong of 105
+    confirmations, recall 84% (the previous snr>=3 gate held precision 1.00 but only 44%
+    recall).  The tightened alias (1.5) + narrow well (10°) pair now excludes the narrow-FOV
+    doppelgänger class that originally motivated the SNR floor.  MUST be recalibrated after
+    any solver/search change; 100% precision on the bench is not a field guarantee.
     """
 
     if s.coverage < 0.25 or s.chamfer_px > 0.5 * cap_px:
         return "REJECTED"
-    if s.alias_ratio >= 1.05 and s.well_width_deg <= 20.0 and s.chamfer_px <= 15.0 and s.snr >= 3.0:
+    if s.alias_ratio >= 1.5 and s.well_width_deg <= 10.0 and s.chamfer_px <= 15.0:
         return "CONFIRMED"
     return "AMBIGUOUS"
