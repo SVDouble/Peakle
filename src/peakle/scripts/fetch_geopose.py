@@ -6,7 +6,7 @@ byte budget runs out.  Samples therefore come from the archive head: a known bia
 alphabetical order) that is still vastly better than the previous N=1 validation.  Incomplete
 trailing samples are pruned.
 
-Usage: python scripts/fetch_geopose.py [--budget-gb 4] [--dest local/data/geopose]
+Usage: python -m peakle.scripts.fetch_geopose [--budget-gb 4] [--dest local/data/geopose]
 """
 
 import argparse

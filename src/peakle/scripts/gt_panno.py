@@ -12,7 +12,7 @@ Each tile overlays what must agree if the GT (and our reconstruction of it) is g
 Tiles are sorted clean -> dirty by the polished GT consistency.  Output: tiles + a self-contained
 panno.html (artifact-ready).
 
-Usage: python scripts/gt_panno.py <bench_results.json> [--out DIR] [--no-polish]
+Usage: python -m peakle.scripts.gt_panno <bench_results.json> [--out DIR] [--no-polish]
 """
 
 from __future__ import annotations
@@ -35,8 +35,10 @@ from peakle.localize.gtrefine import (
     gt_contour_mask,
     refine_pose,
 )
+from peakle.localize.paths import BASE
+from peakle.localize.paths import COP_TILES_DIR as TILES
+from peakle.localize.paths import GEOPOSE_DIR as DATA
 
-from peakle.localize.paths import BASE, COP_TILES_DIR as TILES, GEOPOSE_DIR as DATA
 TILE_W = 640
 GREEN, CYAN, ORANGE = (0, 230, 90), (0, 200, 255), (255, 150, 30)
 
@@ -77,12 +79,12 @@ def build_tile(rec: dict, out: Path, do_polish: bool) -> dict:
     obs_arr = obs
     # GT internal contours (from the GT depth itself) — the reference the DEM contours must match
     rr, cc = np.nonzero(gt_mask)
-    for r, c in zip(rr.tolist(), cc.tolist()):
+    for r, c in zip(rr.tolist(), cc.tolist(), strict=True):
         if np.isfinite(obs_arr[c]) and abs(r - obs_arr[c]) < 5:
             continue  # skyline drawn separately
         px[c, r] = GREEN
     rr, cc = np.nonzero(contours)
-    for r, c in zip(rr.tolist(), cc.tolist()):
+    for r, c in zip(rr.tolist(), cc.tolist(), strict=True):
         if np.isfinite(dem_rows[c]) and abs(r - dem_rows[c]) < 5:
             continue  # the skyline itself is drawn in cyan; don't double it in orange
         px[c, r] = ORANGE

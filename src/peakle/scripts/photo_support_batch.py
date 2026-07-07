@@ -4,7 +4,7 @@ Resumable: samples with an existing support.json are skipped. Ends with the corp
 distribution per family and the worst offenders — GT lines the photograph does not show, which
 must be down-weighted in extractor grading and explanation matching.
 
-Usage: python scripts/photo_support_batch.py [--max-n N]
+Usage: python -m peakle.scripts.photo_support_batch [--max-n N]
 """
 
 from __future__ import annotations
@@ -43,7 +43,11 @@ def main() -> None:
             failed += 1
             print(f"[{i + 1}/{len(names)}] {name}: FAILED {exc}", flush=True)
 
-    rows = [(name, json.loads((LAYERS / name / "support.json").read_text())) for name in names if (LAYERS / name / "support.json").exists()]
+    rows = [
+        (name, json.loads((LAYERS / name / "support.json").read_text()))
+        for name in names
+        if (LAYERS / name / "support.json").exists()
+    ]
     print(f"\nbuilt {done}, skipped {skipped}, failed {failed}; support available for {len(rows)}")
     for src, stats in support_stats(rows).items():
         print(f"{src:4}: " + " | ".join(stats))

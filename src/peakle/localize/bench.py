@@ -1,4 +1,4 @@
-"""GeoPose3K orientation benchmark — the project's honesty harness (logic; CLI in scripts/).
+"""GeoPose3K orientation benchmark — the project's honesty harness (logic; CLI in peakle.scripts.bench_geopose).
 
 For every sample the camera POSITION and FOV are taken as known (the product use case: GPS +
 EXIF) and the solver recovers yaw/pitch twice:
@@ -104,12 +104,15 @@ def run_sample(
     rgb = np.asarray(Image.open(gt.photo_path).convert("RGB"), np.uint8)
     if rgb.shape[1] > MAX_W:
         s = MAX_W / rgb.shape[1]
-        rgb = np.asarray(Image.fromarray(rgb).resize((MAX_W, max(1, round(rgb.shape[0] * s))), Image.BILINEAR), np.uint8)
+        h2 = max(1, round(rgb.shape[0] * s))
+        rgb = np.asarray(Image.fromarray(rgb).resize((MAX_W, h2), Image.BILINEAR), np.uint8)
     h_p, w_p = rgb.shape[:2]
 
     # ---- oracle track (GT depth skyline, rescaled onto the standard geometry) ----
     oracle = _resample(oracle_skyline(gt.depth_path), w_p) * (h_p / _pfm_height(gt.depth_path))
-    s_oracle = solve_orientation(oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS)
+    s_oracle = solve_orientation(
+        oracle, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS
+    )
     rec["oracle"] = solve_record(s_oracle, gt.yaw_gt_deg, gt.pitch_gt_deg)
 
     # GT consistency: chamfer between the GT-depth skyline and OUR DEM rendered at the GT yaw —
@@ -122,7 +125,10 @@ def run_sample(
     # ---- extracted track: solve every skyline hypothesis, arbitrated by explanation ----
     cands = _candidates(rgb, extractor)
     solved = {
-        name: (c, solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS))
+        name: (
+            c,
+            solve_orientation(c.rows, h_p, profile, fov_deg=gt.fov_deg, projection="cyltan", pitch_bounds=PITCH_BOUNDS),
+        )
         for name, c in cands.items()
         if c.coverage >= 0.25
     }
@@ -135,7 +141,11 @@ def run_sample(
         }
         if name in solved:
             s_c = solved[name][1]
-            entry.update(yaw_err=round(ang_err(s_c.yaw_deg, gt.yaw_gt_deg), 2), chamfer_px=round(s_c.chamfer_px, 2), verdict=s_c.verdict)
+            entry.update(
+                yaw_err=round(ang_err(s_c.yaw_deg, gt.yaw_gt_deg), 2),
+                chamfer_px=round(s_c.chamfer_px, 2),
+                verdict=s_c.verdict,
+            )
         rec["candidates"][name] = entry
 
     if solved:
@@ -158,7 +168,9 @@ def run_sample(
             rec["extracted"]["verdict"] = "AMBIGUOUS"  # plausible hypotheses disagree on yaw
         ext_rows = win_c.rows
     else:
-        rec["extracted"] = {"correct": False, "verdict": "REJECTED", "yaw_err": float("nan"), "note": "no usable skyline"}
+        rec["extracted"] = {
+            "correct": False, "verdict": "REJECTED", "yaw_err": float("nan"), "note": "no usable skyline"
+        }
         ext_rows = np.full(w_p, np.nan)
         s_extr = None
 
@@ -226,7 +238,12 @@ def summarize(rows: list[dict]) -> str:
         return f"{len(ok)}/{len(rs)}" + (f" ({len(ok) / len(rs):.0%})" if rs else "")
 
     lines = ["# GeoPose3K orientation benchmark", ""]
-    for label, sel in [("ALL", rows), ("MANUAL", [r for r in rows if r["manual"]]), ("AUTO", [r for r in rows if not r["manual"]])]:
+    groups = [
+        ("ALL", rows),
+        ("MANUAL", [r for r in rows if r["manual"]]),
+        ("AUTO", [r for r in rows if not r["manual"]]),
+    ]
+    for label, sel in groups:
         if not sel:
             continue
         lines += [

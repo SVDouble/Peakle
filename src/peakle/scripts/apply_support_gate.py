@@ -2,9 +2,9 @@
 
 A sample whose GT skyline/occlusions have weak photo-edge support is photo-inconsistent — the
 dataset's own render disagrees with the photograph — and must not grade solvers. Run AFTER
-scripts/photo_support_batch.py.
+peakle.scripts.photo_support_batch.
 
-Usage: python scripts/apply_support_gate.py [--dry-run]
+Usage: python -m peakle.scripts.apply_support_gate [--dry-run]
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ Reads bench_geopose results.json file(s) and reports, with numbers not vibes: wh
 separate correct from wrong solves (per-feature AUC), the current gate's precision/recall, and the
 max-recall thresholds that keep ~100% precision. Scored on MANUAL-GT samples by default.
 
-Usage: python scripts/calibrate_verdict.py local/output/<dt>-geopose-bench/results.json [more.json]
+Usage: python -m peakle.scripts.calibrate_verdict local/output/<dt>-geopose-bench/results.json [more.json]
        [--include-auto]
 """
 
@@ -36,7 +36,8 @@ def main() -> None:
         if conf
         else "\ncurrent verdict: nothing CONFIRMED"
     )
-    print(f"correct solves not confirmed (lost recall): {sum(1 for r in good if r['verdict'] != 'CONFIRMED')}/{len(good)}")
+    lost = sum(1 for r in good if r['verdict'] != 'CONFIRMED')
+    print(f"correct solves not confirmed (lost recall): {lost}/{len(good)}")
 
     best = best_precision_gate(rows)
     if best:

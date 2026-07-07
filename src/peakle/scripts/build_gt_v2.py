@@ -5,10 +5,10 @@ Output (resumable — existing samples are skipped unless --force):
   local/derived/gt_v2/index.json           rebuilt at the end
 
 Usage:
-  python scripts/build_gt_v2.py --manifest scripts/geopose_manifest_60.txt
-  python scripts/build_gt_v2.py --manual            # all MANUAL samples in the corpus
-  python scripts/build_gt_v2.py --all               # every complete sample
-  python scripts/build_gt_v2.py --samples a,b,c
+  python -m peakle.scripts.build_gt_v2 --manifest src/peakle/scripts/geopose_manifest_60.txt
+  python -m peakle.scripts.build_gt_v2 --manual            # all MANUAL samples in the corpus
+  python -m peakle.scripts.build_gt_v2 --all               # every complete sample
+  python -m peakle.scripts.build_gt_v2 --samples a,b,c
 """
 
 from __future__ import annotations

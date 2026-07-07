@@ -8,7 +8,7 @@ For each of the worst-N in-Switzerland samples (by sky_cons): fetch tiles, joint
 search on the patched render (half-resolution columns for speed), fine polish, report
 before/after sky consistency and write an overlay.
 
-Usage: python scripts/swiss_refine.py [--worst-n 6] [--samples a,b,c]
+Usage: python -m peakle.scripts.swiss_refine [--worst-n 6] [--samples a,b,c]
 """
 
 from __future__ import annotations
@@ -24,9 +24,10 @@ from PIL import Image, ImageDraw
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.geopose import load_sample
 from peakle.localize.gtrefine import crop_az_deg, dem_skyline, shift_align
+from peakle.localize.paths import BASE
+from peakle.localize.paths import GTV2_DIR as GTV2
+from peakle.localize.paths import SWISS_DIR as SWISS
 from peakle.localize.swissdem import ensure_swiss_tiles, in_switzerland, load_swiss_patch
-
-from peakle.localize.paths import BASE, GTV2_DIR as GTV2, SWISS_DIR as SWISS
 
 
 def refine_sample(name: str, outdir: Path) -> dict:

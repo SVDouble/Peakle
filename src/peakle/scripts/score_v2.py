@@ -9,18 +9,17 @@ Reports, per track (oracle / extracted):
   - the outline picture per sample: GT contour density, DEM<->GT contour agreement — which
     samples can support outline-based matching at all.
 
-Usage: python scripts/score_v2.py <bench_results.json> [--gtv2 local/derived/gt_v2/index.json]
+Usage: python -m peakle.scripts.score_v2 <bench_results.json> [--gtv2 local/derived/gt_v2/index.json]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 
-BASE = Path(__file__).resolve().parents[1]
+from peakle.localize.paths import BASE
 
 
 def ang(a: float) -> float:
@@ -59,12 +58,14 @@ def main() -> None:
         "CLEAN+MANUAL": [j for j in joined if j[1] and j[1]["quality"] == "CLEAN" and j[0]["manual"]],
     }
     print(
-        f"\n{'tier':14} {'n':>3}  {'oracle@5raw':>12} {'oracle@5ref':>12} {'oracle@2ref':>12}  {'extr@5ref':>10} {'extr@2ref':>10}"
+        f"\n{'tier':14} {'n':>3}  {'oracle@5raw':>12} {'oracle@5ref':>12} {'oracle@2ref':>12}  "
+        f"{'extr@5ref':>10} {'extr@2ref':>10}"
     )
     for tier, sel in tiers.items():
         print(
             f"{tier:14} {len(sel):3}  {rate(sel, 'oracle', 'raw', 5):>12} {rate(sel, 'oracle', 'ref', 5):>12} "
-            f"{rate(sel, 'oracle', 'ref', 2):>12}  {rate(sel, 'extracted', 'ref', 5):>10} {rate(sel, 'extracted', 'ref', 2):>10}"
+            f"{rate(sel, 'oracle', 'ref', 2):>12}  "
+            f"{rate(sel, 'extracted', 'ref', 5):>10} {rate(sel, 'extracted', 'ref', 2):>10}"
         )
 
     # outline availability: which samples can support contour-based matching

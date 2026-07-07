@@ -14,6 +14,7 @@ import math
 
 import numpy as np
 import pytest
+from scipy.ndimage import distance_transform_edt
 
 from peakle.localize.gtrefine import (
     contour_chamfer,
@@ -25,7 +26,6 @@ from peakle.localize.gtrefine import (
     refine_pose,
     rows_from_el,
 )
-from scipy.ndimage import distance_transform_edt
 
 W, H = 480, 360
 FOV = 60.0
@@ -125,7 +125,7 @@ def test_refine_pose_roundtrip_recovers_injected_label_error():
 
     # label is wrong by +2 deg yaw and (0,0) position; the polish must find the truth
     fit = refine_pose(terrain, cam_z, obs, W, H, FOV, yaw_label=true_yaw + 2.0, gt_dt=gt_dt)
-    assert abs((fit["dyaw"] + 2.0)) <= 0.75, fit["dyaw"]  # recovered dyaw ≈ -2.0
+    assert abs(fit["dyaw"] + 2.0) <= 0.75, fit["dyaw"]  # recovered dyaw ≈ -2.0
     # position is identifiable only to ~50 m on this terrain (measured: a 50 m-off position
     # scores the same contour chamfer as the truth) — the tolerance reflects that floor
     assert abs(fit["de"] - true_de) <= 60.0 and abs(fit["dn"] - true_dn) <= 60.0, (fit["de"], fit["dn"])

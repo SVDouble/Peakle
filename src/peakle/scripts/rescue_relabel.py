@@ -8,7 +8,7 @@ centre, and re-run the normal contour-arbitrated polish around it.  Reports old 
 reconstruction plus the solver's own honesty diagnostics (a rescue is only proposed when the
 solve is not an alias).
 
-Usage: python scripts/rescue_relabel.py [--max-n 9]
+Usage: python -m peakle.scripts.rescue_relabel [--max-n 9]
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ from scipy.ndimage import distance_transform_edt
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.geopose import load_sample, read_pfm
 from peakle.localize.gtrefine import gt_contour_mask, refine_pose
+from peakle.localize.paths import BASE
+from peakle.localize.paths import GTV2_DIR as GTV2
 from peakle.localize.solve import HorizonProfile, solve_orientation
-
-from peakle.localize.paths import BASE, GTV2_DIR as GTV2
 
 
 def is_bound_hitter(r: dict) -> bool:

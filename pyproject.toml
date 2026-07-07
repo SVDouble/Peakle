@@ -37,6 +37,15 @@ target-version = "py314"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# Presentation/experiment runners carry inherently long lines — HTML/CSS report templates and
+# image-annotation draw calls — where wrapping to 120 hurts readability. The cap is relaxed for
+# these files only; every other rule (and every other file) stays strict.
+"src/peakle/scripts/build_gt_report_html.py" = ["E501"]
+"src/peakle/scripts/gt_report.py" = ["E501"]
+"src/peakle/scripts/gt_panno.py" = ["E501"]
+"src/peakle/scripts/run_sam3.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

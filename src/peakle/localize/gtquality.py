@@ -10,7 +10,7 @@ this trustworthy enough to grade solvers on":
                       ~100% precision at the best recall, plus which diagnostics separate correct
                       from wrong solves (per-feature AUC).
 
-The thin CLIs in scripts/ (apply_support_gate.py, calibrate_verdict.py, photo_support_batch.py)
+The thin CLIs (peakle.scripts.apply_support_gate / calibrate_verdict / photo_support_batch)
 call these.
 """
 
@@ -137,7 +137,9 @@ def diagnostic_aucs(rows: list[dict]) -> list[tuple[str, float, float, float]]:
         a = auc(gp, bp)
         if invert and np.isfinite(a):
             a = 1.0 - a
-        out.append((key, float(np.median(gp)) if gp.size else float("nan"), float(np.median(bp)) if bp.size else float("nan"), a))
+        med_gp = float(np.median(gp)) if gp.size else float("nan")
+        med_bp = float(np.median(bp)) if bp.size else float("nan")
+        out.append((key, med_gp, med_bp, a))
     return out
 
 
@@ -167,5 +169,8 @@ def best_precision_gate(rows: list[dict], min_precision: float = 0.999) -> dict 
         prec = sum(r["correct"] for r in sel) / len(sel)
         recall = sum(r["correct"] for r in sel) / max(len(good), 1)
         if prec >= min_precision and (best is None or recall > best["recall"]):
-            best = {"recall": recall, "alias": alias_t, "well": well_t, "chamfer": ch_t, "coverage": cov_t, "snr": snr_t, "n": len(sel)}
+            best = {
+                "recall": recall, "alias": alias_t, "well": well_t, "chamfer": ch_t,
+                "coverage": cov_t, "snr": snr_t, "n": len(sel),
+            }
     return best

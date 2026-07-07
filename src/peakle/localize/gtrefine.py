@@ -183,7 +183,7 @@ def dem_contour_mask(
     # vertical candidates: pixel r sees NEAR surface, pixel r-1 (above) sees FAR surface
     cand = np.abs(np.diff(logd, axis=0)) > jump
     rr, cc = np.nonzero(cand)
-    for r, c in zip(rr.tolist(), cc.tolist()):
+    for r, c in zip(rr.tolist(), cc.tolist(), strict=True):
         i_lo = min(hit_idx[r, c], hit_idx[r + 1, c])
         i_hi = max(hit_idx[r, c], hit_idx[r + 1, c])
         if i_lo < 0 or i_hi - i_lo < 3:
@@ -194,7 +194,7 @@ def dem_contour_mask(
     # horizontal candidates (vertical silhouettes): same gap test across neighbouring columns
     cand_h = np.abs(np.diff(logd, axis=1)) > jump
     rr, cc = np.nonzero(cand_h)
-    for r, c in zip(rr.tolist(), cc.tolist()):
+    for r, c in zip(rr.tolist(), cc.tolist(), strict=True):
         ia, ib = hit_idx[r, c], hit_idx[r, c + 1]
         if ia < 0 or ib < 0 or abs(ib - ia) < 3:
             continue
@@ -372,6 +372,10 @@ def quality_tier(
         if sky_support is not None and sky_support < GATE_PHOTO_SUPPORT:
             reasons.append(f"photo skyline barely on image edges (support {sky_support:.2f} < {GATE_PHOTO_SUPPORT})")
         if contour_cons is None or contour_cons > GATE_PHOTO_CONTOUR_PX:
-            detail = "no internal contours" if contour_cons is None else f"{contour_cons:.0f}px > {GATE_PHOTO_CONTOUR_PX:.0f}"
+            detail = (
+                "no internal contours"
+                if contour_cons is None
+                else f"{contour_cons:.0f}px > {GATE_PHOTO_CONTOUR_PX:.0f}"
+            )
             reasons.append(f"photo-targeted pose unconfirmed by contours ({detail})")
     return ("CLEAN" if not reasons else "SUSPECT"), reasons

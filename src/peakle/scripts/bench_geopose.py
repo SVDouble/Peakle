@@ -1,6 +1,6 @@
 """CLI for the GeoPose3K orientation benchmark (logic in peakle.localize.bench).
 
-Usage: python scripts/bench_geopose.py [--max-n 60] [--samples name1,name2] [--extent-km 90]
+Usage: python -m peakle.scripts.bench_geopose [--max-n 60] [--samples name1,name2] [--extent-km 90]
 Writes local/output/<dt>-geopose-bench/{results.json, summary.md, overlays/*.jpg}.
 """
 
@@ -14,8 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from peakle.localize.bench import find_sample_dirs, run_sample, summarize
-
-BASE = Path(__file__).resolve().parents[1]
+from peakle.localize.paths import BASE
 
 
 def main() -> None:
@@ -27,7 +26,7 @@ def main() -> None:
     ap.add_argument("--extractor", choices=["color", "sam3"], default="color")
     ap.add_argument(
         "--manifest",
-        default=str(BASE / "scripts/geopose_manifest_60.txt"),
+        default=str(Path(__file__).with_name("geopose_manifest_60.txt")),
         help="pinned sample list; keeps runs comparable as the corpus grows",
     )
     args = ap.parse_args()

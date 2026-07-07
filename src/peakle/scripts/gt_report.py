@@ -8,7 +8,7 @@ Produces the figures + JSON digest that docs/the GT report artifact embeds:
      yaw profile with basin + alias rival, the terrain self-similarity (SNR) scan, and the
      multi-hypothesis extraction arbitration.
 
-Usage: python scripts/gt_report.py <bench_results.json> [--out local/output/<dt>-gt-report]
+Usage: python -m peakle.scripts.gt_report <bench_results.json> [--out local/output/<dt>-gt-report]
 """
 
 from __future__ import annotations
@@ -28,9 +28,11 @@ from PIL import Image, ImageDraw
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, oracle_skyline, read_pfm
+from peakle.localize.paths import BASE
+from peakle.localize.paths import COP_TILES_DIR as TILES
+from peakle.localize.paths import GEOPOSE_DIR as DATA
+from peakle.localize.paths import STD_WIDTH as MAX_W
 from peakle.localize.solve import HorizonProfile, curve_chamfer, solve_orientation
-
-from peakle.localize.paths import BASE, COP_TILES_DIR as TILES, GEOPOSE_DIR as DATA, STD_WIDTH as MAX_W
 
 # validated reference palette (dataviz skill) — light surface
 INK, SEC, MUT = "#0b0b0b", "#52514e", "#898781"
@@ -261,7 +263,8 @@ def _oracle_std(sample, w: int, h: int) -> np.ndarray:
 
 
 def _draw_lines(rgb: np.ndarray, layers: list[tuple[np.ndarray, str, int]], header: str = "") -> Image.Image:
-    hex2rgb = lambda hx: tuple(int(hx[i : i + 2], 16) for i in (1, 3, 5))
+    def hex2rgb(hx):
+        return tuple(int(hx[i : i + 2], 16) for i in (1, 3, 5))
     im = Image.fromarray(np.clip(rgb.astype(float) * 1.15, 0, 255).astype(np.uint8))
     dr = ImageDraw.Draw(im)
     h, w = rgb.shape[:2]

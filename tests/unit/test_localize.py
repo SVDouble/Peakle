@@ -6,7 +6,6 @@ inverse requirement: on terrain whose skyline carries no yaw information the sol
 report a confident verdict, whatever the residual says.
 """
 
-import math
 
 import numpy as np
 import pytest
@@ -139,7 +138,7 @@ def test_dp_skyline_follows_strong_edge_chain():
     true_rows = (60 + 12 * np.sin(np.linspace(0, 3, w))).astype(int)
     score[true_rows, np.arange(w)] = 0.6
     rng = np.random.default_rng(0)
-    score[rng.integers(5, 25, 40), rng.integers(0, w, 40)] = 0.9   # bright isolated specks above
+    score[rng.integers(5, 25, 40), rng.integers(0, w, 40)] = 0.9  # bright isolated specks above
     rows = _dp_skyline(score)
     err = np.abs(rows - true_rows)
     assert np.median(err) <= 1.0 and err.max() <= 6.0, (np.median(err), err.max())

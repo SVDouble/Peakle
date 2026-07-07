@@ -15,17 +15,21 @@ Reads results/filter_lab/cache/*.npz (rgb/depth/dexined/red); runs SAM3 live.
 
 from __future__ import annotations
 
-import glob, json, os
+import glob
+import json
+import os
+
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage
 from scipy.ndimage import distance_transform_edt, gaussian_filter, gaussian_filter1d, median_filter
 from skimage.morphology import skeletonize
 
+from peakle.depth_cluster import filter_by_ridge_signal, keep_by_ridge_signal, normalize_depth
+from peakle.localize.paths import BASE as _BASE_PATH
 from peakle.segmenters import load_segmenter
-from peakle.depth_cluster import normalize_depth, filter_by_ridge_signal, keep_by_ridge_signal
 
-_BASE = str(__import__("pathlib").Path(__file__).resolve().parents[1])  # repo root
+_BASE = str(_BASE_PATH)  # repo root
 CACHE = f"{_BASE}/local/derived/cache"
 OUT = f"{_BASE}/local/output/sam3-pipeline"
 DE_DIR = f"{_BASE}/local/derived/diffusionedge"
@@ -42,10 +46,9 @@ PAL = (
 )
 _DEPTH_STOPS = np.array([(0.85, 0.12, 0.12), (0.95, 0.80, 0.20), (0.20, 0.70, 0.35), (0.20, 0.45, 0.92)])
 
-seg = load_segmenter(SEGMENTER)
-if seg is None:
-    raise SystemExit(f"segmenter {SEGMENTER!r} unavailable (for sam3: huggingface-cli login w/ facebook/sam3 access)")
-print(f"segmenter: {seg.name}", flush=True)
+# Loaded on run, not on import — pulling SAM3 weights into every `import peakle.scripts.*` is a
+# heavy, unwanted side effect. Functions read `seg` as a module global that __main__ sets.
+seg = None
 _depther = None
 
 
@@ -348,6 +351,10 @@ def process(name):
 
 
 if __name__ == "__main__":
+    seg = load_segmenter(SEGMENTER)
+    if seg is None:
+        raise SystemExit(f"segmenter {SEGMENTER!r} unavailable (for sam3: huggingface-cli login w/ facebook/sam3 access)")
+    print(f"segmenter: {seg.name}", flush=True)
     os.makedirs(OUT, exist_ok=True)
     summary = {}
     for p in sorted(glob.glob(f"{CACHE}/*.npz")):

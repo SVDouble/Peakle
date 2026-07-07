@@ -8,7 +8,7 @@ Extractors (pluggable, graded with the same scorer — peakle.localize.outline_s
 Per extractor: threshold sweep, report the best-F1 operating point with PER-FAMILY recall —
 R_internal is the number this benchmark exists to move (baseline ~0.03-0.26 from colour skylines).
 
-Usage: python scripts/outline_bench.py [--extractors color,dexined,sam3] [--max-n 20] [--manifest ...]
+Usage: python -m peakle.scripts.outline_bench [--extractors color,dexined,sam3] [--max-n 20] [--manifest ...]
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from PIL import Image
 
 from peakle.localize.extract import extract_candidates
 from peakle.localize.outline_score import rows_to_mask, score_outlines
-
-from peakle.localize.paths import BASE, GEOPOSE_DIR as DATA, GTV2_DIR as GTV2
+from peakle.localize.paths import GEOPOSE_DIR as DATA
+from peakle.localize.paths import GTV2_DIR as GTV2
 
 
 def load_rgb(name: str, w: int, h: int) -> np.ndarray:
@@ -75,7 +75,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--extractors", default="color,dexined,sam3")
     ap.add_argument("--max-n", type=int, default=20)
-    ap.add_argument("--manifest", default=str(BASE / "scripts/geopose_manifest_60.txt"))
+    ap.add_argument("--manifest", default=str(Path(__file__).with_name("geopose_manifest_60.txt")))
     args = ap.parse_args()
 
     index = {r["name"]: r for r in json.load(open(GTV2 / "index.json"))}
@@ -101,7 +101,10 @@ def main() -> None:
                 s = score_outlines(mask, GTV2 / f"{n}.npz")
                 per_variant.setdefault(tag, []).append(s)
         for tag, scores in per_variant.items():
-            med = lambda k: float(np.median([getattr(s, k) for s in scores]))
+
+            def med(k, scores=scores):
+                return float(np.median([getattr(s, k) for s in scores]))
+
             results[f"{ex_name} {tag}"] = [
                 med("precision"),
                 med("recall_skyline"),

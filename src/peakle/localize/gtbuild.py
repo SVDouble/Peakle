@@ -110,7 +110,9 @@ def build_one(
     fit = refine_pose(terrain, cam_z0, obs, w, h, s.fov_deg, yaw0, gt_dt)
 
     az = crop_az_deg(w, s.fov_deg, yaw0 + fit["dyaw"])
-    dem_mask = dem_contour_mask(terrain, fit["cam_z"], az, w, h, s.fov_deg, fit["dv"], fit["de"], fit["dn"], fit["tilt"])
+    dem_mask = dem_contour_mask(
+        terrain, fit["cam_z"], az, w, h, s.fov_deg, fit["dv"], fit["de"], fit["dn"], fit["tilt"]
+    )
 
     # secondary metric: reconstruction vs the pfm render, ALWAYS — keeps distributions comparable
     # across targeting modes (vs-photo cons carries a trees/extraction noise floor the DEM can't

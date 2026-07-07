@@ -6,7 +6,7 @@ pfm registration offset, photo support (if built), the missing-foreground check 
 vs DEM near-depth), Switzerland/fine-DEM eligibility — and CLASSIFIES each into failure causes.
 Writes a text report + photo/skyline composites for the top offenders.
 
-Usage: python scripts/worst_forensics.py [--worst-n 12]
+Usage: python -m peakle.scripts.worst_forensics [--worst-n 12]
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from peakle.localize.copdem import load_cop_around
 from peakle.localize.fg_check import foreground_report, photo_mono_depth
 from peakle.localize.geopose import load_sample
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image
+from peakle.localize.paths import BASE
+from peakle.localize.paths import GTV2_DIR as GTV2
 from peakle.localize.swissdem import in_switzerland
-
-from peakle.localize.paths import BASE, GTV2_DIR as GTV2
 
 
 def classify(rec: dict, fg: dict | None, ch: bool) -> list[str]:
@@ -39,7 +39,7 @@ def classify(rec: dict, fg: dict | None, ch: bool) -> list[str]:
     if rec.get("obs_source") == "pfm" and (rec.get("obs_support") or 1) < 0.5:
         causes.append(f"photo skyline weak (support {rec.get('obs_support')})")
     if ch:
-        causes.append("CH -> fine-DEM registration candidate (scripts/swiss_refine.py)")
+        causes.append("CH -> fine-DEM registration candidate (peakle.scripts.swiss_refine)")
     if not causes:
         causes.append("unexplained — eyeball the composite")
     return causes
