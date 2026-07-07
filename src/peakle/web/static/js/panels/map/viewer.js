@@ -9,11 +9,11 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 
 import { api } from "../../api.js";
-import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame, verticalFovDeg } from "../../geometry.js";
+import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame } from "../../geometry.js";
 import { el, fitContainBox } from "../../format.js";
 import { GT_LAYER_NAMES } from "../camera-image.js";
 import { buildSelectionLayer } from "./cameras.js";
-import { buildGtSpotsLayer, geoToLocal, terrainElevationAt } from "./gt-spots.js";
+import { buildGtSpotsLayer, terrainElevationAt } from "./gt-spots.js";
 import { setupMinimap } from "./minimap.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
@@ -213,54 +213,19 @@ export function setupMapPanel(store, root) {
     });
   }
 
-  // A GT sample carries a full refined pose (GPS + de/dn offset, refined yaw, dv->pitch,
-  // horizontal fov) but no View object, so it drives POV through this synthetic pose. This
-  // is why True POV now works for GT data — it was only ever wired to placed views before.
-  function gtPose(sample) {
-    if (!frame || !store.terrain?.lat_min_deg) {
-      return null;
-    }
-    const local = geoToLocal(store.terrain, sample.lat, sample.lon);
-    if (!local) {
-      return null;
-    }
-    const hfovRad = (sample.fov_deg * Math.PI) / 180;
-    const f = sample.width / hfovRad; // cyltan focal length, px/rad, same both axes
-    const pitchDeg = (Math.atan((sample.dv_px ?? 0) / f) * 180) / Math.PI;
-    const vfovDeg = (2 * Math.atan(sample.height / (2 * f)) * 180) / Math.PI;
-    return {
-      pose: {
-        position: { east_m: local.east_m + (sample.de_m ?? 0), north_m: local.north_m + (sample.dn_m ?? 0), up_m: sample.cam_z_m },
-        yaw_deg: sample.yaw_deg,
-        pitch_deg: pitchDeg,
-      },
-      vfovDeg,
-      aspect: sample.width / sample.height,
-      label: sample.name,
-    };
-  }
-
+  // The POV pose comes from the unified camera (placed view OR GT sample) — one path, no
+  // view-vs-GT branching. Returns { pose, vfovDeg, aspect, label } or null.
   function activePov(nextMode) {
-    const view = store.selectedView();
-    if (view?.true_extrinsics && (nextMode === "true" || store.selectedSolve())) {
-      if (nextMode === "true") {
-        return { pose: view.true_extrinsics, vfovDeg: verticalFovDeg(view.intrinsics), aspect: view.intrinsics.width_px / view.intrinsics.height_px, label: view.label };
-      }
-      const solve = store.selectedSolve();
-      if (solve) {
-        return { pose: solve.result.estimate.extrinsics, vfovDeg: verticalFovDeg(view.intrinsics), aspect: view.intrinsics.width_px / view.intrinsics.height_px, label: view.label };
-      }
-    }
-    const gtSample = store.selectedGtSample();
-    if (gtSample && nextMode === "true") {
-      return gtPose(gtSample);
-    }
-    return null;
+    const cam = store.selectedCamera();
+    const pose = cam?.scenePose(store.terrain, nextMode);
+    return pose ? { pose, vfovDeg: pose.vfovDeg, aspect: pose.aspect, label: cam.label } : null;
   }
 
-  // Sync the POV outline overlay with the Inspect panel: same enabled layers, same sample.
+  // Sync the POV outline overlay with the Inspect panel: same enabled layers, same sample. Only a
+  // GT camera has precomputed outline layers; a placed view shows its skyline via the inspector SVG.
   function updatePovOverlay() {
-    const sample = mode === "true" ? store.selectedGtSample() : null;
+    const cam = mode === "true" ? store.selectedCamera() : null;
+    const sample = cam?.kind === "gt" ? cam.sample : null;
     if (!sample) {
       if (povOverlay.childElementCount) {
         povOverlay.replaceChildren();

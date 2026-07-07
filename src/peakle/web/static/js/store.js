@@ -5,6 +5,8 @@
 // async actions, which call the API and then refresh local state.
 
 import { api } from "./api.js";
+import { gtCamera, viewCamera } from "./camera.js";
+import { geoToLocal, terrainElevationAt } from "./panels/map/gt-spots.js";
 
 class Store {
   constructor() {
@@ -67,6 +69,21 @@ class Store {
 
   selectedGtSample() {
     return this.selectedGtName ? this.gtByName(this.selectedGtName) : null;
+  }
+
+  // The unified selection: whichever of a placed view or a GT sample is active, normalized to the
+  // one camera shape the map POV, inspector, and markers all consume. This is the dedup — there is
+  // a single "selected camera", not two parallel selection paths.
+  selectedCamera() {
+    const view = this.selectedView();
+    if (view && view.true_extrinsics) {
+      return viewCamera(view, this.selectedSolve());
+    }
+    const sample = this.selectedGtSample();
+    if (sample) {
+      return gtCamera(sample, geoToLocal, terrainElevationAt);
+    }
+    return null;
   }
 
   // --- actions ---

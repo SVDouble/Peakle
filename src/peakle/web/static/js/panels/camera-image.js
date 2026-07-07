@@ -195,9 +195,10 @@ export function setupCameraPanel(store, root) {
   }
 
   function layoutAndDraw() {
-    const gtSample = store.selectedGtSample();
-    if (gtSample) {
-      layoutGtSample(gtSample);
+    // One selection source (the unified camera); dispatch to the render its kind needs.
+    const cam = store.selectedCamera();
+    if (cam?.kind === "gt") {
+      layoutGtSample(cam.sample);
       return;
     }
     gtControls.hidden = true;
