@@ -17,11 +17,13 @@ export function setupGtPanel(store, root) {
   const search = el("input", { class: "gt-search", placeholder: "Filter samples…", type: "text" });
   const hint = el("p", { class: "control-hint", text: "Loading GT dataset…" });
   const list = el("ul", { class: "gt-list" });
+  const rebuildButton = el("button", { type: "button", class: "gt-rebuild", text: "Rebuild filtered" });
 
   root.replaceChildren(
     el("div", { class: "control-block gt-block" }, [
       el("div", { class: "gt-head" }, [
         el("span", { class: "control-eyebrow", text: "GT dataset" }),
+        rebuildButton,
         el("a", { class: "gt-lab-link", href: "/gt", target: "_blank", text: "GT Lab ↗" }),
       ]),
       search,
@@ -29,6 +31,64 @@ export function setupGtPanel(store, root) {
       list,
     ]),
   );
+
+  // Rebuild the filtered set server-side (pose polish + metrics + tier, manual
+  // sidecars respected); the live list picks up fresh records as they land.
+  let rebuildTimer = null;
+
+  function filteredNames() {
+    const filter = search.value.trim().toLowerCase();
+    return (store.gtSamples ?? []).filter((s) => s.name.toLowerCase().includes(filter)).map((s) => s.name);
+  }
+
+  async function pollRebuild() {
+    try {
+      const st = await (await fetch("/api/gt/rebuild")).json();
+      if (st.running) {
+        const total = st.queue.length;
+        const n = st.done.length + st.failed.length;
+        hint.textContent = `rebuilding ${n}/${total} — ${st.current ?? "…"}`;
+        rebuildTimer = setTimeout(pollRebuild, 3000);
+        return;
+      }
+      rebuildButton.disabled = false;
+      rebuildButton.textContent = "Rebuild filtered";
+      const failed = st.failed?.length ? ` · ${st.failed.length} failed` : "";
+      hint.textContent = `rebuild finished: ${st.done?.length ?? 0} samples${failed}`;
+      store.gtSamples = null;
+      await store.loadGtSamples();
+    } catch {
+      rebuildTimer = setTimeout(pollRebuild, 5000);
+    }
+  }
+
+  rebuildButton.addEventListener("click", async () => {
+    const names = filteredNames().slice(0, 50);
+    if (!names.length) {
+      return;
+    }
+    if (names.length > 1 && !window.confirm(`Rebuild ${names.length} samples (~${Math.round(names.length * 0.6)} min)?`)) {
+      return;
+    }
+    rebuildButton.disabled = true;
+    rebuildButton.textContent = "Rebuilding…";
+    try {
+      const res = await fetch("/api/gt/rebuild", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names }),
+      });
+      if (!res.ok) {
+        throw new Error((await res.json()).detail ?? `rebuild failed: ${res.status}`);
+      }
+      clearTimeout(rebuildTimer);
+      pollRebuild();
+    } catch (error) {
+      rebuildButton.disabled = false;
+      rebuildButton.textContent = "Rebuild filtered";
+      hint.textContent = error.message;
+    }
+  });
 
   function inBounds(sample) {
     return store.terrain ? geoToLocal(store.terrain, sample.lat, sample.lon) !== null : false;

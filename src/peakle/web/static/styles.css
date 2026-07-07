@@ -945,3 +945,23 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   color: var(--muted);
   font-size: 11.5px;
 }
+
+.gt-rebuild {
+  margin-left: auto;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.gt-rebuild:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.gt-rebuild:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

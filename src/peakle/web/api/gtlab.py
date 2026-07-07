@@ -50,7 +50,9 @@ _COLORS = {
     "dem": {"sky": (0, 200, 255), "occ": (255, 70, 70), "rib": (80, 170, 255), "cou": (170, 90, 255)},
 }
 _BUILD_LOCK = threading.Lock()
-LAYER_NAMES = ["photo", "gt_depth", "dem_depth", "edges"] + [f"{s}_{f}" for s in ("gt", "dem") for f in ("sky", "occ", "rib", "cou")]
+LAYER_NAMES = ["photo", "gt_depth", "dem_depth", "edges"] + [
+    f"{s}_{f}" for s in ("gt", "dem") for f in ("sky", "occ", "rib", "cou")
+]
 
 
 def _index() -> dict[str, dict]:
@@ -63,7 +65,7 @@ def _index() -> dict[str, dict]:
         try:
             r = json.loads(p.read_text())
             records[r["name"]] = r
-        except (json.JSONDecodeError, KeyError):
+        except json.JSONDecodeError, KeyError:
             continue  # record mid-write by the builder
     if not records:
         raise HTTPException(503, "no GT v2 records — run scripts/build_gt_v2.py first")
@@ -81,12 +83,29 @@ async def list_samples() -> list[dict[str, Any]]:
 
     rows = sorted(_index().values(), key=lambda r: -worst(r))
     return [
-        {k: r.get(k) for k in (
-            "name", "manual", "quality", "reasons", "sky_cons_px", "pfm_cons_px", "obs_source",
-            "contour_cons_px",
-            "dyaw_deg", "de_m", "dn_m", "tilt_deg", "yaw_deg", "fov_deg", "gt_contour_density",
-            "width", "height",
-        )} | {"lat": _latlon(r["name"])[0], "lon": _latlon(r["name"])[1]}
+        {
+            k: r.get(k)
+            for k in (
+                "name",
+                "manual",
+                "quality",
+                "reasons",
+                "sky_cons_px",
+                "pfm_cons_px",
+                "obs_source",
+                "contour_cons_px",
+                "dyaw_deg",
+                "de_m",
+                "dn_m",
+                "tilt_deg",
+                "yaw_deg",
+                "fov_deg",
+                "gt_contour_density",
+                "width",
+                "height",
+            )
+        }
+        | {"lat": _latlon(r["name"])[0], "lon": _latlon(r["name"])[1]}
         for r in rows
     ]
 
@@ -178,7 +197,17 @@ def _build_layers_locked(name: str, rec: dict, out) -> None:
     terrain = load_cop_around(TILES, s.lat, s.lon, extent_m=90000.0, grid=3000)
     az = crop_az_deg(w, rec["fov_deg"], rec["yaw_deg"])
     depth, *_ = dem_depth_image(
-        terrain, rec["cam_z_m"], az, w, h, rec["fov_deg"], rec["dv_px"], rec["de_m"], rec["dn_m"], rec["tilt_deg"], sub=2
+        terrain,
+        rec["cam_z_m"],
+        az,
+        w,
+        h,
+        rec["fov_deg"],
+        rec["dv_px"],
+        rec["de_m"],
+        rec["dn_m"],
+        rec["tilt_deg"],
+        sub=2,
     )
     dem_typed = extract_typed_outlines(depth, min_px=12)  # sub=2 grid: same physical length
     (out / "dem_depth.png").write_bytes(_depth_png(depth, w, h))
@@ -198,14 +227,18 @@ def _build_layers_locked(name: str, rec: dict, out) -> None:
             return np.asarray(m) > 0
 
         masks = {
-            "gt_sky": _rows_mask(gt_sky, w, h), "gt_occ": full(gt_typed.occlusion),
-            "gt_rib": full(gt_typed.rib), "gt_cou": full(gt_typed.couloir),
-            "dem_sky": _rows_mask(dem_sky, w, h), "dem_occ": full(dem_typed.occlusion),
-            "dem_rib": full(dem_typed.rib), "dem_cou": full(dem_typed.couloir),
+            "gt_sky": _rows_mask(gt_sky, w, h),
+            "gt_occ": full(gt_typed.occlusion),
+            "gt_rib": full(gt_typed.rib),
+            "gt_cou": full(gt_typed.couloir),
+            "dem_sky": _rows_mask(dem_sky, w, h),
+            "dem_occ": full(dem_typed.occlusion),
+            "dem_rib": full(dem_typed.rib),
+            "dem_cou": full(dem_typed.couloir),
         }
-        (out / "support.json").write_text(json.dumps(
-            {k: (round(v, 3) if v is not None else None) for k, v in support_report(masks, edges).items()}
-        ))
+        (out / "support.json").write_text(
+            json.dumps({k: (round(v, 3) if v is not None else None) for k, v in support_report(masks, edges).items()})
+        )
 
 
 @router.get("/gt/samples/{name}/meta")
@@ -230,13 +263,15 @@ def _terrain_for(name: str):
 def _adjusted_rows(rec: dict, dyaw: float, de: float, dn: float) -> np.ndarray:
     terrain = _terrain_for(rec["name"])
     az = crop_az_deg(rec["width"], rec["fov_deg"], rec["yaw_deg"] + dyaw)
-    return dem_skyline(terrain, rec["cam_z_m"], az, rec["width"], rec["height"], rec["fov_deg"],
-                       rec["de_m"] + de, rec["dn_m"] + dn)
+    return dem_skyline(
+        terrain, rec["cam_z_m"], az, rec["width"], rec["height"], rec["fov_deg"], rec["de_m"] + de, rec["dn_m"] + dn
+    )
 
 
 @router.get("/gt/samples/{name}/skyline")
-async def sample_skyline(name: str, dyaw: float = 0.0, de: float = 0.0, dn: float = 0.0,
-                         dv: float = 0.0) -> dict[str, Any]:
+async def sample_skyline(
+    name: str, dyaw: float = 0.0, de: float = 0.0, dn: float = 0.0, dv: float = 0.0
+) -> dict[str, Any]:
     """DEM skyline rows at the sample's refined pose plus manual deltas (adjust preview)."""
 
     rec = _index().get(name)
@@ -281,12 +316,70 @@ async def save_adjust(name: str, body: dict[str, float]) -> dict[str, Any]:
         (GTV2 / f"{name}.json").write_text(json.dumps(rec, indent=1))
         manual_dir = GTV2 / "manual"
         manual_dir.mkdir(exist_ok=True)
-        (manual_dir / f"{name}.json").write_text(json.dumps(
-            {"yaw_deg": rec["yaw_deg"], "de_m": rec["de_m"], "dn_m": rec["dn_m"], "dv_px": rec["dv_px"]}
-        ))
+        (manual_dir / f"{name}.json").write_text(
+            json.dumps({"yaw_deg": rec["yaw_deg"], "de_m": rec["de_m"], "dn_m": rec["dn_m"], "dv_px": rec["dv_px"]})
+        )
         return rec
 
     return await to_thread.run_sync(apply)
+
+
+# --- on-demand rebuild of a set of samples (runs build_gt_v2.build_one in a worker thread) ---
+_REBUILD = {"running": False, "queue": [], "done": [], "failed": [], "current": None}
+_REBUILD_LOCK = threading.Lock()
+_REBUILD_CAP = 50
+
+
+def _builder():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("gt_v2_builder", BASE / "scripts/build_gt_v2.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.build_one
+
+
+def _rebuild_worker(names: list[str]) -> None:
+    try:
+        build_one = _builder()
+        for name in names:
+            _REBUILD["current"] = name
+            try:
+                build_one(name)
+                _REBUILD["done"].append(name)
+            except Exception as exc:  # noqa: BLE001 - one bad sample must not kill the batch
+                _REBUILD["failed"].append({"name": name, "error": str(exc)[:200]})
+    finally:
+        _REBUILD["current"] = None
+        _REBUILD["running"] = False
+
+
+@router.post("/gt/rebuild")
+async def start_rebuild(body: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild a set of GT records (pose polish + metrics + tier) in the background.
+
+    A manual-adjust sidecar, if present, seeds each sample's polish. Records are
+    rewritten one by one, so the live sample list shows fresh metrics as they land
+    and the layer PNG caches invalidate via record mtime."""
+
+    names = list(dict.fromkeys(body.get("names") or []))[:_REBUILD_CAP]
+    if not names:
+        raise HTTPException(400, "names is empty")
+    idx = _index()
+    unknown = [n for n in names if n not in idx]
+    if unknown:
+        raise HTTPException(404, f"unknown samples: {unknown[:5]}")
+    with _REBUILD_LOCK:
+        if _REBUILD["running"]:
+            raise HTTPException(409, "a rebuild is already running")
+        _REBUILD.update(running=True, queue=names, done=[], failed=[], current=None)
+    threading.Thread(target=_rebuild_worker, args=(names,), daemon=True).start()
+    return _REBUILD
+
+
+@router.get("/gt/rebuild")
+async def rebuild_status() -> dict[str, Any]:
+    return _REBUILD
 
 
 @router.get("/gt/samples/{name}/layers/{layer}.png")
@@ -301,8 +394,7 @@ async def sample_layer(name: str, layer: str) -> Response:
     await to_thread.run_sync(_build_layers, name)
     if not path.exists():
         raise HTTPException(404, f"layer {layer} unavailable for {name}")
-    return Response(path.read_bytes(), media_type="image/png",
-                    headers={"Cache-Control": "max-age=60"})
+    return Response(path.read_bytes(), media_type="image/png", headers={"Cache-Control": "max-age=60"})
 
 
 @router.get("/gt/samples/{name}/thumb.jpg")
@@ -313,15 +405,16 @@ async def sample_thumb(name: str) -> Response:
         raise HTTPException(400, "bad sample name")
     path = LAYERS / name / "thumb.jpg"
     if not path.exists():
+
         def build() -> None:
             s = load_sample(DATA / name)
             im = Image.open(s.photo_path).convert("RGB")
             im.thumbnail((128, 128), Image.BILINEAR)
             path.parent.mkdir(parents=True, exist_ok=True)
             im.save(path, "JPEG", quality=82)
+
         try:
             await to_thread.run_sync(build)
         except FileNotFoundError:
             raise HTTPException(404, f"unknown sample {name}") from None
-    return Response(path.read_bytes(), media_type="image/jpeg",
-                    headers={"Cache-Control": "max-age=86400"})
+    return Response(path.read_bytes(), media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
