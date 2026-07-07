@@ -1,74 +1,97 @@
 "use strict";
 
-// One camera abstraction for the whole UI. A placed View and a GT sample are both "cameras" —
-// a pose you can look through, a photo/render you can inspect, and outlines you can overlay — so
-// the map POV, the inspector, and the map markers consume this single shape instead of branching
-// on view-vs-GT everywhere. The two data sources differ only inside these adapters.
+// One camera type for the whole UI. A placed view and a GT sample are the SAME thing — a camera
+// with a pose you look through, an image you inspect, and outlines you overlay. They differ only
+// in two data facts the user named: a GT sample's image is IMMUTABLE (a photograph, not a
+// re-render) and it carries a PRIOR pose (the dataset label). Everything behavioural —
+// resolving the pose into the scene, POV, inspection — is shared here; the two builders at the
+// bottom just extract source-specific fields into the same shape.
 
 import { verticalFovDeg } from "./geometry.js";
+import { geoToLocal } from "./panels/map/gt-spots.js";
 
-// --- placed View (synthetic camera on the current terrain, optionally solved) ---
+// A pose descriptor is frame-tagged: "local" (already in the scene's east/north/up frame, a placed
+// view) or "geo" (a global lat/lon + refined offset, a GT sample). resolvePose is the single place
+// that difference lives — every consumer just asks the camera for scenePose(terrain, mode).
+function resolvePose(desc, terrain) {
+  if (!desc) {
+    return null;
+  }
+  let position;
+  if (desc.frame === "geo") {
+    if (!terrain?.lat_min_deg) {
+      return null;
+    }
+    const local = geoToLocal(terrain, desc.lat, desc.lon);
+    if (!local) {
+      return null; // sample is outside the current terrain window
+    }
+    position = { east_m: local.east_m + (desc.de_m ?? 0), north_m: local.north_m + (desc.dn_m ?? 0), up_m: desc.up_m };
+  } else {
+    position = desc.position;
+  }
+  return { position, yaw_deg: desc.yaw_deg, pitch_deg: desc.pitch_deg, vfovDeg: desc.vfovDeg, aspect: desc.aspect };
+}
+
+class Camera {
+  constructor(fields) {
+    Object.assign(this, fields); // kind, id, label, aspect, poses, imageImmutable, hasLayers, view, solve, sample
+  }
+
+  // The one POV path: resolve this camera's pose for a mode ("true" | "predicted") into the scene.
+  scenePose(terrain, mode) {
+    return resolvePose(this.poses[mode], terrain);
+  }
+
+  hasPose(mode) {
+    return !!this.poses[mode];
+  }
+}
+
+// --- placed view: pose in the local frame, image is a live DEM render (mutable) ---
 export function viewCamera(view, solve) {
-  const vfov = verticalFovDeg(view.intrinsics);
+  const vfovDeg = verticalFovDeg(view.intrinsics);
   const aspect = view.intrinsics.width_px / view.intrinsics.height_px;
-  return {
+  const local = (e) => ({ frame: "local", position: e.position, yaw_deg: e.yaw_deg, pitch_deg: e.pitch_deg, vfovDeg, aspect });
+  return new Camera({
     kind: "view",
     id: view.id,
     label: view.label,
-    latlon: null, // a view lives in the current local frame, not at a global lat/lon
     aspect,
+    poses: {
+      true: view.true_extrinsics ? local(view.true_extrinsics) : null,
+      predicted: solve ? local(solve.result.estimate.extrinsics) : null,
+    },
+    imageImmutable: false, // rendered from the current pose
+    hasLayers: false, // shows its skyline via the inspector SVG, not precomputed layers
     view,
     solve,
-    // Pose in the LOCAL scene frame for a POV mode ("true" | "predicted"); null if unavailable.
-    scenePose(_terrain, mode) {
-      if (mode === "true" && view.true_extrinsics) {
-        const e = view.true_extrinsics;
-        return { position: e.position, yaw_deg: e.yaw_deg, pitch_deg: e.pitch_deg, vfovDeg: vfov, aspect };
-      }
-      if (mode === "predicted" && solve) {
-        const e = solve.result.estimate.extrinsics;
-        return { position: e.position, yaw_deg: e.yaw_deg, pitch_deg: e.pitch_deg, vfovDeg: vfov, aspect };
-      }
-      return null;
-    },
-  };
+  });
 }
 
-// --- GT sample (real photo with a refined pose at a global lat/lon + precomputed outline layers) ---
-export function gtCamera(sample, geoToLocal, terrainElevationAt) {
-  const hfovRad = (sample.fov_deg * Math.PI) / 180;
-  const f = sample.width / hfovRad; // cyltan focal length, px/rad, same both axes
-  const pitchDeg = (Math.atan((sample.dv_px ?? 0) / f) * 180) / Math.PI;
-  const vfovDeg = (2 * Math.atan(sample.height / (2 * f)) * 180) / Math.PI;
-  const aspect = sample.width / sample.height;
-  return {
+// --- GT sample: an immutable photo + a prior (refined dataset) pose in the geo frame ---
+export function gtCamera(sample) {
+  const f = sample.width / ((sample.fov_deg * Math.PI) / 180); // cyltan focal length, px/rad
+  const prior = {
+    frame: "geo",
+    lat: sample.lat,
+    lon: sample.lon,
+    de_m: sample.de_m,
+    dn_m: sample.dn_m,
+    up_m: sample.cam_z_m,
+    yaw_deg: sample.yaw_deg,
+    pitch_deg: (Math.atan((sample.dv_px ?? 0) / f) * 180) / Math.PI,
+    vfovDeg: (2 * Math.atan(sample.height / (2 * f)) * 180) / Math.PI,
+    aspect: sample.width / sample.height,
+  };
+  return new Camera({
     kind: "gt",
     id: sample.name,
     label: sample.name,
-    latlon: { lat: sample.lat, lon: sample.lon },
-    aspect,
+    aspect: sample.width / sample.height,
+    poses: { true: prior }, // the refined dataset pose — a prior you can adjust and solve from
+    imageImmutable: true, // the photograph
+    hasLayers: true, // precomputed outline layer PNGs
     sample,
-    // A GT sample only has a True pose; it resolves against the terrain window (null if outside).
-    scenePose(terrain, mode) {
-      if (mode !== "true" || !terrain?.lat_min_deg) {
-        return null;
-      }
-      const local = geoToLocal(terrain, sample.lat, sample.lon);
-      if (!local) {
-        return null;
-      }
-      const up = terrainElevationAt ? terrainElevationAt(terrain, local.east_m, local.north_m) : sample.cam_z_m;
-      return {
-        position: {
-          east_m: local.east_m + (sample.de_m ?? 0),
-          north_m: local.north_m + (sample.dn_m ?? 0),
-          up_m: sample.cam_z_m ?? up,
-        },
-        yaw_deg: sample.yaw_deg,
-        pitch_deg: pitchDeg,
-        vfovDeg,
-        aspect,
-      };
-    },
-  };
+  });
 }

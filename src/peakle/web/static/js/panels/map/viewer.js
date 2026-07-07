@@ -225,7 +225,7 @@ export function setupMapPanel(store, root) {
   // GT camera has precomputed outline layers; a placed view shows its skyline via the inspector SVG.
   function updatePovOverlay() {
     const cam = mode === "true" ? store.selectedCamera() : null;
-    const sample = cam?.kind === "gt" ? cam.sample : null;
+    const sample = cam?.hasLayers ? cam.sample : null;
     if (!sample) {
       if (povOverlay.childElementCount) {
         povOverlay.replaceChildren();

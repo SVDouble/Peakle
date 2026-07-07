@@ -6,7 +6,6 @@
 
 import { api } from "./api.js";
 import { gtCamera, viewCamera } from "./camera.js";
-import { geoToLocal, terrainElevationAt } from "./panels/map/gt-spots.js";
 
 class Store {
   constructor() {
@@ -81,7 +80,7 @@ class Store {
     }
     const sample = this.selectedGtSample();
     if (sample) {
-      return gtCamera(sample, geoToLocal, terrainElevationAt);
+      return gtCamera(sample);
     }
     return null;
   }

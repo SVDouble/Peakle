@@ -195,9 +195,10 @@ export function setupCameraPanel(store, root) {
   }
 
   function layoutAndDraw() {
-    // One selection source (the unified camera); dispatch to the render its kind needs.
+    // One selection source (the unified camera); a camera with precomputed outline layers (a GT
+    // sample) renders its photo + layers, otherwise the placed-view render + skyline SVG.
     const cam = store.selectedCamera();
-    if (cam?.kind === "gt") {
+    if (cam?.hasLayers) {
       layoutGtSample(cam.sample);
       return;
     }
