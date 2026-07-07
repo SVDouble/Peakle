@@ -44,7 +44,6 @@ select = ["E", "F", "I", "UP", "B"]
 "src/peakle/scripts/build_gt_report_html.py" = ["E501"]
 "src/peakle/scripts/gt_report.py" = ["E501"]
 "src/peakle/scripts/gt_panno.py" = ["E501"]
-"src/peakle/scripts/run_sam3.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
