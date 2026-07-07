@@ -863,13 +863,27 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   gap: 6px;
 }
 
-.gt-toggles {
+.gt-toggle-groups {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
+  gap: 6px 20px;
 }
 
-.gt-toggles .toggle {
+.gt-toggle-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gt-toggle-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.gt-toggle-group .toggle {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -878,18 +892,45 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   user-select: none;
 }
 
-.gt-toggles input {
+.gt-toggle-group input {
   accent-color: var(--accent);
+}
+
+.gt-toggle-group .swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: 0 0 auto;
 }
 
 .gt-inspect-meta {
   color: var(--muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .gt-inspect-meta b {
   color: var(--text);
+}
+
+.gt-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gt-inspect-name {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.gt-reasons {
+  color: #ef8f8f;
 }
 
 /* --- GT pose adjust --- */

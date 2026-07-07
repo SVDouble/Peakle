@@ -7,13 +7,38 @@
 import { api } from "../api.js";
 import { el, fitContainBox, setBox, svgElement } from "../format.js";
 
-// Layer groups exposed as toggles; each maps to the GT Lab layer PNGs.
-const GT_GROUPS = [
-  ["gt", "GT outlines", ["gt_sky", "gt_occ", "gt_rib", "gt_cou"]],
-  ["dem", "DEM outlines", ["dem_sky", "dem_occ", "dem_rib", "dem_cou"]],
-  ["edges", "Photo edges", ["edges"]],
-  ["depth", "DEM depth", ["dem_depth"]],
+// Per-family layer toggles (matching the GT Lab), one checkbox per outline family
+// so each can be shown/hidden independently. Each entry: [layer, label, swatch].
+// Colors mirror gtlab.py _COLORS (GT = warm/green family, DEM = cool family).
+const GT_LAYER_GROUPS = [
+  {
+    title: "Ground truth (from depth)",
+    layers: [
+      ["gt_sky", "Skyline", "#00e65a"],
+      ["gt_occ", "Occlusion", "#ff961e"],
+      ["gt_rib", "Ribs / spurs", "#ffeb3b"],
+      ["gt_cou", "Couloirs", "#e86edc"],
+    ],
+  },
+  {
+    title: "DEM @ refined pose",
+    layers: [
+      ["dem_sky", "Skyline", "#00c8ff"],
+      ["dem_occ", "Occlusion", "#ff4646"],
+      ["dem_rib", "Ribs / spurs", "#50aaff"],
+      ["dem_cou", "Couloirs", "#aa5aff"],
+    ],
+  },
+  {
+    title: "Other",
+    layers: [
+      ["edges", "Photo edges", "#f5f5f5"],
+      ["gt_depth", "GT depth", "#5aa0d0"],
+      ["dem_depth", "DEM depth", "#2a5a80"],
+    ],
+  },
 ];
+const GT_LAYER_NAMES = GT_LAYER_GROUPS.flatMap((g) => g.layers.map(([layer]) => layer));
 
 export function setupCameraPanel(store, root) {
   const image = el("img", { class: "camera-image", alt: "Rendered view" });
@@ -64,13 +89,22 @@ export function setupCameraPanel(store, root) {
   const gtControls = el("div", { class: "gt-inspect-controls" }, [
     el(
       "div",
-      { class: "gt-toggles" },
-      GT_GROUPS.map(([key, label]) => {
-        const input = el("input", { type: "checkbox" });
-        input.checked = store.gtDisplay[key];
-        input.addEventListener("change", () => store.setGtDisplay({ [key]: input.checked }));
-        return el("label", { class: `toggle toggle-${key}` }, [input, el("span", { text: label })]);
-      }),
+      { class: "gt-toggle-groups" },
+      GT_LAYER_GROUPS.map((group) =>
+        el("div", { class: "gt-toggle-group" }, [
+          el("span", { class: "gt-toggle-title", text: group.title }),
+          ...group.layers.map(([layer, label, color]) => {
+            const input = el("input", { type: "checkbox" });
+            input.checked = !!store.gtDisplay[layer];
+            input.addEventListener("change", () => store.setGtDisplay({ [layer]: input.checked }));
+            return el("label", { class: "toggle" }, [
+              input,
+              el("span", { class: "swatch", style: `background:${color}` }),
+              el("span", { text: label }),
+            ]);
+          }),
+        ]),
+      ),
     ),
     el("div", { class: "gt-inspect-meta" }),
     adjustBlock,
@@ -220,7 +254,7 @@ export function setupCameraPanel(store, root) {
       image.src = desiredSrc;
     }
 
-    const layers = GT_GROUPS.filter(([key]) => store.gtDisplay[key]).flatMap(([, , names]) => names);
+    const layers = GT_LAYER_NAMES.filter((layer) => store.gtDisplay[layer]);
     const want = layers.map((layer) => api.gtLayerUrl(sample.name, layer) + bust);
     const have = [...gtOverlays.children].map((node) => node.dataset.src);
     if (want.join("|") !== have.join("|")) {
@@ -235,12 +269,18 @@ export function setupCameraPanel(store, root) {
     }
 
     const num = (value, digits = 1) => (value === null || value === undefined ? "–" : value.toFixed(digits));
+    const reasons = (sample.reasons ?? []).length ? `<div class="gt-reasons">${sample.reasons.join("; ")}</div>` : "";
     gtMeta.innerHTML =
-      `<span class="chip ${sample.quality}">${sample.quality}</span> ` +
+      `<div class="gt-name-row"><span class="gt-inspect-name">${sample.name}</span>` +
+      `<span class="chip ${sample.quality}">${sample.quality}</span></div>` +
+      `<div class="gt-metrics-row">` +
       `sky <b>${num(sample.sky_cons_px)}px</b> vs ${sample.obs_source ?? "pfm"}` +
       (sample.pfm_cons_px != null ? ` · pfm <b>${num(sample.pfm_cons_px)}px</b>` : "") +
       ` · ct <b>${num(sample.contour_cons_px)}px</b> · Δyaw <b>${num(sample.dyaw_deg)}°</b>` +
-      ` · fov <b>${num(sample.fov_deg, 0)}°</b>`;
+      ` · fov <b>${num(sample.fov_deg, 0)}°</b>` +
+      ` · pos <b>${num(sample.de_m, 0)}E/${num(sample.dn_m, 0)}N m</b>` +
+      (Number.isFinite(sample.lat) ? ` · <b>${num(sample.lat, 4)}, ${num(sample.lon, 4)}</b>` : "") +
+      `</div>${reasons}`;
   }
 
   function drawOverlay(view, fit) {

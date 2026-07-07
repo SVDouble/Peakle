@@ -11,7 +11,7 @@ import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame, verticalFovDeg } from "../../geometry.js";
 import { el, fitContainBox } from "../../format.js";
 import { buildSelectionLayer } from "./cameras.js";
-import { buildGtSpotsLayer, terrainElevationAt } from "./gt-spots.js";
+import { buildGtSpotsLayer, geoToLocal, terrainElevationAt } from "./gt-spots.js";
 import { setupMinimap } from "./minimap.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
@@ -111,6 +111,7 @@ export function setupMapPanel(store, root) {
   let gtSpotsLayer = null;
   let gtSpotLabels = [];
   let mode = "map";
+  let povAspect = null; // aspect of the active POV camera image, for letterboxing
   // One raycaster, used only for click-to-place picking (a single cast per click).
   // Label occlusion samples the elevation heightfield instead: raycasting the full
   // terrain mesh per label per frame collapsed to ~4 fps on a focused 320x320 grid
@@ -198,18 +199,56 @@ export function setupMapPanel(store, root) {
     });
   }
 
+  // A GT sample carries a full refined pose (GPS + de/dn offset, refined yaw, dv->pitch,
+  // horizontal fov) but no View object, so it drives POV through this synthetic pose. This
+  // is why True POV now works for GT data — it was only ever wired to placed views before.
+  function gtPose(sample) {
+    if (!frame || !store.terrain?.lat_min_deg) {
+      return null;
+    }
+    const local = geoToLocal(store.terrain, sample.lat, sample.lon);
+    if (!local) {
+      return null;
+    }
+    const hfovRad = (sample.fov_deg * Math.PI) / 180;
+    const f = sample.width / hfovRad; // cyltan focal length, px/rad, same both axes
+    const pitchDeg = (Math.atan((sample.dv_px ?? 0) / f) * 180) / Math.PI;
+    const vfovDeg = (2 * Math.atan(sample.height / (2 * f)) * 180) / Math.PI;
+    return {
+      pose: {
+        position: { east_m: local.east_m + (sample.de_m ?? 0), north_m: local.north_m + (sample.dn_m ?? 0), up_m: sample.cam_z_m },
+        yaw_deg: sample.yaw_deg,
+        pitch_deg: pitchDeg,
+      },
+      vfovDeg,
+      aspect: sample.width / sample.height,
+      label: sample.name,
+    };
+  }
+
+  function activePov(nextMode) {
+    const view = store.selectedView();
+    if (view?.true_extrinsics && (nextMode === "true" || store.selectedSolve())) {
+      if (nextMode === "true") {
+        return { pose: view.true_extrinsics, vfovDeg: verticalFovDeg(view.intrinsics), aspect: view.intrinsics.width_px / view.intrinsics.height_px, label: view.label };
+      }
+      const solve = store.selectedSolve();
+      if (solve) {
+        return { pose: solve.result.estimate.extrinsics, vfovDeg: verticalFovDeg(view.intrinsics), aspect: view.intrinsics.width_px / view.intrinsics.height_px, label: view.label };
+      }
+    }
+    const gtSample = store.selectedGtSample();
+    if (gtSample && nextMode === "true") {
+      return gtPose(gtSample);
+    }
+    return null;
+  }
+
   function applyPov(nextMode) {
     mode = nextMode;
     syncPovButtons();
-    const view = store.selectedView();
-    let pose = null;
-    if (nextMode === "true" && view?.true_extrinsics) {
-      pose = view.true_extrinsics;
-    } else if (nextMode === "predicted") {
-      const solve = store.selectedSolve();
-      pose = solve ? solve.result.estimate.extrinsics : null;
-    }
-    if (!pose) {
+    const active = nextMode === "map" ? null : activePov(nextMode);
+    if (!active) {
       mode = "map";
       syncPovButtons();
       controls.enabled = true;
@@ -218,17 +257,18 @@ export function setupMapPanel(store, root) {
       controls.target.copy(CAMERA_TARGET);
       controls.update();
       resize();
-      hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view and choose a POV.";
+      hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view or GT sample, then choose a POV.";
       return;
     }
+    povAspect = active.aspect;
     controls.enabled = false;
-    camera.fov = verticalFovDeg(view.intrinsics);
-    camera.position.copy(localToScenePoint(pose.position, frame));
+    camera.fov = active.vfovDeg;
+    camera.position.copy(localToScenePoint(active.pose.position, frame));
     camera.up.set(0, 1, 0);
-    camera.lookAt(cameraTargetScenePoint(pose, frame));
+    camera.lookAt(cameraTargetScenePoint(active.pose, frame));
     // resize() recomputes the letterbox box for the new mode and sets the matching aspect.
     resize();
-    hint.textContent = `Looking through the ${nextMode} camera of ${view.label}.`;
+    hint.textContent = `Looking through the ${nextMode} camera of ${active.label}.`;
   }
 
   function syncPovButtons() {
@@ -263,9 +303,16 @@ export function setupMapPanel(store, root) {
     const lon = t.lon_min_deg + ((local.east_m - t.x_min_m) / (t.x_max_m - t.x_min_m)) * (t.lon_max_deg - t.lon_min_deg);
     const lat = t.lat_min_deg + ((local.north_m - t.y_min_m) / (t.y_max_m - t.y_min_m)) * (t.lat_max_deg - t.lat_min_deg);
     hint.textContent = "Recentering map…";
-    store.focusScene(lat, lon).catch((error) => {
-      hint.textContent = error.message;
-    });
+    store.focusScene(lat, lon).then(
+      () => {
+        if (mode === "map") {
+          hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view or GT sample, then choose a POV.";
+        }
+      },
+      (error) => {
+        hint.textContent = error.message;
+      },
+    );
   });
 
   // Click-to-place: raycast the terrain and create a view aimed at the tallest peak.
@@ -357,11 +404,8 @@ export function setupMapPanel(store, root) {
   function viewportBox() {
     const width = Math.max(1, frameBox.clientWidth);
     const height = Math.max(1, frameBox.clientHeight);
-    if (mode !== "map") {
-      const view = store.selectedView();
-      if (view?.intrinsics) {
-        return fitContainBox(width, height, view.intrinsics.width_px / view.intrinsics.height_px);
-      }
+    if (mode !== "map" && povAspect) {
+      return fitContainBox(width, height, povAspect);
     }
     return { width, height, left: 0, top: 0 };
   }
@@ -396,7 +440,14 @@ export function setupMapPanel(store, root) {
   store.on("display", applyDisplay);
   store.on("views", rebuildSelection);
   store.on("selection", rebuildSelection);
-  store.on("gt", rebuildGtSpots);
+  store.on("gt", () => {
+    rebuildGtSpots();
+    // If a GT sample is selected while in a POV mode, re-aim the camera through it;
+    // if the selection cleared the pose, fall back to map.
+    if (mode !== "map") {
+      applyPov(mode);
+    }
+  });
   store.on("placing", () => {
     viewport.classList.toggle("placing", store.placing);
     if (mode === "map") {

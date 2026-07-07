@@ -100,6 +100,9 @@ async def list_samples() -> list[dict[str, Any]]:
                 "tilt_deg",
                 "yaw_deg",
                 "fov_deg",
+                "cam_z_m",  # needed for GT True POV (camera height) + pose adjust
+                "dv_px",  # needed for GT True POV (pitch from vertical shift)
+                "sky_support",
                 "gt_contour_density",
                 "width",
                 "height",

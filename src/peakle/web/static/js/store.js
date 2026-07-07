@@ -24,7 +24,8 @@ class Store {
     this.gtSamples = null;
     this.gtError = null;
     this.selectedGtName = null;
-    this.gtDisplay = { gt: true, dem: true, edges: false, depth: false };
+    // Per-layer visibility (keys = GT Lab layer names). Skylines on by default.
+    this.gtDisplay = { gt_sky: true, dem_sky: true };
     this._gtLoading = false;
     this._listeners = new Map();
   }
