@@ -156,27 +156,25 @@ export function viewCamera(view, solve) {
   });
 }
 
-// --- GT sample: an immutable photo + a prior (refined dataset) pose in the geo frame ---
-// `adjust` (dyaw/de/dn/dv) is the live inspector adjustment applied on top of the refined pose, so
-// the POV camera moves as you drag the sliders.
-export function gtCamera(sample, adjust = { dyaw: 0, de: 0, dn: 0, dv: 0 }) {
+// --- GT sample: an immutable photo + the refined dataset pose in the geo frame ---
+export function gtCamera(sample) {
   const imageCamera = ImageCamera.fromGtSample(sample);
   const prior = imageCamera.poseDescriptor({
     frame: "geo",
     lat: sample.lat,
     lon: sample.lon,
-    de_m: (sample.de_m ?? 0) + (adjust.de ?? 0),
-    dn_m: (sample.dn_m ?? 0) + (adjust.dn ?? 0),
+    de_m: sample.de_m ?? 0,
+    dn_m: sample.dn_m ?? 0,
     up_m: sample.cam_z_m,
-    yaw_deg: sample.yaw_deg + (adjust.dyaw ?? 0),
-    pitch_deg: imageCamera.pitchDegFromVerticalShiftPx((sample.dv_px ?? 0) + (adjust.dv ?? 0)),
+    yaw_deg: sample.yaw_deg,
+    pitch_deg: imageCamera.pitchDegFromVerticalShiftPx(sample.dv_px ?? 0),
   });
   return new Camera({
     kind: "gt",
     id: sample.name,
     label: sample.name,
     imageCamera,
-    poses: { true: prior }, // the refined dataset pose — a prior you can adjust and solve from
+    poses: { true: prior }, // the refined dataset pose: a baseline candidate you can open and solve from
     imageImmutable: true, // the photograph
     hasLayers: true, // precomputed outline layer PNGs
     sample,

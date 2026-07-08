@@ -52,46 +52,16 @@ export function setupCameraPanel(store, root) {
     el("span", { html: '<i class="predicted-swatch"></i>Predicted' }),
     el("span", { html: '<i class="diff-swatch"></i>Difference' }),
   ]);
-  // Manual pose adjustment: deltas on top of the record's refined pose, previewed
-  // live as a dashed skyline; Save persists them to the record + a sidecar the
-  // builder seeds from on future rebuilds.
-  const ADJUSTS = [
-    ["dyaw", "Δyaw °", -4, 4, 0.05],
-    ["de", "ΔE m", -400, 400, 5],
-    ["dn", "ΔN m", -400, 400, 5],
-    ["dv", "Δv px", -60, 60, 1],
-  ];
-  const adj = { dyaw: 0, de: 0, dn: 0, dv: 0 };
-  const adjInputs = {};
-  let adjTimer = null;
-  let layerBust = 0;
-  const adjStatus = el("span", { class: "adjust-status" });
-  const saveButton = el("button", { type: "button", class: "adjust-save", text: "Save adjustment" });
-  const resetButton = el("button", { type: "button", class: "adjust-reset", text: "Reset" });
-  const adjustBlock = el("details", { class: "gt-adjust" }, [
-    el("summary", { text: "Adjust pose" }),
-    ...ADJUSTS.map(([key, label, min, max, step]) => {
-      const output = el("output", { text: "0" });
-      const input = el("input", {
-        type: "range", min: String(min), max: String(max), step: String(step), value: "0",
-        oninput: () => {
-          adj[key] = Number(input.value);
-          output.textContent = String(adj[key]);
-          store.setGtAdjust({ [key]: adj[key] }); // moves the 3D True-POV camera live
-          scheduleAdjustPreview();
-        },
-      });
-      adjInputs[key] = { input, output };
-      return el("label", { class: "field" }, [el("span", { text: label }), input, output]);
-    }),
-    el("div", { class: "adjust-actions" }, [saveButton, resetButton, adjStatus]),
-  ]);
-
   // Toggle for overlaying the photograph on the 3D terrain in POV (opacity fine-tuned by the map
   // HUD slider). Sits in the inspector so it is discoverable alongside the outline toggles.
   const photoOverlayInput = el("input", { type: "checkbox" });
-  photoOverlayInput.checked = store.photoOpacity > 0;
+  syncPhotoOverlayInput();
   photoOverlayInput.addEventListener("change", () => store.setPhotoOpacity(photoOverlayInput.checked ? 0.5 : 0));
+  const photoOverlayToggle = el("label", { class: "toggle" }, [
+    photoOverlayInput,
+    el("span", { class: "swatch photo-overlay-swatch" }),
+    el("span", { text: "Overlay photo on 3D map (POV)" }),
+  ]);
 
   const gtControls = el("div", { class: "gt-inspect-controls" }, [
     el(
@@ -110,96 +80,20 @@ export function setupCameraPanel(store, root) {
               el("span", { text: label }),
             ]);
           }),
+          ...(group.title === "Other" ? [photoOverlayToggle] : []),
         ]),
       ),
     ),
-    el("label", { class: "toggle photo-overlay-toggle" }, [
-      photoOverlayInput,
-      el("span", { text: "Overlay photo on 3D map (in POV)" }),
-    ]),
     el("div", { class: "gt-inspect-meta" }),
-    adjustBlock,
   ]);
   gtControls.hidden = true;
   const cameraFrame = el("div", { class: "camera-frame" }, [box]);
   root.replaceChildren(cameraFrame, legend, gtControls, placeholder);
   const gtMeta = gtControls.querySelector(".gt-inspect-meta");
 
-  function resetAdjust() {
-    clearTimeout(adjTimer);
-    for (const key of Object.keys(adj)) {
-      adj[key] = 0;
-      adjInputs[key].input.value = "0";
-      adjInputs[key].output.textContent = "0";
-    }
-    store.resetGtAdjust();
-    adjStatus.textContent = "";
-    overlay.replaceChildren();
+  function syncPhotoOverlayInput() {
+    photoOverlayInput.checked = store.photoOpacity > 0;
   }
-
-  function scheduleAdjustPreview() {
-    clearTimeout(adjTimer);
-    adjTimer = setTimeout(drawAdjustPreview, 400);
-  }
-
-  async function drawAdjustPreview() {
-    const sample = store.selectedGtSample();
-    if (!sample) {
-      return;
-    }
-    adjStatus.textContent = "rendering…";
-    try {
-      const q = `dyaw=${adj.dyaw}&de=${adj.de}&dn=${adj.dn}&dv=${adj.dv}`;
-      const res = await fetch(`/api/gt/samples/${encodeURIComponent(sample.name)}/skyline?${q}`);
-      const { rows } = await res.json();
-      if (store.selectedGtName !== sample.name) {
-        return;
-      }
-      const fit = { width: box.clientWidth, height: box.clientHeight };
-      const points = [];
-      for (let col = 0; col < rows.length; col += 1) {
-        if (rows[col] !== null) {
-          points.push(`${((col / (rows.length - 1)) * fit.width).toFixed(1)},${((rows[col] / sample.height) * fit.height).toFixed(1)}`);
-        }
-      }
-      overlay.setAttribute("viewBox", `0 0 ${fit.width} ${fit.height}`);
-      overlay.replaceChildren(svgElement("polyline", { class: "adjust-line", points: points.join(" ") }));
-      adjStatus.textContent = "";
-    } catch (error) {
-      adjStatus.textContent = error.message;
-    }
-  }
-
-  saveButton.addEventListener("click", async () => {
-    const sample = store.selectedGtSample();
-    if (!sample) {
-      return;
-    }
-    saveButton.disabled = true;
-    adjStatus.textContent = "saving…";
-    try {
-      const res = await fetch(`/api/gt/samples/${encodeURIComponent(sample.name)}/adjust`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(adj),
-      });
-      if (!res.ok) {
-        throw new Error(`save failed: ${res.status}`);
-      }
-      const rec = await res.json();
-      adjStatus.textContent = `saved · sky ${rec.sky_cons_px}px · ${rec.quality}`;
-      layerBust += 1;
-      resetButton.disabled = false;
-      // metrics changed server-side: reload the corpus list and re-render layers
-      store.gtSamples = null;
-      await store.loadGtSamples();
-    } catch (error) {
-      adjStatus.textContent = error.message;
-    } finally {
-      saveButton.disabled = false;
-    }
-  });
-  resetButton.addEventListener("click", resetAdjust);
 
   function poseNonce(view) {
     const e = view.true_extrinsics;
@@ -216,10 +110,6 @@ export function setupCameraPanel(store, root) {
     }
     gtControls.hidden = true;
     gtOverlays.replaceChildren();
-    if (shownGtName !== null) {
-      shownGtName = null;
-      resetAdjust();
-    }
     const view = store.selectedView();
     if (!view) {
       box.hidden = true;
@@ -249,31 +139,24 @@ export function setupCameraPanel(store, root) {
     drawOverlay(view, fit);
   }
 
-  let shownGtName = null;
-
   function layoutGtSample(sample) {
     box.hidden = false;
     legend.hidden = true;
     placeholder.hidden = true;
     gtControls.hidden = false;
-    if (sample.name !== shownGtName) {
-      shownGtName = sample.name;
-      resetAdjust();
-    }
 
     const frame = box.parentElement;
     const fit = fitContainBox(frame.clientWidth, frame.clientHeight, (sample.width || 4) / (sample.height || 3));
     setBox(box, fit);
 
-    const bust = layerBust ? `?v=${layerBust}` : "";
-    const desiredSrc = api.gtLayerUrl(sample.name, "photo") + bust;
+    const desiredSrc = api.gtLayerUrl(sample.name, "photo");
     if (image.dataset.src !== desiredSrc) {
       image.dataset.src = desiredSrc;
       image.src = desiredSrc;
     }
 
     const layers = GT_LAYER_NAMES.filter((layer) => store.gtDisplay[layer]);
-    const want = layers.map((layer) => api.gtLayerUrl(sample.name, layer) + bust);
+    const want = layers.map((layer) => api.gtLayerUrl(sample.name, layer));
     const have = [...gtOverlays.children].map((node) => node.dataset.src);
     if (want.join("|") !== have.join("|")) {
       gtOverlays.replaceChildren(
@@ -356,5 +239,6 @@ export function setupCameraPanel(store, root) {
   store.on("views", layoutAndDraw);
   store.on("gt", layoutAndDraw);
   store.on("gt-display", layoutAndDraw);
+  store.on("photo-opacity", syncPhotoOverlayInput);
   layoutAndDraw();
 }

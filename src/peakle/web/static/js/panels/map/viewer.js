@@ -31,6 +31,10 @@ const PICK_MAX_DRAG_PX = 5;
 const LABEL_OCCLUSION_MARGIN = 0.018;
 const SCENE_DEM_SKY_LAYER = "dem_sky";
 const TERRAIN_FOLLOW_EDGE_FRACTION = 0.24;
+const POV_ZOOM_MIN = 1;
+const POV_ZOOM_MAX = 8;
+const POV_WHEEL_ZOOM_SPEED = 0.0012;
+const POV_LABEL_LOD_DISTANCE = 2.2;
 const PEAK_LABEL_LOD = [
   { distance: 3.2, maxLabels: 12, minProminenceM: 180, allowSpotHeights: false },
   { distance: 2.2, maxLabels: 24, minProminenceM: 110, allowSpotHeights: false },
@@ -78,7 +82,10 @@ export function setupMapPanel(store, root) {
     el("span", { text: "Photo" }),
     opacityRange,
   ]);
-  root.replaceChildren(frameBox, el("div", { class: "map-hud" }, [povControls, povTable, opacityControl, hint]));
+  const modeHud = el("div", { class: "map-mode-hud" }, [povControls, hint]);
+  const povInfoHud = el("div", { class: "map-pov-info" }, [povTable]);
+  const photoHud = el("div", { class: "map-photo-hud" }, [opacityControl]);
+  root.replaceChildren(frameBox, modeHud, povInfoHud, photoHud);
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
   renderer.setClearColor(0x141512, 1);
@@ -130,6 +137,9 @@ export function setupMapPanel(store, root) {
   let lastSelectionKey = null;
   let lastSelectedSolveId = null;
   let povAspect = null; // aspect of the active POV camera image, for letterboxing
+  let povZoomKey = "";
+  let povZoom = { scale: 1, x: 0, y: 0 };
+  let povPan = null;
   let terrainFollowInFlight = false;
   let pendingTerrainFollowView = null;
   // One raycaster, used only for click-to-place picking (a single cast per click).
@@ -253,7 +263,7 @@ export function setupMapPanel(store, root) {
         group.scale.y = verticalScale;
       }
     }
-    labelRenderer.domElement.style.display = mode === "pov" ? "none" : "";
+    labelRenderer.domElement.style.display = "";
   }
 
   function currentSelectionKey() {
@@ -390,15 +400,14 @@ export function setupMapPanel(store, root) {
       }
       return;
     }
-    const query = gtAdjustQuery();
     const layers = GT_LAYER_NAMES.filter((layer) => store.gtDisplay[layer]);
-    const want = layers.map((layer) => (layer === SCENE_DEM_SKY_LAYER ? sceneSkylineKey(sample, query) : api.gtLayerUrl(sample.name, layer)));
+    const want = layers.map((layer) => (layer === SCENE_DEM_SKY_LAYER ? sceneSkylineKey(sample) : api.gtLayerUrl(sample.name, layer)));
     const have = [...povOverlay.children].map((node) => node.dataset.src);
     if (want.join("|") !== have.join("|")) {
       povOverlay.replaceChildren(
         ...layers.map((layer) => {
           if (layer === SCENE_DEM_SKY_LAYER) {
-            return createSceneSkylineLayer(sample, query);
+            return createSceneSkylineLayer(sample);
           }
           const src = api.gtLayerUrl(sample.name, layer);
           const img = el("img", { class: "pov-layer", alt: "" });
@@ -410,29 +419,19 @@ export function setupMapPanel(store, root) {
     }
   }
 
-  function gtAdjustQuery() {
-    const adjust = store.gtAdjust ?? {};
-    return new URLSearchParams({
-      dyaw: String(adjust.dyaw ?? 0),
-      de: String(adjust.de ?? 0),
-      dn: String(adjust.dn ?? 0),
-      dv: String(adjust.dv ?? 0),
-    }).toString();
+  function sceneSkylineKey(sample) {
+    return `scene-dem-sky:${sample.name}`;
   }
 
-  function sceneSkylineKey(sample, query) {
-    return `scene-dem-sky:${sample.name}?${query}`;
-  }
-
-  function createSceneSkylineLayer(sample, query) {
-    const key = sceneSkylineKey(sample, query);
+  function createSceneSkylineLayer(sample) {
+    const key = sceneSkylineKey(sample);
     const svg = svgElement("svg", {
       class: "pov-layer pov-vector",
       viewBox: `0 0 ${sample.width} ${sample.height}`,
       preserveAspectRatio: "none",
     });
     svg.dataset.src = key;
-    fetch(`/api/gt/samples/${encodeURIComponent(sample.name)}/scene-skyline?${query}`)
+    fetch(`/api/gt/samples/${encodeURIComponent(sample.name)}/scene-skyline`)
       .then((response) => {
         if (!response.ok) {
           throw new Error(`${response.status} ${response.statusText}`);
@@ -469,6 +468,8 @@ export function setupMapPanel(store, root) {
       syncPovButtons();
       controls.enabled = true;
       camera.fov = 45;
+      povZoomKey = "";
+      resetPovZoom();
       camera.position.copy(CAMERA_INITIAL_POSITION);
       controls.target.copy(CAMERA_TARGET);
       controls.update();
@@ -479,6 +480,11 @@ export function setupMapPanel(store, root) {
       return;
     }
     povAspect = active.pose.aspect;
+    const zoomKey = `${currentSelectionKey()}|${active.key}`;
+    if (zoomKey !== povZoomKey) {
+      povZoomKey = zoomKey;
+      resetPovZoom();
+    }
     controls.enabled = false;
     camera.fov = active.pose.vfovDeg;
     const povFrame = activeTerrainFrame();
@@ -523,6 +529,137 @@ export function setupMapPanel(store, root) {
   }
 
   controls.addEventListener("end", followTerrainWindowAfterPan);
+
+  viewport.addEventListener("wheel", handlePovWheel, { passive: false });
+  viewport.addEventListener("pointerdown", handlePovPointerDown);
+  viewport.addEventListener("pointermove", handlePovPointerMove);
+  viewport.addEventListener("pointerup", endPovPointerPan);
+  viewport.addEventListener("pointercancel", endPovPointerPan);
+
+  function handlePovWheel(event) {
+    if (mode !== "pov") {
+      return;
+    }
+    event.preventDefault();
+    const rect = viewport.getBoundingClientRect();
+    const anchorX = event.clientX - rect.left;
+    const anchorY = event.clientY - rect.top;
+    const deltaY = normalizedWheelDelta(event);
+    const previousScale = povZoom.scale;
+    const nextScale = clamp(previousScale * Math.exp(-deltaY * POV_WHEEL_ZOOM_SPEED), POV_ZOOM_MIN, POV_ZOOM_MAX);
+    if (Math.abs(nextScale - previousScale) < 0.001) {
+      return;
+    }
+    const contentX = (anchorX - povZoom.x) / previousScale;
+    const contentY = (anchorY - povZoom.y) / previousScale;
+    povZoom = {
+      scale: nextScale,
+      x: anchorX - contentX * nextScale,
+      y: anchorY - contentY * nextScale,
+    };
+    applyPovZoom();
+  }
+
+  function handlePovPointerDown(event) {
+    if (mode !== "pov" || event.button !== 0 || povZoom.scale <= 1.001) {
+      return;
+    }
+    event.preventDefault();
+    viewport.setPointerCapture(event.pointerId);
+    povPan = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      startX: povZoom.x,
+      startY: povZoom.y,
+    };
+    viewport.classList.add("pov-panning");
+  }
+
+  function handlePovPointerMove(event) {
+    if (!povPan || event.pointerId !== povPan.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    povZoom.x = povPan.startX + event.clientX - povPan.x;
+    povZoom.y = povPan.startY + event.clientY - povPan.y;
+    applyPovZoom();
+  }
+
+  function endPovPointerPan(event) {
+    if (!povPan || event.pointerId !== povPan.pointerId) {
+      return;
+    }
+    if (viewport.hasPointerCapture(event.pointerId)) {
+      viewport.releasePointerCapture(event.pointerId);
+    }
+    povPan = null;
+    viewport.classList.remove("pov-panning");
+  }
+
+  function resetPovZoom() {
+    clearPovPan();
+    povZoom = { scale: 1, x: 0, y: 0 };
+    applyPovZoom();
+  }
+
+  function clearPovPan() {
+    if (povPan && viewport.hasPointerCapture(povPan.pointerId)) {
+      viewport.releasePointerCapture(povPan.pointerId);
+    }
+    povPan = null;
+    viewport.classList.remove("pov-panning");
+  }
+
+  function applyPovZoom() {
+    const inPov = mode === "pov";
+    if (inPov) {
+      clampPovZoom();
+    }
+    const scale = inPov ? povZoom.scale : 1;
+    const x = inPov ? povZoom.x : 0;
+    const y = inPov ? povZoom.y : 0;
+    const transform = `matrix(${scale}, 0, 0, ${scale}, ${x}, ${y})`;
+    povPhoto.style.transform = transform;
+    povOverlay.style.transform = transform;
+    viewport.classList.toggle("pov-interactive", inPov);
+    viewport.classList.toggle("pov-zoomed", inPov && scale > 1.001);
+    if (!inPov || scale <= 1.001) {
+      camera.clearViewOffset();
+      camera.updateProjectionMatrix();
+      return;
+    }
+    const box = viewportBox();
+    camera.setViewOffset(box.width, box.height, -x / scale, -y / scale, box.width / scale, box.height / scale);
+    camera.updateProjectionMatrix();
+  }
+
+  function clampPovZoom() {
+    povZoom.scale = clamp(povZoom.scale, POV_ZOOM_MIN, POV_ZOOM_MAX);
+    if (povZoom.scale <= 1.001) {
+      povZoom.scale = 1;
+      povZoom.x = 0;
+      povZoom.y = 0;
+      return;
+    }
+    const box = viewportBox();
+    povZoom.x = clamp(povZoom.x, box.width * (1 - povZoom.scale), 0);
+    povZoom.y = clamp(povZoom.y, box.height * (1 - povZoom.scale), 0);
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function normalizedWheelDelta(event) {
+    if (event.deltaMode === 1) {
+      return event.deltaY * 16;
+    }
+    if (event.deltaMode === 2) {
+      return event.deltaY * Math.max(1, viewport.clientHeight);
+    }
+    return event.deltaY;
+  }
 
   // Double-click any terrain point to recenter the geographic window there (the
   // in-3D "move the map"): raycast the terrain, convert the hit to lat/lon via the
@@ -694,7 +831,8 @@ export function setupMapPanel(store, root) {
     const cameraPosition = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
     const target = new THREE.Vector3();
     const projected = new THREE.Vector3();
-    const peakLod = peakLabelLod(cameraPosition.distanceTo(controls.target));
+    const lodDistance = mode === "pov" ? POV_LABEL_LOD_DISTANCE / Math.sqrt(povZoom.scale) : cameraPosition.distanceTo(controls.target);
+    const peakLod = peakLabelLod(lodDistance);
     for (const label of peakLabels) {
       const lodVisible = peakLabelAllowed(label, peakLod);
       const marker = label.userData.peakMarker;
@@ -715,6 +853,10 @@ export function setupMapPanel(store, root) {
       }
     }
     for (const label of [...selectionLabels, ...gtSpotLabels]) {
+      if (mode === "pov") {
+        label.visible = false;
+        continue;
+      }
       const anchor = label.userData.occlusionAnchor ?? label;
       anchor.getWorldPosition(target);
       projected.copy(target).project(camera);
@@ -756,7 +898,7 @@ export function setupMapPanel(store, root) {
     renderer.setSize(box.width, box.height, false);
     labelRenderer.setSize(box.width, box.height);
     camera.aspect = box.width / box.height;
-    camera.updateProjectionMatrix();
+    applyPovZoom();
   }
 
   new ResizeObserver(resize).observe(frameBox);
@@ -789,13 +931,6 @@ export function setupMapPanel(store, root) {
   });
   // Outline toggles in the Inspect panel drive the POV overlay too (map <-> inspect in sync).
   store.on("gt-display", updatePovOverlay);
-  // Pose adjustment re-aims the active GT POV live; the opacity slider updates the photo overlay.
-  store.on("gt-adjust", () => {
-    renderPovTable();
-    if (mode !== "map") {
-      applyPov(mode);
-    }
-  });
   store.on("photo-opacity", updatePovPhoto);
   store.on("placing", () => {
     viewport.classList.toggle("placing", store.placing);

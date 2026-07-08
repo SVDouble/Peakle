@@ -28,9 +28,6 @@ class Store {
     this.selectedGtName = null;
     // Per-layer visibility (keys = GT Lab layer names). Skylines on by default.
     this.gtDisplay = { gt_sky: true, dem_sky: true };
-    // Live pose adjustment for the selected GT sample: the inspector sliders drive it, and the
-    // 3D POV camera reads it so adjusting the pose actually moves the view.
-    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
     this.photoOpacity = 0.5; // GT photo overlaid on the 3D terrain in POV
     this._gtLoading = false;
     this._listeners = new Map();
@@ -85,7 +82,7 @@ class Store {
     }
     const sample = this.selectedGtSample();
     if (sample) {
-      return gtCamera(sample, this.gtAdjust);
+      return gtCamera(sample);
     }
     return null;
   }
@@ -103,7 +100,6 @@ class Store {
     this.selectedViewId = null;
     this.selectedSolveId = null;
     this.selectedGtName = null;
-    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
     this.solveCache.clear();
     this.emitSceneAndViews();
     this.emit("selection");
@@ -194,6 +190,17 @@ class Store {
     }
   }
 
+  selectViewTruth(id = this.selectedViewId) {
+    this.selectedViewId = id;
+    this.selectedSolveId = null;
+    this.placing = false;
+    if (this.selectedGtName) {
+      this.selectedGtName = null;
+      this.emit("gt");
+    }
+    this.emit("selection");
+  }
+
   setPlacing(active) {
     this.placing = active;
     this.emit("placing");
@@ -223,7 +230,6 @@ class Store {
       this.selectedViewId = null;
       this.selectedSolveId = null;
       this.placing = false;
-      this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
       this.gtError = null;
       this.emit("gt");
       this.emit("selection");
@@ -239,7 +245,6 @@ class Store {
       this.selectedSolveId = null;
       this.placing = false;
     }
-    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 }; // fresh sample starts unadjusted
     this.gtError = null;
     this.emit("gt");
     this.emit("selection");
@@ -260,18 +265,6 @@ class Store {
     this.emit("gt-display");
   }
 
-  // Pose adjustment for the selected GT sample — drives both the inspector's dashed preview and
-  // the 3D POV camera (so adjusting the pose moves the view).
-  setGtAdjust(changes) {
-    this.gtAdjust = { ...this.gtAdjust, ...changes };
-    this.emit("gt-adjust");
-  }
-
-  resetGtAdjust() {
-    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
-    this.emit("gt-adjust");
-  }
-
   // Opacity of the GT photograph overlaid on the 3D terrain in POV (0 = off), for aligning
   // the DEM render against the photo by eye.
   setPhotoOpacity(value) {
@@ -284,9 +277,6 @@ class Store {
     this.selectedViewId = null;
     this.selectedSolveId = null;
     this.selectedGtName = options.selectedGtName ?? null;
-    if (this.selectedGtName) {
-      this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
-    }
     this.gtError = null;
     this.solveCache.clear();
     this.emitSceneAndViews();
@@ -301,6 +291,11 @@ class Store {
   // Materialize a GT sample as a scene View: it recenters the map (server-side), so refresh the
   // scene state and then select the new view — from here it is an ordinary View (POV, adjust, solve).
   async openGtView(name) {
+    const existing = this.views.find((view) => view.source === "gt" && view.gt_name === name);
+    if (existing) {
+      this.selectView(existing.id);
+      return existing;
+    }
     const view = await api.openGtView(name);
     await this.refreshSceneState();
     this.selectedGtName = null;

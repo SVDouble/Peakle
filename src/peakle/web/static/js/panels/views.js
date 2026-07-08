@@ -4,8 +4,8 @@
 // camera and a ground-truth sample are the same kind of thing (an image + a pose
 // to work with); GT is just a different *provider*, tagged with a chip, not a
 // separate corpus in a separate tab. Selecting any row drives the map + inspector;
-// the editor below runs solvers and lists that view's solves. A GT view is opened
-// (materialized so it can be solved) transparently the first time you solve it.
+// the editor below handles view metadata/pose. Solver controls and solve history
+// live in the Solve panel.
 
 import { el, formatNumber } from "../format.js";
 import { angleDeltaDeg, geoToLocal } from "../geometry.js";
@@ -19,9 +19,6 @@ export function setupViewsPanel(store, root) {
 
   let patchTimer = null;
   let editorKey = undefined;
-  let strategyChoice = null;
-  let positionPriorChoice = true;
-  let solvesHost = null;
   let runStatus = null;
   let rebuildTimer = null;
 
@@ -31,6 +28,14 @@ export function setupViewsPanel(store, root) {
   const rebuildBtn = el("button", { type: "button", class: "secondary lib-action", text: "Rebuild", title: "Re-derive metrics/pose for the filtered GT views" });
   rebuildBtn.addEventListener("click", onRebuild);
   const search = el("input", { class: "lib-search", placeholder: "Search views or peaks…", type: "text" });
+  const sortSelect = el("select", { class: "lib-sort", title: "Sort views" }, [
+    el("option", { value: "default", text: "Worst GT first" }),
+    el("option", { value: "name", text: "Name" }),
+    el("option", { value: "on-map", text: "On map first" }),
+    el("option", { value: "quality", text: "Quality" }),
+    el("option", { value: "peaks", text: "Peak relevance" }),
+    el("option", { value: "solves", text: "Most solves" }),
+  ]);
   const photoFile = el("input", { class: "photo-file", type: "file", accept: "image/*", required: true });
   const photoLabel = el("input", { class: "photo-field", type: "text", placeholder: "Label" });
   const photoLat = el("input", { class: "photo-field", type: "number", step: "0.000001", min: "-90", max: "90", placeholder: "Lat", required: true });
@@ -51,7 +56,10 @@ export function setupViewsPanel(store, root) {
     photoSubmit,
     photoStatus,
   ]);
-  const photoImport = el("details", { class: "photo-import" }, [el("summary", { text: "Localize photo" }), photoForm]);
+  const photoImport = el("details", { class: "photo-import" }, [
+    el("summary", { class: "icon-button add-photo-button", title: "Add photo", text: "+" }),
+    photoForm,
+  ]);
   const hint = el("p", { class: "control-hint" });
   const list = el("ul", { class: "lib-list" });
   const scroll = el("div", { class: "lib-scroll" }, [list, hint]);
@@ -59,10 +67,9 @@ export function setupViewsPanel(store, root) {
 
   root.replaceChildren(
     el("div", { class: "library-head" }, [
-      el("div", { class: "library-head-row" }, [el("span", { class: "control-eyebrow", text: "Views" }), gtLab]),
-      el("div", { class: "library-actions" }, [placeButton, rebuildBtn]),
-      search,
-      photoImport,
+      el("div", { class: "library-head-row" }, [el("span", { class: "control-eyebrow", text: "Images" }), gtLab]),
+      el("div", { class: "library-actions" }, [placeButton, rebuildBtn, photoImport]),
+      el("div", { class: "library-filter-row" }, [search, sortSelect]),
     ]),
     scroll,
     editor,
@@ -83,7 +90,56 @@ export function setupViewsPanel(store, root) {
       .filter((s) => !materializedGt.has(s.name))
       .map((s) => ({ kind: "gt", key: `g:${s.name}`, provider: "gt", label: s.name, sample: s, peaks: s.visible_peaks ?? [] }))
       .filter((item) => matchesFilter(item, filter));
-    return { views, corpus };
+    return { views: sortItems(views), corpus: sortItems(corpus) };
+  }
+
+  function sortItems(rows) {
+    const choice = sortSelect.value;
+    if (choice === "default") {
+      return rows;
+    }
+    return [...rows].sort((a, b) => compareItems(a, b, choice));
+  }
+
+  function compareItems(a, b, choice) {
+    if (choice === "name") {
+      return a.label.localeCompare(b.label);
+    }
+    if (choice === "on-map") {
+      return Number(isItemOnMap(b)) - Number(isItemOnMap(a)) || worstMetric(b) - worstMetric(a) || a.label.localeCompare(b.label);
+    }
+    if (choice === "quality") {
+      return qualityRank(a) - qualityRank(b) || worstMetric(b) - worstMetric(a) || a.label.localeCompare(b.label);
+    }
+    if (choice === "peaks") {
+      return peakWeight(b) - peakWeight(a) || a.label.localeCompare(b.label);
+    }
+    if (choice === "solves") {
+      return solveCount(b) - solveCount(a) || a.label.localeCompare(b.label);
+    }
+    return 0;
+  }
+
+  function isItemOnMap(item) {
+    return item.sample ? inBounds(item.sample) : true;
+  }
+
+  function worstMetric(item) {
+    const s = item.sample;
+    return s ? Math.max(s.sky_cons_px ?? 0, s.pfm_cons_px ?? 0, s.contour_cons_px ?? 0) : 0;
+  }
+
+  function qualityRank(item) {
+    const q = item.sample?.quality ?? (item.view?.source === "gt" ? "CLEAN" : "");
+    return q === "CLEAN" ? 0 : q === "SUSPECT" ? 2 : 1;
+  }
+
+  function peakWeight(item) {
+    return item.peaks?.[0]?.weight ?? 0;
+  }
+
+  function solveCount(item) {
+    return item.view?.solves?.length ?? 0;
   }
 
   function matchesFilter(item, filter) {
@@ -115,7 +171,7 @@ export function setupViewsPanel(store, root) {
       return "";
     }
     const text = Math.abs(value) >= 10 ? Math.round(value) : value.toFixed(1);
-    return `<span${value > gate ? ' class="over"' : ""}>${label} ${text}</span>`;
+    return `<span class="gt-metric${value > gate ? " over" : ""}"><span>${label}</span><b>${text}</b></span>`;
   }
 
   function viewPeakTags(view, limit = 6) {
@@ -346,41 +402,9 @@ export function setupViewsPanel(store, root) {
     );
   }
 
-  function solverControls(onRun) {
-    const strategies = store.scene?.strategies ?? [];
-    if (!strategyChoice || !strategies.some((s) => s.name === strategyChoice)) {
-      strategyChoice = store.scene?.config.default_strategy ?? strategies[0]?.name ?? "powell";
-    }
-    const strategySelect = el(
-      "select",
-      { class: "solver-select", value: strategyChoice },
-      strategies.map((s) => el("option", { value: s.name, text: s.label })),
-    );
-    strategySelect.value = strategyChoice;
-    strategySelect.addEventListener("change", () => (strategyChoice = strategySelect.value));
-
-    const runButton = el("button", { type: "button", class: "primary", text: "Run solver" });
-    runButton.addEventListener("click", () => onRun(strategySelect, runButton));
-
-    const priorInput = el("input", { type: "checkbox", checked: positionPriorChoice });
-    const priorSwitch = el("label", { class: "toggle solve-option-toggle" }, [
-      priorInput,
-      el("span", { text: "Position prior" }),
-      el("small", { text: "Off: recover position from the skyline alone" }),
-    ]);
-    priorInput.addEventListener("change", () => (positionPriorChoice = priorInput.checked));
-
-    return { strategySelect, runButton, priorSwitch };
-  }
-
   function rebuildViewEditor(view) {
     const ext = view.true_extrinsics;
     runStatus = el("p", { class: "control-hint" });
-    solvesHost = el("ul", { class: "solve-list" });
-    if (view.source === "photo" && !view.solves.length && store.scene?.strategies?.some((strategy) => strategy.name === "horizon")) {
-      strategyChoice = "horizon";
-    }
-    const { strategySelect, runButton, priorSwitch } = solverControls((sel, btn) => runSolve(view.id, sel, btn));
 
     const nameInput = el("input", { class: "view-name-edit", type: "text", value: view.label });
     nameInput.addEventListener("change", () => {
@@ -419,20 +443,13 @@ export function setupViewsPanel(store, root) {
         poseSlider("Yaw", ext.yaw_deg, -180, 180, 1, "deg", view.id, (v) => ({ yaw_deg: v })),
         poseSlider("Pitch", ext.pitch_deg, -30, 30, 0.5, "deg", view.id, (v) => ({ pitch_deg: v })),
         poseSlider("Eye height", view.eye_height_m, 0, 1000, 10, "m", view.id, (v) => ({ eye_height_m: v })),
-        el("div", { class: "editor-divider" }),
-        el("span", { class: "control-eyebrow", text: "Solve" }),
-        el("div", { class: "solve-actions" }, [strategySelect, runButton]),
-        el("div", { class: "solve-option" }, [priorSwitch]),
         runStatus,
-        solvesHost,
       ]),
     );
-    renderSolves(view);
   }
 
   function rebuildGtEditor(sample) {
     runStatus = el("p", { class: "control-hint" });
-    solvesHost = null;
     const openButton = el("button", { type: "button", class: "primary", text: "Open editable view" });
     openButton.addEventListener("click", async () => {
       openButton.disabled = true;
@@ -456,15 +473,10 @@ export function setupViewsPanel(store, root) {
         centerButton.disabled = false;
       }
     });
-    const { strategySelect, runButton, priorSwitch } = solverControls((sel, btn) => solveGt(sample, sel, btn));
     editor.replaceChildren(
       el("div", { class: "control-block compact" }, [
         el("div", { class: "editor-header" }, [el("span", { class: "editor-title", text: sample.name }), providerChip("gt")]),
         el("div", { class: "editor-actions" }, [openButton, centerButton]),
-        el("div", { class: "editor-divider" }),
-        el("span", { class: "control-eyebrow", text: "Solve" }),
-        el("div", { class: "solve-actions" }, [strategySelect, runButton]),
-        el("div", { class: "solve-option" }, [priorSwitch]),
         runStatus,
       ]),
     );
@@ -482,70 +494,6 @@ export function setupViewsPanel(store, root) {
       return;
     }
     editor.replaceChildren();
-    solvesHost = null;
-  }
-
-  function renderSolves(view) {
-    if (!solvesHost) {
-      return;
-    }
-    solvesHost.replaceChildren(
-      ...view.solves.map((summary) => {
-        const selected = summary.id === store.selectedSolveId;
-        const remove = el("button", { type: "button", class: "icon-button", title: "Delete solve", text: "✕" });
-        remove.addEventListener("click", (event) => {
-          event.stopPropagation();
-          store.deleteSolve(view.id, summary.id);
-        });
-        const yawErr = summary.metrics.yaw_error_deg;
-        const mae = summary.metrics.contour_mae_px;
-        return el("li", { class: selected ? "solve-row selected" : "solve-row" }, [
-          el("button", { type: "button", class: "solve-name", onclick: () => store.selectSolve(view.id, summary.id) }, [
-            el("span", { class: "solve-strategy", text: strategyLabel(summary.strategy) }),
-            el("span", { class: "solve-stat", text: `yaw ${formatNumber(yawErr, "°")} · fit ${formatNumber(mae, "px")}` }),
-          ]),
-          remove,
-        ]);
-      }),
-    );
-    if (!view.solves.length) {
-      solvesHost.append(el("li", { class: "view-empty", text: "No solves yet — run one above." }));
-    }
-  }
-
-  function strategyLabel(name) {
-    return store.scene?.strategies.find((s) => s.name === name)?.label ?? name;
-  }
-
-  async function runSolve(viewId, strategySelect, runButton) {
-    runButton.disabled = true;
-    runStatus.textContent = `Solving with ${strategyLabel(strategySelect.value)}…`;
-    try {
-      const solve = await store.runSolve(viewId, strategySelect.value, { position_prior: positionPriorChoice });
-      runStatus.textContent = `Converged in ${solve.result.evaluations} evaluations.`;
-    } catch (error) {
-      runStatus.textContent = error.message;
-    } finally {
-      runButton.disabled = false;
-    }
-  }
-
-  // Solve a GT view: open it as a scene view (recenters the map), then run — from
-  // here it is an ordinary view, and the editor rebuilds itself around it.
-  async function solveGt(sample, strategySelect, runButton) {
-    runButton.disabled = true;
-    runStatus.textContent = `Opening ${sample.name} as a view…`;
-    try {
-      const view = await store.openGtView(sample.name);
-      runStatus.textContent = `Solving with ${strategyLabel(strategySelect.value)}…`;
-      await store.runSolve(view.id, strategySelect.value, { position_prior: positionPriorChoice });
-    } catch (error) {
-      if (runStatus) {
-        runStatus.textContent = error.message;
-      }
-    } finally {
-      runButton.disabled = false;
-    }
   }
 
   function schedulePatch(viewId, changes) {
@@ -570,12 +518,11 @@ export function setupViewsPanel(store, root) {
     if (key !== editorKey) {
       editorKey = key;
       rebuildEditor();
-    } else if (store.selectedView()) {
-      renderSolves(store.selectedView());
     }
   }
 
   search.addEventListener("input", renderList);
+  sortSelect.addEventListener("change", renderList);
   store.on("placing", renderPlacing);
   store.on("views", render);
   store.on("selection", render);

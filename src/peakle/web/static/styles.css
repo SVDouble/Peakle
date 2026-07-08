@@ -121,10 +121,24 @@ button {
   top: 0;
   width: 100%;
   height: 100%;
+  overflow: hidden;
 }
 
 .map-viewport.placing {
   cursor: crosshair;
+}
+
+.map-viewport.pov-interactive {
+  cursor: zoom-in;
+  touch-action: none;
+}
+
+.map-viewport.pov-interactive.pov-zoomed {
+  cursor: grab;
+}
+
+.map-viewport.pov-interactive.pov-panning {
+  cursor: grabbing;
 }
 
 #mapCanvas {
@@ -195,18 +209,49 @@ button {
   background: var(--predicted);
 }
 
-.map-hud {
+.map-mode-hud,
+.map-pov-info,
+.map-photo-hud {
   position: absolute;
-  left: 16px;
-  bottom: 16px;
   z-index: 2;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 70%;
+  pointer-events: none;
 }
 
-.map-hud .control-hint {
+.map-mode-hud {
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: max-content;
+  max-width: min(520px, calc(100% - 32px));
+}
+
+.map-pov-info {
+  left: 16px;
+  top: 16px;
+  width: min(360px, calc(100% - 32px));
+}
+
+.map-photo-hud {
+  right: 16px;
+  top: 16px;
+  max-width: min(240px, calc(100% - 32px));
+}
+
+.map-mode-hud > *,
+.map-pov-info > *,
+.map-photo-hud > * {
+  pointer-events: auto;
+}
+
+.map-mode-hud > .segmented {
+  flex: 0 0 auto;
+  width: max-content;
+}
+
+.map-mode-hud .control-hint {
   margin: 0;
   padding: 4px 8px;
   border-radius: 5px;
@@ -216,22 +261,16 @@ button {
 
 .pov-solutions {
   width: min(360px, 100%);
-  border-collapse: collapse;
-  overflow: hidden;
-  border: 1px solid rgba(240, 199, 94, 0.28);
-  border-radius: 6px;
-  background: rgba(20, 21, 18, 0.78);
-  backdrop-filter: blur(6px);
+  border-collapse: separate;
+  border-spacing: 0 5px;
   font-size: 11px;
   table-layout: fixed;
 }
 
 .pov-solutions tr {
   cursor: pointer;
-}
-
-.pov-solutions tr + tr {
-  border-top: 1px solid rgba(240, 199, 94, 0.14);
+  background: rgba(20, 21, 18, 0.78);
+  backdrop-filter: blur(6px);
 }
 
 .pov-solutions tr:hover,
@@ -241,12 +280,16 @@ button {
 
 .pov-solutions th,
 .pov-solutions td {
-  padding: 6px 8px;
-  vertical-align: middle;
+  padding: 7px 9px;
+  vertical-align: top;
+  border-top: 1px solid rgba(240, 199, 94, 0.2);
+  border-bottom: 1px solid rgba(240, 199, 94, 0.2);
 }
 
 .pov-solutions th {
-  width: 62px;
+  width: 74px;
+  border-left: 1px solid rgba(240, 199, 94, 0.2);
+  border-radius: 6px 0 0 6px;
   color: var(--accent);
   font-size: 10px;
   line-height: 1.2;
@@ -257,6 +300,8 @@ button {
 
 .pov-solutions td {
   min-width: 0;
+  border-right: 1px solid rgba(240, 199, 94, 0.2);
+  border-radius: 0 6px 6px 0;
   color: var(--text);
 }
 
@@ -269,7 +314,7 @@ button {
 }
 
 .pov-solution-detail {
-  margin-top: 1px;
+  margin-top: 3px;
   color: var(--muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
@@ -729,8 +774,31 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   min-width: 0;
 }
 
+.library-actions > .photo-import {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.library-filter-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(118px, 0.42fr);
+  gap: 8px;
+}
+
 .lib-search {
   min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.lib-sort {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel-strong);
@@ -750,26 +818,45 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 }
 
 .photo-import {
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
+  position: relative;
 }
 
 .photo-import summary {
+  list-style: none;
   cursor: pointer;
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
   user-select: none;
 }
 
+.photo-import summary::-webkit-details-marker {
+  display: none;
+}
+
+.photo-import .add-photo-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--accent);
+  font-size: 20px;
+  line-height: 1;
+}
+
 .photo-import-form {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 6;
+  width: min(340px, calc(100vw - 32px));
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(240, 199, 94, 0.26);
+  border-radius: 6px;
+  background: rgba(27, 29, 23, 0.98);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.42);
 }
 
 .photo-file,
@@ -824,7 +911,7 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 
 .lib-list {
   display: grid;
-  gap: 4px;
+  gap: 7px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -833,33 +920,36 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 
 .lib-row {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr);
   align-items: start;
-  gap: 8px;
-  min-height: 38px;
-  padding: 6px 7px;
-  border: 1px solid transparent;
-  border-radius: 5px;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 9px;
+  border: 1px solid rgba(240, 199, 94, 0.11);
+  border-radius: 6px;
+  background: rgba(25, 27, 21, 0.74);
 }
 
 .lib-row:hover {
-  background: var(--panel-strong);
+  border-color: rgba(240, 199, 94, 0.26);
+  background: rgba(36, 39, 31, 0.9);
 }
 
 .lib-row.selected {
   border-color: rgba(240, 199, 94, 0.5);
-  background: rgba(240, 199, 94, 0.08);
+  background: rgba(240, 199, 94, 0.1);
 }
 
 .provider-chip {
-  width: 34px;
-  padding: 2px 6px;
+  width: 42px;
+  margin-top: 1px;
+  padding: 3px 6px;
   border-radius: 4px;
   background: #30342a;
   color: var(--muted);
   font-size: 9.5px;
   font-weight: 700;
-  line-height: 1.3;
+  line-height: 1.1;
   text-align: center;
   text-transform: uppercase;
 }
@@ -875,6 +965,8 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 }
 
 .lib-main {
+  display: grid;
+  gap: 5px;
   min-width: 0;
 }
 
@@ -886,8 +978,8 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   border: 0;
   background: transparent;
   color: var(--text);
-  font-family: ui-monospace, Menlo, monospace;
-  font-size: 11.5px;
+  font-size: 12px;
+  line-height: 1.25;
   text-align: left;
   cursor: pointer;
   white-space: nowrap;
@@ -898,9 +990,9 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 .lib-peaks {
   display: block;
   min-width: 0;
-  margin-top: 2px;
   color: var(--muted);
   font-size: 10.5px;
+  line-height: 1.25;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -966,10 +1058,6 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   font-size: 13px;
 }
 
-.views-panel .solve-actions button {
-  width: 100%;
-}
-
 .editor-title {
   display: block;
   margin-bottom: 10px;
@@ -1000,6 +1088,11 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   margin: 4px 0 8px;
 }
 
+.compare-status {
+  margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
 .solve-option-toggle {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1013,6 +1106,19 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   grid-column: 2;
   color: var(--muted);
   font-size: 11px;
+}
+
+.candidate-compare {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+}
+
+.candidate-compare input {
+  width: 14px;
+  height: 14px;
 }
 
 .solve-row .solve-name {
@@ -1065,22 +1171,48 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 }
 
 .gt-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px 7px;
+  display: grid;
+  grid-template-columns: auto repeat(2, minmax(48px, auto)) auto;
+  gap: 4px;
   align-items: center;
-  margin-top: 4px;
+  width: max-content;
+  max-width: 100%;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 
-.gt-metrics .over {
+.gt-metric {
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  gap: 3px;
+  align-items: baseline;
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid rgba(185, 181, 168, 0.16);
+  border-radius: 4px;
+  background: rgba(15, 16, 13, 0.42);
+}
+
+.gt-metric span {
+  color: #8f8b80;
+}
+
+.gt-metric b {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.gt-metric.over b {
   color: #ef8f8f;
   font-weight: 650;
 }
 
 .gt-metrics .on-map {
+  min-height: 18px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(142, 224, 142, 0.11);
   color: #8ee08e;
   font-size: 9.5px;
 }
@@ -1204,6 +1336,10 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   flex: 0 0 auto;
 }
 
+.gt-toggle-group .photo-overlay-swatch {
+  background: linear-gradient(135deg, #53c6ff 0 50%, #f0c75e 50% 100%);
+}
+
 .gt-inspect-meta {
   color: var(--muted);
   font-size: 11.5px;
@@ -1232,60 +1368,6 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 
 .gt-reasons {
   color: #ef8f8f;
-}
-
-/* --- GT pose adjust --- */
-.gt-adjust {
-  border-top: 1px solid var(--line);
-  padding-top: 6px;
-}
-
-.gt-adjust summary {
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  user-select: none;
-}
-
-.gt-adjust .field {
-  margin-top: 4px;
-}
-
-.adjust-line {
-  fill: none;
-  stroke: #ffd24a;
-  stroke-width: 2;
-  stroke-dasharray: 6 4;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.85));
-}
-
-.adjust-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.adjust-save,
-.adjust-reset {
-  padding: 4px 10px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--panel-strong);
-  color: var(--text);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.adjust-save:hover {
-  border-color: var(--accent);
-}
-
-.adjust-status {
-  color: var(--muted);
-  font-size: 11.5px;
 }
 
 /* --- 2D overview minimap panel (MapLibre) --- */
@@ -1318,6 +1400,8 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .pov-overlay .pov-layer {
@@ -1350,6 +1434,8 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   object-fit: fill;
   pointer-events: none;
   display: none;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .photo-opacity {

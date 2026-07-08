@@ -224,7 +224,11 @@ def _open_gt_view(scene, name: str):
         pitch_deg=pitch_deg,
         roll_deg=0.0,
     )
-    scene.focus_geo(s.lat, s.lon)  # GPS -> local origin; de/dn are the refinement offset
+    # GPS -> local origin; de/dn are the refinement offset. If the UI already focused this exact
+    # sample, avoid reloading the whole terrain window before building the editable view.
+    origin = scene.terrain.spec.origin
+    if abs(origin.latitude_deg - s.lat) > 1e-6 or abs(origin.longitude_deg - s.lon) > 1e-6:
+        scene.focus_geo(s.lat, s.lon)
     return scene.add_gt_view(name, intrinsics, extrinsics, contour, photo, image_camera=image_camera)
 
 
@@ -456,7 +460,7 @@ def _cached_swiss_patch(lat: float, lon: float):
 async def sample_skyline(
     name: str, dyaw: float = 0.0, de: float = 0.0, dn: float = 0.0, dv: float = 0.0
 ) -> dict[str, Any]:
-    """DEM skyline rows at the sample's refined pose plus manual deltas (adjust preview)."""
+    """DEM skyline rows at the sample's refined pose; deltas are accepted for legacy callers."""
 
     rec = _index().get(name)
     if rec is None:
