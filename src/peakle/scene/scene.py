@@ -339,21 +339,24 @@ class Scene:
         view.solves[solve.id] = solve
         return solve
 
-    def add_gt_view(
+    def add_backed_view(
         self,
-        name: str,
         intrinsics: CameraIntrinsics,
         extrinsics: CameraExtrinsics,
         contour: SkylineContour,
         reference_photo: Any,
+        *,
+        source: str,
+        gt_name: str | None = None,
         label: str | None = None,
     ) -> View:
-        """Materialize a GT sample as a scene View at its refined pose (call AFTER focus_geo).
+        """Add a photo-backed View at a KNOWN position (call AFTER focus_geo).
 
-        The view carries the photograph (``reference_photo``) and the observed skyline extracted
-        from it (``contour``); its ``true_extrinsics`` is the refined dataset pose in the now-local
-        frame, with the sample's own ``intrinsics``. From here it is an ordinary View — it lists,
-        POVs, adjusts and SOLVES like any placed camera, which is the whole point.
+        Backs both a materialized GT sample (``source="gt"``) and an arbitrary uploaded photo
+        (``source="photo"``): the view carries the photograph and the observed skyline extracted
+        from it, with an EXACT-position prior (the position is known — GPS — so the horizon solver
+        recovers orientation there; a noisy prior would flip the yaw). From here it is an ordinary
+        View — it lists, POVs, adjusts and SOLVES like any placed camera.
         """
 
         self._view_counter += 1
@@ -361,9 +364,6 @@ class Scene:
         eye_height_m = extrinsics.position.up_m - self.terrain.elevation_at(
             extrinsics.position.east_m, extrinsics.position.north_m
         )
-        # A GT view's position is KNOWN (the sample's GPS + refinement) — so its prior is exact, not
-        # noisy: the horizon solver recovers orientation AT the prior position, and a GPS-noise
-        # offset there flips the recovered yaw.
         prior = PosePrior(
             position=extrinsics.position,
             yaw_deg=extrinsics.yaw_deg,
@@ -374,11 +374,26 @@ class Scene:
             pitch_sigma_deg=1.0,
         )
         view = self._construct_view(
-            view_id, label or name, intrinsics, extrinsics, eye_height_m,
-            contour=contour, source="gt", gt_name=name, reference_photo=reference_photo, prior=prior,
+            view_id, label or gt_name or f"Photo {self._view_counter}", intrinsics, extrinsics, eye_height_m,
+            contour=contour, source=source, gt_name=gt_name, reference_photo=reference_photo, prior=prior,
         )
         self.views[view_id] = view
         return view
+
+    def add_gt_view(
+        self,
+        name: str,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        contour: SkylineContour,
+        reference_photo: Any,
+        label: str | None = None,
+    ) -> View:
+        """Materialize a GT corpus sample as a scene View (thin wrapper over add_backed_view)."""
+
+        return self.add_backed_view(
+            intrinsics, extrinsics, contour, reference_photo, source="gt", gt_name=name, label=label or name
+        )
 
     def _build_view(
         self,

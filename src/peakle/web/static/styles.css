@@ -1036,8 +1036,8 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 }
 
 .minimap {
-  width: 440px;
-  height: 330px;
+  width: 340px;
+  height: 260px;
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;

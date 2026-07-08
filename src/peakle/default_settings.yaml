@@ -7,10 +7,10 @@ terrain:
     latitude_deg: 46.85
     longitude_deg: 10.25
     elevation_m: 0.0
-  width_m: 14000.0
-  height_m: 10000.0
-  grid_width: 180
-  grid_height: 140
+  width_m: 40000.0
+  height_m: 40000.0
+  grid_width: 640
+  grid_height: 640
   min_elevation_m: 900.0
   max_elevation_m: 3200.0
   seed: 42

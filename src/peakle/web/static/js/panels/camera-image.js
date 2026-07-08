@@ -87,6 +87,12 @@ export function setupCameraPanel(store, root) {
     el("div", { class: "adjust-actions" }, [saveButton, resetButton, adjStatus]),
   ]);
 
+  // Toggle for overlaying the photograph on the 3D terrain in POV (opacity fine-tuned by the map
+  // HUD slider). Sits in the inspector so it is discoverable alongside the outline toggles.
+  const photoOverlayInput = el("input", { type: "checkbox" });
+  photoOverlayInput.checked = store.photoOpacity > 0;
+  photoOverlayInput.addEventListener("change", () => store.setPhotoOpacity(photoOverlayInput.checked ? 0.5 : 0));
+
   const gtControls = el("div", { class: "gt-inspect-controls" }, [
     el(
       "div",
@@ -107,6 +113,10 @@ export function setupCameraPanel(store, root) {
         ]),
       ),
     ),
+    el("label", { class: "toggle photo-overlay-toggle" }, [
+      photoOverlayInput,
+      el("span", { text: "Overlay photo on 3D map (in POV)" }),
+    ]),
     el("div", { class: "gt-inspect-meta" }),
     adjustBlock,
   ]);
