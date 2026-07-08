@@ -1036,8 +1036,8 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 }
 
 .minimap {
-  width: 340px;
-  height: 260px;
+  width: 440px;
+  height: 330px;
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
@@ -1074,4 +1074,32 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   display: flex;
   gap: 4px;
   flex: 0 0 auto;
+}
+
+/* GT photo overlaid on the 3D render in POV (opacity slider in the HUD). */
+.pov-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  display: none;
+}
+
+.photo-opacity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  background: rgba(20, 21, 18, 0.72);
+  backdrop-filter: blur(6px);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.photo-opacity input[type="range"] {
+  accent-color: var(--accent);
+  width: 120px;
 }

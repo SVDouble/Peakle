@@ -25,26 +25,28 @@ export function createCameraMarker(extrinsics, frame, color, labelText, roleClas
   const group = new THREE.Group();
   group.position.copy(position);
 
+  // Compact marker (sizes are scene units ~ km on a focused window, so keep them small): a short
+  // stem for depth, a small core, and a cone pointing down the view direction.
   const stemMaterial = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.7 });
-  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 0.085, 6), stemMaterial);
-  stem.position.y = -0.0425;
+  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.0015, 0.0015, 0.04, 6), stemMaterial);
+  stem.position.y = -0.02;
   group.add(stem);
 
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.015, 18, 18), new THREE.MeshBasicMaterial({ color }));
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.006, 16, 16), new THREE.MeshBasicMaterial({ color }));
   group.add(core);
 
   // Cone points along +Y by default; aim it down the camera's view direction.
   const cone = new THREE.Mesh(
-    new THREE.ConeGeometry(0.026, 0.075, 22),
+    new THREE.ConeGeometry(0.01, 0.03, 20),
     new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.6, roughness: 0.35 }),
   );
   cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), forward);
-  cone.position.copy(forward.clone().multiplyScalar(0.05));
+  cone.position.copy(forward.clone().multiplyScalar(0.02));
   group.add(cone);
 
   if (labelText) {
     const label = createLabel(labelText, `camera-label ${roleClass}`);
-    label.position.set(0, 0.085, 0);
+    label.position.set(0, 0.04, 0);
     label.userData.occlusionAnchor = group;
     group.add(label);
   }

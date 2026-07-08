@@ -20,7 +20,7 @@ from pathlib import Path
 from peakle.domain.peaks import Peak
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-MATCH_RADIUS_M = 750.0
+MATCH_RADIUS_M = 1200.0
 _REQUEST_TIMEOUT_S = 30
 
 

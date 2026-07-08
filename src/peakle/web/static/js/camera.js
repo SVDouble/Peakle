@@ -64,23 +64,26 @@ export function viewCamera(view, solve) {
     },
     imageImmutable: false, // rendered from the current pose
     hasLayers: false, // shows its skyline via the inspector SVG, not precomputed layers
+    photoSrc: view.photo_url ?? null, // a GT-derived view has a reference photograph to overlay
     view,
     solve,
   });
 }
 
 // --- GT sample: an immutable photo + a prior (refined dataset) pose in the geo frame ---
-export function gtCamera(sample) {
+// `adjust` (dyaw/de/dn/dv) is the live inspector adjustment applied on top of the refined pose, so
+// the True-POV camera moves as you drag the sliders.
+export function gtCamera(sample, adjust = { dyaw: 0, de: 0, dn: 0, dv: 0 }) {
   const f = sample.width / ((sample.fov_deg * Math.PI) / 180); // cyltan focal length, px/rad
   const prior = {
     frame: "geo",
     lat: sample.lat,
     lon: sample.lon,
-    de_m: sample.de_m,
-    dn_m: sample.dn_m,
+    de_m: (sample.de_m ?? 0) + (adjust.de ?? 0),
+    dn_m: (sample.dn_m ?? 0) + (adjust.dn ?? 0),
     up_m: sample.cam_z_m,
-    yaw_deg: sample.yaw_deg,
-    pitch_deg: (Math.atan((sample.dv_px ?? 0) / f) * 180) / Math.PI,
+    yaw_deg: sample.yaw_deg + (adjust.dyaw ?? 0),
+    pitch_deg: (Math.atan(((sample.dv_px ?? 0) + (adjust.dv ?? 0)) / f) * 180) / Math.PI,
     vfovDeg: (2 * Math.atan(sample.height / (2 * f)) * 180) / Math.PI,
     aspect: sample.width / sample.height,
   };
@@ -93,5 +96,6 @@ export function gtCamera(sample) {
     imageImmutable: true, // the photograph
     hasLayers: true, // precomputed outline layer PNGs
     sample,
+    photoSrc: `/api/gt/samples/${encodeURIComponent(sample.name)}/layers/photo.png`,
   });
 }

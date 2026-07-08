@@ -33,7 +33,10 @@ export function setupMapPanel(store, root) {
   // so the map and the inspector stay in sync (the POV camera matches the GT pose's fov/aspect,
   // so the photo-coordinate overlays line up with the 3D render).
   const povOverlay = el("div", { class: "pov-overlay" });
-  const viewport = el("div", { class: "map-viewport" }, [canvas, povOverlay]);
+  // The GT photograph, overlaid on the 3D render in a fixed POV so you can align the DEM to the
+  // photo by eye (opacity slider below); it sits under the outline overlay, over the canvas.
+  const povPhoto = el("img", { class: "pov-photo", alt: "" });
+  const viewport = el("div", { class: "map-viewport" }, [canvas, povPhoto, povOverlay]);
   const frameBox = el("div", { class: "frame-box", id: "mapFrameBox" }, [viewport]);
   const hint = el("p", { class: "control-hint", id: "mapHint" });
   const povControls = el(
@@ -48,13 +51,22 @@ export function setupMapPanel(store, root) {
       }),
     ),
   );
+  // Photo-overlay opacity control (only meaningful in a POV that has a photo).
+  const opacityRange = el("input", {
+    type: "range", min: "0", max: "1", step: "0.05", value: String(store.photoOpacity),
+    oninput: () => store.setPhotoOpacity(Number(opacityRange.value)),
+  });
+  const opacityControl = el("label", { class: "photo-opacity", hidden: true }, [
+    el("span", { text: "Photo" }),
+    opacityRange,
+  ]);
   // 2D overview minimap: a collapsible Leaflet navigator in the corner. It lets
   // the user move the heightmap anywhere (click to focus) while keeping the 3D
   // view primary. Starts expanded; the toggle collapses it to a pill.
   const minimapBox = el("div", { class: "minimap", id: "minimapBox" });
   const minimapToggle = el("button", { type: "button", class: "minimap-toggle", title: "Toggle overview map", text: "🗺" });
   const minimapWrap = el("div", { class: "minimap-wrap", id: "minimapWrap" }, [minimapToggle, minimapBox]);
-  root.replaceChildren(frameBox, minimapWrap, el("div", { class: "map-hud" }, [povControls, hint]));
+  root.replaceChildren(frameBox, minimapWrap, el("div", { class: "map-hud" }, [povControls, opacityControl, hint]));
 
   let minimap = null;
   const initMinimap = () => {
@@ -262,6 +274,7 @@ export function setupMapPanel(store, root) {
       controls.update();
       resize();
       updatePovOverlay();
+      updatePovPhoto();
       hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view or GT sample, then choose a POV.";
       return;
     }
@@ -274,7 +287,26 @@ export function setupMapPanel(store, root) {
     // resize() recomputes the letterbox box for the new mode and sets the matching aspect.
     resize();
     updatePovOverlay();
+    updatePovPhoto();
     hint.textContent = `Looking through the ${nextMode} camera of ${active.label}.`;
+  }
+
+  // The GT photograph overlaid on the 3D render for eyeball alignment; visible only in a POV that
+  // has a photo (a GT sample or a GT-derived view), driven by the opacity slider.
+  function updatePovPhoto() {
+    const cam = mode !== "map" ? store.selectedCamera() : null;
+    const src = cam?.photoSrc ?? null;
+    opacityControl.hidden = !src;
+    if (!src) {
+      povPhoto.style.display = "none";
+      return;
+    }
+    if (povPhoto.dataset.src !== src) {
+      povPhoto.dataset.src = src;
+      povPhoto.src = src;
+    }
+    povPhoto.style.opacity = String(store.photoOpacity);
+    povPhoto.style.display = store.photoOpacity > 0 ? "block" : "none";
   }
 
   function syncPovButtons() {
@@ -456,6 +488,13 @@ export function setupMapPanel(store, root) {
   });
   // Outline toggles in the Inspect panel drive the POV overlay too (map <-> inspect in sync).
   store.on("gt-display", updatePovOverlay);
+  // Pose adjustment re-aims the True-POV camera live; the opacity slider updates the photo overlay.
+  store.on("gt-adjust", () => {
+    if (mode !== "map") {
+      applyPov(mode);
+    }
+  });
+  store.on("photo-opacity", updatePovPhoto);
   store.on("placing", () => {
     viewport.classList.toggle("placing", store.placing);
     if (mode === "map") {

@@ -77,6 +77,7 @@ export function setupCameraPanel(store, root) {
         oninput: () => {
           adj[key] = Number(input.value);
           output.textContent = String(adj[key]);
+          store.setGtAdjust({ [key]: adj[key] }); // moves the 3D True-POV camera live
           scheduleAdjustPreview();
         },
       });
@@ -121,6 +122,7 @@ export function setupCameraPanel(store, root) {
       adjInputs[key].input.value = "0";
       adjInputs[key].output.textContent = "0";
     }
+    store.resetGtAdjust();
     adjStatus.textContent = "";
     overlay.replaceChildren();
   }

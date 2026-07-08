@@ -27,6 +27,10 @@ class Store {
     this.selectedGtName = null;
     // Per-layer visibility (keys = GT Lab layer names). Skylines on by default.
     this.gtDisplay = { gt_sky: true, dem_sky: true };
+    // Live pose adjustment for the selected GT sample: the inspector sliders drive it, and the
+    // 3D True-POV camera reads it so adjusting the pose actually moves the view.
+    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
+    this.photoOpacity = 0.5; // GT photo overlaid on the 3D terrain in True POV
     this._gtLoading = false;
     this._listeners = new Map();
   }
@@ -80,7 +84,7 @@ class Store {
     }
     const sample = this.selectedGtSample();
     if (sample) {
-      return gtCamera(sample);
+      return gtCamera(sample, this.gtAdjust);
     }
     return null;
   }
@@ -200,6 +204,7 @@ class Store {
       this.selectedSolveId = null;
       this.placing = false;
     }
+    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 }; // fresh sample starts unadjusted
     this.emit("gt");
     this.emit("selection");
   }
@@ -207,6 +212,25 @@ class Store {
   setGtDisplay(changes) {
     this.gtDisplay = { ...this.gtDisplay, ...changes };
     this.emit("gt-display");
+  }
+
+  // Pose adjustment for the selected GT sample — drives both the inspector's dashed preview and
+  // the 3D True-POV camera (so adjusting the pose moves the view).
+  setGtAdjust(changes) {
+    this.gtAdjust = { ...this.gtAdjust, ...changes };
+    this.emit("gt-adjust");
+  }
+
+  resetGtAdjust() {
+    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
+    this.emit("gt-adjust");
+  }
+
+  // Opacity of the GT photograph overlaid on the 3D terrain in True POV (0 = off), for aligning
+  // the DEM render against the photo by eye.
+  setPhotoOpacity(value) {
+    this.photoOpacity = value;
+    this.emit("photo-opacity");
   }
 
   async focusScene(latDeg, lonDeg, extentM) {
