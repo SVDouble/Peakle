@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from peakle.domain.coordinates import LocalPoint
+
+ProjectionKind = Literal["pinhole", "cyltan"]
 
 
 class CameraIntrinsics(BaseModel):
@@ -70,6 +73,48 @@ class CameraIntrinsics(BaseModel):
             msg = "principal_y_px must be inside the image"
             raise ValueError(msg)
         return self
+
+
+class ImageCamera(BaseModel):
+    """Camera model of the image/crop being inspected.
+
+    ``CameraIntrinsics`` remains the pinhole model used by the DEM rasterizer. This model describes
+    the image coordinate system itself, including GeoPose3K's true cylindrical/tan crop geometry.
+    """
+
+    width_px: int = Field(ge=1)
+    height_px: int = Field(ge=1)
+    horizontal_fov_deg: float = Field(gt=1.0, lt=179.0)
+    projection: ProjectionKind = "pinhole"
+
+    @classmethod
+    def from_intrinsics(cls, intrinsics: CameraIntrinsics, projection: ProjectionKind = "pinhole") -> ImageCamera:
+        """Builds an image camera from existing pinhole intrinsics."""
+
+        return cls(
+            width_px=intrinsics.width_px,
+            height_px=intrinsics.height_px,
+            horizontal_fov_deg=intrinsics.horizontal_fov_deg(),
+            projection=projection,
+        )
+
+    def focal_length_px(self) -> float:
+        """Returns the image-plane focal length used by this projection."""
+
+        hfov_rad = math.radians(self.horizontal_fov_deg)
+        if self.projection == "cyltan":
+            return self.width_px / hfov_rad
+        return self.width_px / (2.0 * math.tan(hfov_rad / 2.0))
+
+    def vertical_fov_deg(self) -> float:
+        """Returns the perspective-camera vertical FOV equivalent for this image."""
+
+        return math.degrees(2.0 * math.atan(self.height_px / (2.0 * self.focal_length_px())))
+
+    def pitch_deg_from_vertical_shift_px(self, shift_px: float) -> float:
+        """Returns the pitch represented by a vertical image shift."""
+
+        return math.degrees(math.atan(shift_px / self.focal_length_px()))
 
 
 class CameraExtrinsics(BaseModel):

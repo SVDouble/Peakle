@@ -1,26 +1,33 @@
 "use strict";
 
 // The 3D map: orbitable terrain with peak labels, click-to-place camera creation,
-// the selected view's ground-truth + predicted cameras with FOV coverage, and POV
-// switching (free orbit / true camera / predicted camera).
+// the selected view's ground-truth + predicted cameras with FOV coverage, and a
+// Map/POV switch backed by a small pose table (ground truth + solves).
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 
 import { api } from "../../api.js";
-import { cameraTargetScenePoint, localToScenePoint, sceneToLocalEastNorth, terrainFrame } from "../../geometry.js";
-import { el, fitContainBox } from "../../format.js";
+import {
+  PHYSICAL_TERRAIN_VERTICAL_SCALE,
+  cameraTargetScenePoint,
+  localToScenePoint,
+  scaledTerrainFrame,
+  sceneToLocalEastNorth,
+  terrainFrame,
+} from "../../geometry.js";
+import { el, fitContainBox, formatNumber, svgElement } from "../../format.js";
 import { GT_LAYER_NAMES } from "../camera-image.js";
 import { buildSelectionLayer } from "./cameras.js";
 import { buildGtSpotsLayer, terrainElevationAt } from "./gt-spots.js";
-import { setupMinimap } from "./minimap.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
 const CAMERA_INITIAL_POSITION = new THREE.Vector3(0.1, 1.55, 2.65);
 const CAMERA_TARGET = new THREE.Vector3(0, 0.22, 0);
 const PICK_MAX_DRAG_PX = 5;
 const LABEL_OCCLUSION_MARGIN = 0.018;
+const SCENE_DEM_SKY_LAYER = "dem_sky";
 
 export function setupMapPanel(store, root) {
   root.classList.add("map-panel");
@@ -29,7 +36,7 @@ export function setupMapPanel(store, root) {
   // and shrinks to the camera image's aspect ratio in POV modes (letterboxing),
   // so the through-the-lens framing matches the rendered image instead of being
   // cropped to the panel's shape.
-  // In True POV for a GT sample this holds the same outline layer PNGs the Inspect panel shows,
+  // In POV for a GT sample this holds the same outline layer PNGs the Inspect panel shows,
   // so the map and the inspector stay in sync (the POV camera matches the GT pose's fov/aspect,
   // so the photo-coordinate overlays line up with the 3D render).
   const povOverlay = el("div", { class: "pov-overlay" });
@@ -42,15 +49,16 @@ export function setupMapPanel(store, root) {
   const povControls = el(
     "div",
     { class: "segmented" },
-    ["map", "true", "predicted"].map((povMode) =>
+    ["map", "pov"].map((povMode) =>
       el("button", {
         type: "button",
         class: povMode === "map" ? "active" : "",
         dataset: { pov: povMode },
-        text: povMode === "map" ? "Map" : povMode === "true" ? "True POV" : "Predicted POV",
+        text: povMode === "map" ? "Map" : "POV",
       }),
     ),
   );
+  const povTable = el("table", { class: "pov-solutions", hidden: true });
   // Photo-overlay opacity control (only meaningful in a POV that has a photo).
   const opacityRange = el("input", {
     type: "range", min: "0", max: "1", step: "0.05", value: String(store.photoOpacity),
@@ -60,29 +68,7 @@ export function setupMapPanel(store, root) {
     el("span", { text: "Photo" }),
     opacityRange,
   ]);
-  // 2D overview minimap: a collapsible Leaflet navigator in the corner. It lets
-  // the user move the heightmap anywhere (click to focus) while keeping the 3D
-  // view primary. Starts expanded; the toggle collapses it to a pill.
-  const minimapBox = el("div", { class: "minimap", id: "minimapBox" });
-  const minimapToggle = el("button", { type: "button", class: "minimap-toggle", title: "Toggle overview map", text: "🗺" });
-  const minimapWrap = el("div", { class: "minimap-wrap", id: "minimapWrap" }, [minimapToggle, minimapBox]);
-  root.replaceChildren(frameBox, minimapWrap, el("div", { class: "map-hud" }, [povControls, opacityControl, hint]));
-
-  let minimap = null;
-  const initMinimap = () => {
-    if (!minimap && minimapBox.clientWidth > 0) {
-      minimap = setupMinimap(store, minimapBox);
-    }
-  };
-  minimapToggle.addEventListener("click", () => {
-    minimapWrap.classList.toggle("collapsed");
-    if (!minimapWrap.classList.contains("collapsed")) {
-      requestAnimationFrame(() => {
-        initMinimap();
-        minimap?.invalidate();
-      });
-    }
-  });
+  root.replaceChildren(frameBox, el("div", { class: "map-hud" }, [povControls, povTable, opacityControl, hint]));
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
   renderer.setClearColor(0x141512, 1);
@@ -130,6 +116,9 @@ export function setupMapPanel(store, root) {
   let gtSpotsLayer = null;
   let gtSpotLabels = [];
   let mode = "map";
+  let povPoseKey = null;
+  let lastSelectionKey = null;
+  let lastSelectedSolveId = null;
   let povAspect = null; // aspect of the active POV camera image, for letterboxing
   // One raycaster, used only for click-to-place picking (a single cast per click).
   // Label occlusion samples the elevation heightfield instead: raycasting the full
@@ -175,6 +164,8 @@ export function setupMapPanel(store, root) {
   }
 
   function rebuildSelection() {
+    syncPovSelection();
+    renderPovTable();
     if (!frame) {
       return;
     }
@@ -213,8 +204,18 @@ export function setupMapPanel(store, root) {
     for (const node of labelRenderer.domElement.querySelectorAll(".gt-spot")) {
       node.remove();
     }
-    gtSpotsLayer = buildGtSpotsLayer(store.terrain, frame, store.gtSamples, store.selectedGtName, (name) =>
-      store.selectGtSample(name),
+    gtSpotsLayer = buildGtSpotsLayer(
+      store.terrain,
+      frame,
+      store.gtSamples,
+      store.selectedGtName,
+      (name) => store.selectGtSample(name, { focus: true }),
+      (sample) => {
+        hint.textContent = `Recentering map on ${sample.name}…`;
+        store.focusGtSample(sample).catch((error) => {
+          hint.textContent = error.message;
+        });
+      },
     );
     scene.add(gtSpotsLayer);
     gtSpotLabels = [];
@@ -223,34 +224,170 @@ export function setupMapPanel(store, root) {
         gtSpotLabels.push(object);
       }
     });
+    syncWorldVerticalScale();
   }
 
-  // The POV pose comes from the unified camera (placed view OR GT sample) — one path, no
-  // view-vs-GT branching. Returns { pose, vfovDeg, aspect, label } or null.
-  function activePov(nextMode) {
+  function activeTerrainFrame() {
+    return frame && mode === "pov" ? scaledTerrainFrame(frame, PHYSICAL_TERRAIN_VERTICAL_SCALE) : frame;
+  }
+
+  function syncWorldVerticalScale() {
+    // Orbit mode uses mild relief emphasis for readability. Through-the-lens POV must use
+    // physical vertical scale, or the 3D silhouette drifts away from photo-coordinate overlays.
+    const verticalScale = mode === "pov" ? PHYSICAL_TERRAIN_VERTICAL_SCALE : 1;
+    for (const group of [terrainGroup, peakGroup, selectionLayer, gtSpotsLayer]) {
+      if (group) {
+        group.scale.y = verticalScale;
+      }
+    }
+    labelRenderer.domElement.style.display = mode === "pov" ? "none" : "";
+  }
+
+  function currentSelectionKey() {
+    return store.selectedViewId ? `view:${store.selectedViewId}` : store.selectedGtName ? `gt:${store.selectedGtName}` : "";
+  }
+
+  function syncPovSelection() {
+    const selectionKey = currentSelectionKey();
+    if (selectionKey !== lastSelectionKey) {
+      povPoseKey = null;
+      lastSelectionKey = selectionKey;
+    }
+    if (store.selectedSolveId && store.selectedSolveId !== lastSelectedSolveId) {
+      povPoseKey = `solve:${store.selectedSolveId}`;
+    }
+    lastSelectedSolveId = store.selectedSolveId;
+  }
+
+  function povRows() {
+    const view = store.selectedView();
+    if (view?.true_extrinsics) {
+      const cam = store.selectedCamera();
+      if (!cam) {
+        return [];
+      }
+      const rows = [
+        {
+          key: "truth",
+          role: view.source === "gt" ? "GT" : "Truth",
+          name: view.source === "gt" ? "Dataset pose" : "Ground truth",
+          detail: `${formatNumber(view.true_extrinsics.yaw_deg, "deg")} · ${formatNumber(view.true_extrinsics.pitch_deg, "deg")}`,
+          pose: cam.scenePoseFromLocal(view.true_extrinsics, store.terrain),
+          label: `${view.label} · Ground truth`,
+          photoSrc: view.photo_url ?? null,
+        },
+      ];
+      for (const summary of view.solves) {
+        rows.push({
+          key: `solve:${summary.id}`,
+          role: "Solve",
+          name: strategyLabel(summary.strategy),
+          detail: `yaw ${formatNumber(summary.metrics.yaw_error_deg, "deg")} · fit ${formatNumber(summary.metrics.contour_mae_px, "px")}`,
+          pose: cam.scenePoseFromLocal(summary.extrinsics, store.terrain),
+          label: `${view.label} · ${strategyLabel(summary.strategy)}`,
+          photoSrc: view.photo_url ?? null,
+          solveId: summary.id,
+        });
+      }
+      return rows;
+    }
+
+    const sample = store.selectedGtSample();
+    if (!sample) {
+      return [];
+    }
     const cam = store.selectedCamera();
-    const pose = cam?.scenePose(store.terrain, nextMode);
-    return pose ? { pose, vfovDeg: pose.vfovDeg, aspect: pose.aspect, label: cam.label } : null;
+    const pose = cam?.scenePose(store.terrain, "true");
+    return [
+      {
+        key: "truth",
+        role: "GT",
+        name: "Dataset pose",
+        detail: `${sample.quality} · fov ${formatNumber(sample.fov_deg, "deg")}`,
+        pose,
+        label: sample.name,
+        photoSrc: cam?.photoSrc ?? null,
+        layersSample: cam?.hasLayers ? sample : null,
+      },
+    ];
+  }
+
+  function strategyLabel(name) {
+    return store.scene?.strategies.find((s) => s.name === name)?.label ?? name;
+  }
+
+  function activePov() {
+    const rows = povRows();
+    if (!rows.length) {
+      return null;
+    }
+    if (!povPoseKey || !rows.some((row) => row.key === povPoseKey)) {
+      povPoseKey = store.selectedSolveId && rows.some((row) => row.key === `solve:${store.selectedSolveId}`) ? `solve:${store.selectedSolveId}` : rows[0].key;
+    }
+    const row = rows.find((candidate) => candidate.key === povPoseKey) ?? rows[0];
+    return row.pose ? row : null;
+  }
+
+  function renderPovTable() {
+    syncPovSelection();
+    const rows = povRows();
+    povTable.hidden = rows.length === 0;
+    if (!rows.length) {
+      povTable.replaceChildren();
+      return;
+    }
+    activePov();
+    const body = el(
+      "tbody",
+      {},
+      rows.map((row) =>
+        el(
+          "tr",
+          {
+            class: row.key === povPoseKey ? "active" : "",
+            onclick: () => selectPovRow(row),
+          },
+          [
+            el("th", { text: row.role }),
+            el("td", {}, [el("span", { class: "pov-solution-name", text: row.name }), el("span", { class: "pov-solution-detail", text: row.detail })]),
+          ],
+        ),
+      ),
+    );
+    povTable.replaceChildren(body);
+  }
+
+  function selectPovRow(row) {
+    povPoseKey = row.key;
+    if (row.solveId && store.selectedViewId && row.solveId !== store.selectedSolveId) {
+      store.selectSolve(store.selectedViewId, row.solveId).catch((error) => {
+        hint.textContent = error.message;
+      });
+    }
+    applyPov("pov");
   }
 
   // Sync the POV outline overlay with the Inspect panel: same enabled layers, same sample. Only a
   // GT camera has precomputed outline layers; a placed view shows its skyline via the inspector SVG.
   function updatePovOverlay() {
-    const cam = mode === "true" ? store.selectedCamera() : null;
-    const sample = cam?.hasLayers ? cam.sample : null;
+    const sample = mode === "pov" ? activePov()?.layersSample : null;
     if (!sample) {
       if (povOverlay.childElementCount) {
         povOverlay.replaceChildren();
       }
       return;
     }
-    const want = GT_LAYER_NAMES.filter((layer) => store.gtDisplay[layer]).map((layer) =>
-      api.gtLayerUrl(sample.name, layer),
-    );
+    const query = gtAdjustQuery();
+    const layers = GT_LAYER_NAMES.filter((layer) => store.gtDisplay[layer]);
+    const want = layers.map((layer) => (layer === SCENE_DEM_SKY_LAYER ? sceneSkylineKey(sample, query) : api.gtLayerUrl(sample.name, layer)));
     const have = [...povOverlay.children].map((node) => node.dataset.src);
     if (want.join("|") !== have.join("|")) {
       povOverlay.replaceChildren(
-        ...want.map((src) => {
+        ...layers.map((layer) => {
+          if (layer === SCENE_DEM_SKY_LAYER) {
+            return createSceneSkylineLayer(sample, query);
+          }
+          const src = api.gtLayerUrl(sample.name, layer);
           const img = el("img", { class: "pov-layer", alt: "" });
           img.dataset.src = src;
           img.src = src;
@@ -260,12 +397,62 @@ export function setupMapPanel(store, root) {
     }
   }
 
+  function gtAdjustQuery() {
+    const adjust = store.gtAdjust ?? {};
+    return new URLSearchParams({
+      dyaw: String(adjust.dyaw ?? 0),
+      de: String(adjust.de ?? 0),
+      dn: String(adjust.dn ?? 0),
+      dv: String(adjust.dv ?? 0),
+    }).toString();
+  }
+
+  function sceneSkylineKey(sample, query) {
+    return `scene-dem-sky:${sample.name}?${query}`;
+  }
+
+  function createSceneSkylineLayer(sample, query) {
+    const key = sceneSkylineKey(sample, query);
+    const svg = svgElement("svg", {
+      class: "pov-layer pov-vector",
+      viewBox: `0 0 ${sample.width} ${sample.height}`,
+      preserveAspectRatio: "none",
+    });
+    svg.dataset.src = key;
+    fetch(`/api/gt/samples/${encodeURIComponent(sample.name)}/scene-skyline?${query}`)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+        return response.json();
+      })
+      .then(({ rows }) => {
+        if (svg.dataset.src !== key) {
+          return;
+        }
+        const points = rows
+          .map((row, col) => (row === null || row === undefined ? null : `${col.toFixed(1)},${Number(row).toFixed(1)}`))
+          .filter(Boolean)
+          .join(" ");
+        svg.replaceChildren(svgElement("polyline", { class: "pov-dem-skyline", points }));
+      })
+      .catch(() => {
+        if (svg.dataset.src === key) {
+          svg.replaceChildren();
+        }
+      });
+    return svg;
+  }
+
   function applyPov(nextMode) {
     mode = nextMode;
+    syncWorldVerticalScale();
     syncPovButtons();
-    const active = nextMode === "map" ? null : activePov(nextMode);
+    renderPovTable();
+    const active = nextMode === "map" ? null : activePov();
     if (!active) {
       mode = "map";
+      syncWorldVerticalScale();
       syncPovButtons();
       controls.enabled = true;
       camera.fov = 45;
@@ -278,24 +465,27 @@ export function setupMapPanel(store, root) {
       hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view or GT sample, then choose a POV.";
       return;
     }
-    povAspect = active.aspect;
+    povAspect = active.pose.aspect;
     controls.enabled = false;
-    camera.fov = active.vfovDeg;
-    camera.position.copy(localToScenePoint(active.pose.position, frame));
+    camera.fov = active.pose.vfovDeg;
+    const povFrame = activeTerrainFrame();
+    if (!povFrame) {
+      return;
+    }
+    camera.position.copy(localToScenePoint(active.pose.position, povFrame));
     camera.up.set(0, 1, 0);
-    camera.lookAt(cameraTargetScenePoint(active.pose, frame));
+    camera.lookAt(cameraTargetScenePoint(active.pose, povFrame));
     // resize() recomputes the letterbox box for the new mode and sets the matching aspect.
     resize();
     updatePovOverlay();
     updatePovPhoto();
-    hint.textContent = `Looking through the ${nextMode} camera of ${active.label}.`;
+    hint.textContent = `Looking through ${active.label}.`;
   }
 
   // The GT photograph overlaid on the 3D render for eyeball alignment; visible only in a POV that
   // has a photo (a GT sample or a GT-derived view), driven by the opacity slider.
   function updatePovPhoto() {
-    const cam = mode !== "map" ? store.selectedCamera() : null;
-    const src = cam?.photoSrc ?? null;
+    const src = mode === "pov" ? (activePov()?.photoSrc ?? null) : null;
     opacityControl.hidden = !src;
     if (!src) {
       povPhoto.style.display = "none";
@@ -406,19 +596,28 @@ export function setupMapPanel(store, root) {
   const OCCLUSION_STEPS = 36;
 
   function terrainOccludes(camPos, target) {
+    const sceneFrame = activeTerrainFrame();
+    if (!sceneFrame) {
+      return false;
+    }
     const t1 = 1 - Math.max(LABEL_OCCLUSION_MARGIN / Math.max(camPos.distanceTo(target), 1e-6), 0.04);
-    const zSpan = Math.max(frame.zMax - frame.zMin, 1);
+    const zSpan = Math.max(sceneFrame.zMax - sceneFrame.zMin, 1);
     for (let i = 1; i <= OCCLUSION_STEPS; i += 1) {
       const t = (i / OCCLUSION_STEPS) * t1;
       const x = camPos.x + (target.x - camPos.x) * t;
       const y = camPos.y + (target.y - camPos.y) * t;
       const z = camPos.z + (target.z - camPos.z) * t;
-      const local = sceneToLocalEastNorth({ x, z }, frame);
-      if (local.east_m < frame.xMin || local.east_m > frame.xMax || local.north_m < frame.yMin || local.north_m > frame.yMax) {
+      const local = sceneToLocalEastNorth({ x, z }, sceneFrame);
+      if (
+        local.east_m < sceneFrame.xMin ||
+        local.east_m > sceneFrame.xMax ||
+        local.north_m < sceneFrame.yMin ||
+        local.north_m > sceneFrame.yMax
+      ) {
         continue;
       }
       const elev = terrainElevationAt(store.terrain, local.east_m, local.north_m);
-      const surfaceY = ((elev - frame.zMin) / zSpan) * (frame.sceneH ?? 0.66);
+      const surfaceY = ((elev - sceneFrame.zMin) / zSpan) * (sceneFrame.sceneH ?? 0.66);
       if (y < surfaceY - 0.002) {
         return true;
       }
@@ -479,6 +678,8 @@ export function setupMapPanel(store, root) {
   store.on("views", rebuildSelection);
   store.on("selection", rebuildSelection);
   store.on("gt", () => {
+    syncPovSelection();
+    renderPovTable();
     rebuildGtSpots();
     // If a GT sample is selected while in a POV mode, re-aim the camera through it;
     // if the selection cleared the pose, fall back to map.
@@ -488,8 +689,9 @@ export function setupMapPanel(store, root) {
   });
   // Outline toggles in the Inspect panel drive the POV overlay too (map <-> inspect in sync).
   store.on("gt-display", updatePovOverlay);
-  // Pose adjustment re-aims the True-POV camera live; the opacity slider updates the photo overlay.
+  // Pose adjustment re-aims the active GT POV live; the opacity slider updates the photo overlay.
   store.on("gt-adjust", () => {
+    renderPovTable();
     if (mode !== "map") {
       applyPov(mode);
     }
@@ -502,7 +704,6 @@ export function setupMapPanel(store, root) {
     }
   });
   rebuildTerrain();
+  renderPovTable();
   syncPovButtons();
-  // The panel host has a size by the time layout settles; init on the next frame.
-  requestAnimationFrame(initMinimap);
 }

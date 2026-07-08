@@ -1,8 +1,9 @@
 "use strict";
 
-// Dockview layout: the 3D map dominates; a narrow right rail carries two tabbed
-// groups — Views | GT data | Setup on top, Inspect | Solve below. Every panel
-// host gets a stable id so the panel modules can find and populate it.
+// Dockview layout: side columns carry workflow/inspection panels and the 3D map
+// owns the center. Every panel host gets a stable id so the panel modules can
+// find and populate it. There is one Views list: placed cameras and GT samples
+// are just views from different providers.
 
 import { createDockview, themeAbyss } from "dockview-core";
 
@@ -10,7 +11,7 @@ const PANELS = [
   { id: "map", title: "Map" },
   { id: "config", title: "Setup" },
   { id: "views", title: "Views" },
-  { id: "gt", title: "GT data" },
+  { id: "overview", title: "Overview" },
   { id: "camera", title: "Inspect" },
   { id: "solve", title: "Solve" },
 ];
@@ -39,20 +40,34 @@ export function buildLayout(rootElement) {
     panels,
   });
 
-  // The map is the app: it takes the great majority of the width by default. A
-  // narrow right rail stacks the work tabs (Views | GT data | Setup — Setup is
-  // rarely touched, so it rides last) over the inspector tabs (Inspect | Solve);
-  // it stays wide enough to read the sample list, and is resizable.
-  const railWidth = Math.min(360, Math.round(width * 0.2));
+  // The map is the app: give it the middle and keep workflow panels in side
+  // columns. The side rails stay readable but bounded so wide screens keep the
+  // terrain as the dominant surface.
+  const minMapWidth = 420;
+  let leftWidth = Math.min(360, Math.max(300, Math.round(width * 0.2)));
+  let rightWidth = Math.min(420, Math.max(340, Math.round(width * 0.22)));
+  const overflow = leftWidth + rightWidth + minMapWidth - width;
+  if (overflow > 0) {
+    const totalSideWidth = leftWidth + rightWidth;
+    const leftShrink = Math.round(overflow * (leftWidth / totalSideWidth));
+    leftWidth = Math.max(260, leftWidth - leftShrink);
+    rightWidth = Math.max(280, rightWidth - (overflow - leftShrink));
+  }
+  const mapWidth = width - leftWidth - rightWidth;
   const groups = [
-    leaf(width - railWidth, panel("map")),
     {
       type: "branch",
-      size: railWidth,
+      size: leftWidth,
       data: [
-        leaf(Math.round(height * 0.52), panel("views"), panel("gt"), panel("config")),
-        leaf(Math.round(height * 0.48), panel("camera"), panel("solve")),
+        leaf(Math.round(height * 0.6), panel("views"), panel("config")),
+        leaf(Math.round(height * 0.4), panel("overview")),
       ],
+    },
+    leaf(mapWidth, panel("map")),
+    {
+      type: "branch",
+      size: rightWidth,
+      data: [leaf(Math.round(height * 0.58), panel("camera")), leaf(Math.round(height * 0.42), panel("solve"))],
     },
   ];
 

@@ -72,6 +72,7 @@ def view_payload(view: View) -> dict[str, Any]:
         "id": view.id,
         "label": view.label,
         "intrinsics": view.intrinsics.model_dump(mode="json"),
+        "image_camera": view.image_camera.model_dump(mode="json"),
         "true_extrinsics": _extrinsics(view),
         "eye_height_m": view.eye_height_m,
         "prior": view.prior.model_dump(mode="json") if view.prior else None,

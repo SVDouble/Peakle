@@ -143,6 +143,7 @@ def solve_pose(
     seed: int | None = None,
     use_position_prior: bool = True,
     projection: str = "pinhole",
+    horizontal_fov_deg: float | None = None,
 ) -> PoseSolveResult:
     """Recovers a full camera pose from an observed contour and a prior.
 
@@ -157,6 +158,7 @@ def solve_pose(
         seed: Optional seed for stochastic strategies.
         projection: Crop geometry for the `horizon` strategy ("pinhole" for a
             synthetic camera, "cyltan" for a GeoPose3K crop / materialized GT view).
+        horizontal_fov_deg: Image camera horizontal FOV. Defaults to the pinhole intrinsics FOV.
 
     Returns:
         The estimated pose, fit metrics, and a convergence trace.
@@ -167,7 +169,15 @@ def solve_pose(
         raise ValueError(msg)
 
     if strategy == "horizon":
-        return _solve_horizon(terrain, contour, intrinsics, prior, truth, projection=projection)
+        return _solve_horizon(
+            terrain,
+            contour,
+            intrinsics,
+            prior,
+            truth,
+            projection=projection,
+            horizontal_fov_deg=horizontal_fov_deg,
+        )
 
     renderer = SyntheticRenderer()
     reduced = _reduced_intrinsics(intrinsics, SOLVE_SAMPLE_WIDTH)
@@ -241,6 +251,7 @@ def _solve_horizon(
     prior: PosePrior,
     truth: CameraExtrinsics | None,
     projection: str = "pinhole",
+    horizontal_fov_deg: float | None = None,
 ) -> PoseSolveResult:
     """The validated peakle.localize horizon solver, adapted to the workbench.
 
@@ -259,7 +270,7 @@ def _solve_horizon(
 
     position = prior.position
     width, height = intrinsics.width_px, intrinsics.height_px
-    hfov_deg = math.degrees(2.0 * math.atan(width / (2.0 * intrinsics.focal_length_px)))
+    hfov_deg = horizontal_fov_deg or math.degrees(2.0 * math.atan(width / (2.0 * intrinsics.focal_length_px)))
     obs = contour.to_profile()
     # cyltan crops carry large vertical offsets (up to ~48°); a pinhole camera does not
     pitch_bounds = (-50.0, 50.0) if projection == "cyltan" else (-30.0, 30.0)

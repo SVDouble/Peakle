@@ -9,6 +9,10 @@ async function request(method, path, body) {
     options.body = JSON.stringify(body);
   }
   const response = await fetch(path, options);
+  return responseJson(response, method, path);
+}
+
+async function responseJson(response, method, path) {
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
@@ -27,6 +31,15 @@ async function request(method, path, body) {
   return response.json();
 }
 
+async function uploadPhoto(path, file) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  return responseJson(response, "POST", path);
+}
+
 export const api = {
   getScene: () => request("GET", "/api/scene"),
   setConfig: (config) => request("PUT", "/api/scene/config", config),
@@ -39,6 +52,18 @@ export const api = {
   listViews: () => request("GET", "/api/views"),
   getView: (id) => request("GET", `/api/views/${id}`),
   createView: (placement) => request("POST", "/api/views", placement),
+  createViewFromPhoto: (file, params) => {
+    const query = new URLSearchParams({
+      lat_deg: String(params.lat_deg),
+      lon_deg: String(params.lon_deg),
+      horizontal_fov_deg: String(params.horizontal_fov_deg),
+      eye_height_m: String(params.eye_height_m ?? 2.0),
+    });
+    if (params.label) {
+      query.set("label", params.label);
+    }
+    return uploadPhoto(`/api/views/from-photo?${query}`, file);
+  },
   patchView: (id, changes) => request("PATCH", `/api/views/${id}`, changes),
   deleteView: (id) => request("DELETE", `/api/views/${id}`),
   duplicateView: (id, label) => request("POST", `/api/views/${id}/duplicate`, label ? { label } : {}),

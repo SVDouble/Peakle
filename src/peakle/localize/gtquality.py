@@ -170,7 +170,12 @@ def best_precision_gate(rows: list[dict], min_precision: float = 0.999) -> dict 
         recall = sum(r["correct"] for r in sel) / max(len(good), 1)
         if prec >= min_precision and (best is None or recall > best["recall"]):
             best = {
-                "recall": recall, "alias": alias_t, "well": well_t, "chamfer": ch_t,
-                "coverage": cov_t, "snr": snr_t, "n": len(sel),
+                "recall": recall,
+                "alias": alias_t,
+                "well": well_t,
+                "chamfer": ch_t,
+                "coverage": cov_t,
+                "snr": snr_t,
+                "n": len(sel),
             }
     return best

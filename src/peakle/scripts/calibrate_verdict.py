@@ -36,7 +36,7 @@ def main() -> None:
         if conf
         else "\ncurrent verdict: nothing CONFIRMED"
     )
-    lost = sum(1 for r in good if r['verdict'] != 'CONFIRMED')
+    lost = sum(1 for r in good if r["verdict"] != "CONFIRMED")
     print(f"correct solves not confirmed (lost recall): {lost}/{len(good)}")
 
     best = best_precision_gate(rows)

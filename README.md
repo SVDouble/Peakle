@@ -25,10 +25,19 @@ uv run peakle web serve          # open the URL it prints
 ```
 
 The app boots on real terrain when SRTM `.hgt` tiles are present (see **Data**
-below), otherwise on synthetic demo terrain. From there you can place cameras
-and solve them, or open the **GT data** tab to work with the photo corpus:
-click a sample to inspect it, `⌖` to recenter the 3D map on its location, and
-**True POV** to look through its camera and compare the DEM against the photo.
+below), otherwise on synthetic demo terrain. From there you can work from one
+**Views** list:
+
+- place a synthetic camera on the 3D map and solve it;
+- open a GeoPose3K sample as an editable, solvable view;
+- use **Localize photo** to upload an arbitrary mountain photo with an approximate
+  location and FOV; or
+- select a catalogue GT sample, inspect its layers, and open it when you want to
+  move or solve it.
+
+The map has a `Map | POV` toggle plus a pose table: pick the dataset pose, ground
+truth pose, or any solver result and look through that camera. The separate
+**Overview** panel is the 2D navigator for moving the terrain window.
 
 Other entry points:
 
@@ -96,8 +105,8 @@ uv run ty check src  # type checking
 src/peakle/
   localize/     the validated solver + GT pipeline (solve, extract, gtrefine,
                 gtbuild, bench, gtquality, explanation, raycast, DEM adapters)
-  web/          FastAPI app + the browser workbench (static/js: 3D map, GT panel,
-                inspector, unified camera abstraction)
+  web/          FastAPI app + the browser workbench (static/js: 3D map,
+                unified Views list, Overview panel, inspector, camera model)
   scene/        in-memory workbench scene (terrain, views, solves)
   terrain/ rendering/ optimization/ domain/    supporting layers
   scripts/      first-class CLIs over the package (python -m peakle.scripts.*)

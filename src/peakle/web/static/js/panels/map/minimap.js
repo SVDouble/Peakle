@@ -1,6 +1,6 @@
 "use strict";
 
-// 2D overview minimap (MapLibre GL JS + OpenTopoMap raster) overlaid on the 3D map.
+// 2D overview minimap (MapLibre GL JS + OpenTopoMap raster).
 // Purpose: move the heightmap anywhere. It shows the current terrain window as a
 // rectangle and every GT sample as a circle (one GeoJSON layer, not N DOM nodes,
 // so 364 points stay smooth), and recenters the 3D heightmap on click — map
@@ -118,9 +118,8 @@ export function setupMinimap(store, host) {
       const name = event.features?.[0]?.properties?.name;
       if (name) {
         const s = store.gtByName(name);
-        store.selectGtSample(name);
         if (s) {
-          store.focusScene(s.lat, s.lon).catch(() => {});
+          store.focusGtSample(s).catch(() => {});
         }
       }
     });

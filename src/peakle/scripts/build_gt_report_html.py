@@ -328,6 +328,5 @@ def main() -> None:
     print(f"-> {out}  ({out.stat().st_size / 1e6:.1f} MB)")
 
 
-
 if __name__ == "__main__":
     main()

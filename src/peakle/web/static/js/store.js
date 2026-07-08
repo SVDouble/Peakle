@@ -28,9 +28,9 @@ class Store {
     // Per-layer visibility (keys = GT Lab layer names). Skylines on by default.
     this.gtDisplay = { gt_sky: true, dem_sky: true };
     // Live pose adjustment for the selected GT sample: the inspector sliders drive it, and the
-    // 3D True-POV camera reads it so adjusting the pose actually moves the view.
+    // 3D POV camera reads it so adjusting the pose actually moves the view.
     this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
-    this.photoOpacity = 0.5; // GT photo overlaid on the 3D terrain in True POV
+    this.photoOpacity = 0.5; // GT photo overlaid on the 3D terrain in POV
     this._gtLoading = false;
     this._listeners = new Map();
   }
@@ -112,6 +112,8 @@ class Store {
     [this.terrain, this.peaks, this.views] = await Promise.all([api.getTerrain(), api.getPeaks(), api.listViews()]);
     this.selectedViewId = null;
     this.selectedSolveId = null;
+    this.selectedGtName = null;
+    this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
     this.solveCache.clear();
     this.emit("scene");
     this.emit("views");
@@ -123,6 +125,23 @@ class Store {
     this.views = [...this.views, view];
     this.placing = false;
     this.emit("views");
+    this.selectView(view.id);
+    return view;
+  }
+
+  async createPhotoView(file, params) {
+    const view = await api.createViewFromPhoto(file, params);
+    [this.scene, this.terrain, this.peaks, this.views] = await Promise.all([
+      api.getScene(),
+      api.getTerrain(),
+      api.getPeaks(),
+      api.listViews(),
+    ]);
+    this.selectedGtName = null;
+    this.solveCache.clear();
+    this.emit("scene");
+    this.emit("views");
+    this.emit("gt");
     this.selectView(view.id);
     return view;
   }
@@ -151,12 +170,19 @@ class Store {
   async deleteView(id) {
     await api.deleteView(id);
     this.views = this.views.filter((view) => view.id !== id);
-    if (this.selectedViewId === id) {
-      this.selectedViewId = this.views.length ? this.views[this.views.length - 1].id : null;
-      this.selectedSolveId = null;
-    }
     this.emit("views");
-    this.emit("selection");
+    if (this.selectedViewId === id) {
+      const nextView = this.views.length ? this.views[this.views.length - 1] : null;
+      if (nextView) {
+        this.selectView(nextView.id);
+      } else {
+        this.selectedViewId = null;
+        this.selectedSolveId = null;
+        this.emit("selection");
+      }
+    } else {
+      this.emit("selection");
+    }
   }
 
   selectView(id) {
@@ -207,7 +233,23 @@ class Store {
     this.emit("gt");
   }
 
-  selectGtSample(name) {
+  selectGtSample(name, options = {}) {
+    const sample = this.gtByName(name);
+    if (options.focus && sample && this.shouldFocusGtSample(sample)) {
+      this.selectedGtName = null;
+      this.selectedViewId = null;
+      this.selectedSolveId = null;
+      this.placing = false;
+      this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
+      this.gtError = null;
+      this.emit("gt");
+      this.emit("selection");
+      this.focusGtSample(sample, options.extentM).catch((error) => {
+        this.gtError = error.message;
+        this.emit("gt");
+      });
+      return;
+    }
     this.selectedGtName = name;
     if (name) {
       this.selectedViewId = null;
@@ -215,8 +257,21 @@ class Store {
       this.placing = false;
     }
     this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 }; // fresh sample starts unadjusted
+    this.gtError = null;
     this.emit("gt");
     this.emit("selection");
+  }
+
+  shouldFocusGtSample(sample, toleranceM = 2500) {
+    const terrain = this.terrain;
+    if (!terrain || terrain.lat_min_deg === undefined || !Number.isFinite(sample.lat) || !Number.isFinite(sample.lon)) {
+      return true;
+    }
+    const centerLat = (terrain.lat_min_deg + terrain.lat_max_deg) / 2;
+    const centerLon = (terrain.lon_min_deg + terrain.lon_max_deg) / 2;
+    const metersPerDegLon = 111320 * Math.cos((centerLat * Math.PI) / 180);
+    const distance = Math.hypot((sample.lon - centerLon) * metersPerDegLon, (sample.lat - centerLat) * 111320);
+    return distance > toleranceM;
   }
 
   setGtDisplay(changes) {
@@ -225,7 +280,7 @@ class Store {
   }
 
   // Pose adjustment for the selected GT sample — drives both the inspector's dashed preview and
-  // the 3D True-POV camera (so adjusting the pose moves the view).
+  // the 3D POV camera (so adjusting the pose moves the view).
   setGtAdjust(changes) {
     this.gtAdjust = { ...this.gtAdjust, ...changes };
     this.emit("gt-adjust");
@@ -236,23 +291,32 @@ class Store {
     this.emit("gt-adjust");
   }
 
-  // Opacity of the GT photograph overlaid on the 3D terrain in True POV (0 = off), for aligning
+  // Opacity of the GT photograph overlaid on the 3D terrain in POV (0 = off), for aligning
   // the DEM render against the photo by eye.
   setPhotoOpacity(value) {
     this.photoOpacity = value;
     this.emit("photo-opacity");
   }
 
-  async focusScene(latDeg, lonDeg, extentM) {
+  async focusScene(latDeg, lonDeg, extentM, options = {}) {
     this.scene = await api.focusScene(latDeg, lonDeg, extentM);
     [this.terrain, this.peaks, this.views] = await Promise.all([api.getTerrain(), api.getPeaks(), api.listViews()]);
     this.selectedViewId = null;
     this.selectedSolveId = null;
+    this.selectedGtName = options.selectedGtName ?? null;
+    if (this.selectedGtName) {
+      this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
+    }
+    this.gtError = null;
     this.solveCache.clear();
     this.emit("scene");
     this.emit("views");
     this.emit("selection");
     this.emit("gt");
+  }
+
+  async focusGtSample(sample, extentM) {
+    await this.focusScene(sample.lat, sample.lon, extentM, { selectedGtName: sample.name });
   }
 
   // Materialize a GT sample as a scene View: it recenters the map (server-side), so refresh the
@@ -268,6 +332,7 @@ class Store {
     this.selectedGtName = null;
     this.solveCache.clear();
     this.emit("scene");
+    this.emit("views");
     this.emit("gt");
     this.selectView(view.id);
     return view;

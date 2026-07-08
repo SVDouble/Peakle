@@ -31,11 +31,10 @@ from anyio import to_thread
 from fastapi import APIRouter, HTTPException, Request, Response
 from PIL import Image
 
-from peakle.domain.camera import CameraExtrinsics
+from peakle.domain.camera import CameraExtrinsics, ImageCamera
 from peakle.domain.contours import ImagePoint, SkylineContour
-from peakle.domain.coordinates import LocalPoint
+from peakle.domain.coordinates import GeoPoint, LocalPoint
 from peakle.localize.copdem import load_cop_around
-from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, read_pfm
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image, dem_skyline, quality_tier, shift_align
 from peakle.localize.photo_support import edge_mask, support_report
@@ -50,6 +49,7 @@ DATA = BASE / "local/data/geopose"
 GTV2 = BASE / "local/derived/gt_v2"
 LAYERS = GTV2 / "layers"
 TILES = BASE / "local/data/copernicus"
+OSM_CACHE = BASE / "data/dem_samples"
 
 # GT = warm/green family; DEM = cool family — two parallel curves in sibling colors = the error
 _COLORS = {
@@ -89,35 +89,38 @@ async def list_samples() -> list[dict[str, Any]]:
         return max(r.get("sky_cons_px") or 0, r.get("pfm_cons_px") or 0)
 
     rows = sorted(_index().values(), key=lambda r: -worst(r))
-    return [
-        {
-            k: r.get(k)
-            for k in (
-                "name",
-                "manual",
-                "quality",
-                "reasons",
-                "sky_cons_px",
-                "pfm_cons_px",
-                "obs_source",
-                "contour_cons_px",
-                "dyaw_deg",
-                "de_m",
-                "dn_m",
-                "tilt_deg",
-                "yaw_deg",
-                "fov_deg",
-                "cam_z_m",  # needed for GT True POV (camera height) + pose adjust
-                "dv_px",  # needed for GT True POV (pitch from vertical shift)
-                "sky_support",
-                "gt_contour_density",
-                "width",
-                "height",
-            )
-        }
-        | {"lat": _latlon(r["name"])[0], "lon": _latlon(r["name"])[1]}
-        for r in rows
-    ]
+    result = []
+    for r in rows:
+        lat, lon = _latlon(r["name"])
+        result.append(
+            {
+                k: r.get(k)
+                for k in (
+                    "name",
+                    "manual",
+                    "quality",
+                    "reasons",
+                    "sky_cons_px",
+                    "pfm_cons_px",
+                    "obs_source",
+                    "contour_cons_px",
+                    "dyaw_deg",
+                    "de_m",
+                    "dn_m",
+                    "tilt_deg",
+                    "yaw_deg",
+                    "fov_deg",
+                    "cam_z_m",  # needed for GT True POV (camera height) + pose adjust
+                    "dv_px",  # needed for GT True POV (pitch from vertical shift)
+                    "sky_support",
+                    "gt_contour_density",
+                    "width",
+                    "height",
+                )
+            }
+            | {"lat": lat, "lon": lon, "visible_peaks": _visible_peak_tags(r, lat, lon)}
+        )
+    return result
 
 
 def _latlon(name: str) -> tuple[float, float]:
@@ -128,11 +131,80 @@ def _latlon(name: str) -> tuple[float, float]:
         return float("nan"), float("nan")
 
 
+@lru_cache(maxsize=1)
+def _named_summits() -> tuple[dict[str, float | str], ...]:
+    summits: dict[tuple[str, float, float], dict[str, float | str]] = {}
+    for path in sorted(OSM_CACHE.glob("osm_peaks_*.json")):
+        try:
+            rows = json.loads(path.read_text())
+        except OSError, ValueError:
+            continue
+        for row in rows:
+            try:
+                name = str(row["name"])
+                lat = float(row["lat"])
+                lon = float(row["lon"])
+            except KeyError, TypeError, ValueError:
+                continue
+            if not name:
+                continue
+            summits[(name, round(lat, 6), round(lon, 6))] = {"name": name, "lat": lat, "lon": lon}
+    return tuple(summits.values())
+
+
+def _visible_peak_tags(rec: dict, lat: float, lon: float, limit: int = 8) -> list[dict[str, float | str]]:
+    if not all(math.isfinite(value) for value in (lat, lon)):
+        return []
+    yaw = rec.get("yaw_deg")
+    fov = rec.get("fov_deg")
+    if yaw is None or fov is None:
+        return []
+    cam_lat, cam_lon = _offset_latlon(lat, lon, float(rec.get("de_m") or 0.0), float(rec.get("dn_m") or 0.0))
+    half_fov = max(1.0, float(fov) / 2.0)
+    tagged: list[tuple[float, str]] = []
+    for summit in _named_summits():
+        bearing, distance_m = _bearing_distance_m(cam_lat, cam_lon, float(summit["lat"]), float(summit["lon"]))
+        if distance_m < 800.0 or distance_m > 80_000.0:
+            continue
+        delta = abs(_angle_delta_deg(bearing, float(yaw)))
+        if delta > half_fov:
+            continue
+        centrality = max(0.0, 1.0 - delta / half_fov)
+        distance_weight = 1.0 / (1.0 + distance_m / 12_000.0)
+        weight = centrality * centrality * distance_weight
+        if weight > 0.01:
+            tagged.append((weight, str(summit["name"])))
+    best_by_name: dict[str, float] = {}
+    for weight, name in tagged:
+        best_by_name[name] = max(weight, best_by_name.get(name, 0.0))
+    return [
+        {"name": name, "weight": round(weight, 4)}
+        for name, weight in sorted(best_by_name.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
+def _offset_latlon(lat: float, lon: float, east_m: float, north_m: float) -> tuple[float, float]:
+    lat2 = lat + north_m / 111_320.0
+    lon2 = lon + east_m / max(111_320.0 * math.cos(math.radians(lat)), 1e-6)
+    return lat2, lon2
+
+
+def _bearing_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[float, float]:
+    meters_per_deg_lon = 111_320.0 * math.cos(math.radians(lat1))
+    east_m = (lon2 - lon1) * meters_per_deg_lon
+    north_m = (lat2 - lat1) * 111_320.0
+    return math.degrees(math.atan2(east_m, north_m)) % 360.0, math.hypot(east_m, north_m)
+
+
+def _angle_delta_deg(a: float, b: float) -> float:
+    return ((a - b + 180.0) % 360.0) - 180.0
+
+
 def _open_gt_view(scene, name: str):
     """Materialize a GT sample into the scene as a View: focus the map on it, build the sample's
-    intrinsics + refined pose (local) + photo-extracted observed skyline, and add the view.
+    image camera + refined pose (local) + GT-v2 observed skyline, and add the view.
 
-    Runs in a worker thread (focus loads terrain; extraction may touch the GPU)."""
+    Runs in a worker thread (focus loads terrain)."""
 
     rec = _index().get(name)
     if rec is None:
@@ -141,15 +213,15 @@ def _open_gt_view(scene, name: str):
     w, h, fov = rec["width"], rec["height"], rec["fov_deg"]
     photo = Image.open(s.photo_path).convert("RGB").resize((w, h), Image.Resampling.BILINEAR)
 
-    # observed skyline extracted from the photograph (so the materialized view is solvable)
-    rgb = np.asarray(photo, np.uint8)
-    cands = [c for c in extract_candidates(rgb).values() if c.coverage >= 0.25]
-    rows = max(cands, key=lambda c: c.coverage).rows if cands else np.full(w, np.nan)
-    points = [ImagePoint(x_px=float(c), y_px=float(rows[c])) for c in range(w) if np.isfinite(rows[c])]
-    contour = SkylineContour(image_width_px=w, image_height_px=h, points=points, source="photo")
+    # A materialized GT view must carry the same observed contour as the GT Lab overlays.
+    # Re-extracting from the photo can latch onto foreground/texture edges and creates jagged
+    # editable-view yellow lines that disagree with the vetted GT-v2 skyline.
+    rows = np.load(GTV2 / f"{name}.npz")["gt_skyline"].astype(float)
+    contour = _rows_contour(rows, w, h, source="gt_skyline")
 
+    image_camera = ImageCamera(width_px=w, height_px=h, horizontal_fov_deg=fov, projection="cyltan")
     intrinsics = build_intrinsics(w, h, fov)
-    pitch_deg = math.degrees(math.atan((rec.get("dv_px") or 0.0) / (w / math.radians(fov))))  # cyltan dv -> pitch
+    pitch_deg = image_camera.pitch_deg_from_vertical_shift_px(rec.get("dv_px") or 0.0)
     extrinsics = CameraExtrinsics(
         position=LocalPoint(east_m=rec["de_m"], north_m=rec["dn_m"], up_m=rec["cam_z_m"]),
         yaw_deg=rec["yaw_deg"],
@@ -157,7 +229,16 @@ def _open_gt_view(scene, name: str):
         roll_deg=0.0,
     )
     scene.focus_geo(s.lat, s.lon)  # GPS -> local origin; de/dn are the refinement offset
-    return scene.add_gt_view(name, intrinsics, extrinsics, contour, photo)
+    return scene.add_gt_view(name, intrinsics, extrinsics, contour, photo, image_camera=image_camera)
+
+
+def _rows_contour(rows: np.ndarray, w: int, h: int, *, source: str) -> SkylineContour:
+    points = [
+        ImagePoint(x_px=float(col), y_px=float(rows[col]))
+        for col in range(min(w, len(rows)))
+        if np.isfinite(rows[col]) and 0.0 <= rows[col] < h
+    ]
+    return SkylineContour(image_width_px=w, image_height_px=h, points=points, source=source)
 
 
 @router.post("/gt/samples/{name}/open-view")
@@ -320,6 +401,27 @@ def _adjusted_rows(rec: dict, dyaw: float, de: float, dn: float) -> np.ndarray:
     )
 
 
+def _scene_rows(
+    scene,
+    rec: dict,
+    lat: float,
+    lon: float,
+    dyaw: float,
+    de: float,
+    dn: float,
+    dv: float,
+) -> dict[str, Any]:
+    """Skyline from the currently loaded 3D map terrain, not the cached GT-v2 DEM."""
+
+    sample_local = scene.terrain.frame.geo_to_local(GeoPoint(latitude_deg=lat, longitude_deg=lon, elevation_m=0.0))
+    cam_e = sample_local.east_m + rec["de_m"] + de
+    cam_n = sample_local.north_m + rec["dn_m"] + dn
+    az = crop_az_deg(rec["width"], rec["fov_deg"], rec["yaw_deg"] + dyaw)
+    rows = dem_skyline(scene.terrain, rec["cam_z_m"], az, rec["width"], rec["height"], rec["fov_deg"], cam_e, cam_n)
+    shifted = rows + rec["dv_px"] + dv
+    return {"rows": [round(float(row), 1) if np.isfinite(row) else None for row in shifted]}
+
+
 @router.get("/gt/samples/{name}/skyline")
 async def sample_skyline(
     name: str, dyaw: float = 0.0, de: float = 0.0, dn: float = 0.0, dv: float = 0.0
@@ -332,6 +434,25 @@ async def sample_skyline(
     rows = await to_thread.run_sync(_adjusted_rows, rec, dyaw, de, dn)
     shifted = rows + rec["dv_px"] + dv
     return {"rows": [round(float(r), 1) if np.isfinite(r) else None for r in shifted]}
+
+
+@router.get("/gt/samples/{name}/scene-skyline")
+async def sample_scene_skyline(
+    name: str,
+    request: Request,
+    dyaw: float = 0.0,
+    de: float = 0.0,
+    dn: float = 0.0,
+    dv: float = 0.0,
+) -> dict[str, Any]:
+    """DEM skyline rows from the current 3D map terrain, for POV overlay alignment."""
+
+    rec = _index().get(name)
+    if rec is None:
+        raise HTTPException(404, f"unknown sample {name}")
+    lat, lon = _latlon(name)
+    async with request.app.state.scene_lock:
+        return await to_thread.run_sync(_scene_rows, request.app.state.scene, rec, lat, lon, dyaw, de, dn, dv)
 
 
 @router.post("/gt/samples/{name}/adjust")

@@ -248,7 +248,9 @@ def _std_rgb(sample) -> np.ndarray:
     rgb = np.asarray(Image.open(sample.photo_path).convert("RGB"), np.uint8)
     if rgb.shape[1] > MAX_W:
         s = MAX_W / rgb.shape[1]
-        rgb = np.asarray(Image.fromarray(rgb).resize((MAX_W, round(rgb.shape[0] * s)), Image.Resampling.BILINEAR), np.uint8)
+        rgb = np.asarray(
+            Image.fromarray(rgb).resize((MAX_W, round(rgb.shape[0] * s)), Image.Resampling.BILINEAR), np.uint8
+        )
     return rgb
 
 
@@ -265,6 +267,7 @@ def _oracle_std(sample, w: int, h: int) -> np.ndarray:
 def _draw_lines(rgb: np.ndarray, layers: list[tuple[np.ndarray, str, int]], header: str = "") -> Image.Image:
     def hex2rgb(hx):
         return tuple(int(hx[i : i + 2], 16) for i in (1, 3, 5))
+
     im = Image.fromarray(np.clip(rgb.astype(float) * 1.15, 0, 255).astype(np.uint8))
     dr = ImageDraw.Draw(im)
     h, w = rgb.shape[:2]

@@ -76,9 +76,7 @@ def _candidates(rgb: np.ndarray, extractor: str) -> dict:
     return cands
 
 
-def run_sample(
-    sdir: Path, extent_m: float, grid: int, outdir: Path | None = None, extractor: str = "color"
-) -> dict:
+def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path | None = None, extractor: str = "color") -> dict:
     """Solve one sample on both tracks and return its record (writes an overlay if ``outdir``)."""
 
     gt = load_sample(sdir)
@@ -169,7 +167,10 @@ def run_sample(
         ext_rows = win_c.rows
     else:
         rec["extracted"] = {
-            "correct": False, "verdict": "REJECTED", "yaw_err": float("nan"), "note": "no usable skyline"
+            "correct": False,
+            "verdict": "REJECTED",
+            "yaw_err": float("nan"),
+            "note": "no usable skyline",
         }
         ext_rows = np.full(w_p, np.nan)
         s_extr = None

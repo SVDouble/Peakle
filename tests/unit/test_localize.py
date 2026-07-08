@@ -6,7 +6,6 @@ inverse requirement: on terrain whose skyline carries no yaw information the sol
 report a confident verdict, whatever the residual says.
 """
 
-
 import numpy as np
 import pytest
 

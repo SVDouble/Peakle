@@ -8,8 +8,8 @@ import { buildLayout } from "./layout.js";
 import { store } from "./store.js";
 import { setupCameraPanel } from "./panels/camera-image.js";
 import { setupConfigPanel } from "./panels/config.js";
-import { setupGtPanel } from "./panels/gt.js";
 import { setupMapPanel } from "./panels/map/viewer.js";
+import { setupMinimapPanel } from "./panels/minimap.js";
 import { setupSolvePanel } from "./panels/solve.js";
 import { setupViewsPanel } from "./panels/views.js";
 
@@ -17,7 +17,7 @@ const PANEL_SETUP = {
   map: setupMapPanel,
   config: setupConfigPanel,
   views: setupViewsPanel,
-  gt: setupGtPanel,
+  overview: setupMinimapPanel,
   camera: setupCameraPanel,
   solve: setupSolvePanel,
 };

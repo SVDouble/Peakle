@@ -7,8 +7,82 @@
 // resolving the pose into the scene, POV, inspection — is shared here; the two builders at the
 // bottom just extract source-specific fields into the same shape.
 
-import { verticalFovDeg } from "./geometry.js";
 import { geoToLocal } from "./panels/map/gt-spots.js";
+
+const DEG = Math.PI / 180;
+const RAD = 180 / Math.PI;
+
+export class ImageCamera {
+  constructor({ widthPx, heightPx, horizontalFovDeg, projection = "pinhole" }) {
+    this.widthPx = widthPx;
+    this.heightPx = heightPx;
+    this.horizontalFovDeg = horizontalFovDeg;
+    this.projection = projection;
+  }
+
+  static fromPayload(payload, fallbackIntrinsics = null, fallbackProjection = "pinhole") {
+    if (payload) {
+      return new ImageCamera({
+        widthPx: payload.width_px,
+        heightPx: payload.height_px,
+        horizontalFovDeg: payload.horizontal_fov_deg,
+        projection: payload.projection ?? fallbackProjection,
+      });
+    }
+    if (!fallbackIntrinsics) {
+      return null;
+    }
+    return new ImageCamera({
+      widthPx: fallbackIntrinsics.width_px,
+      heightPx: fallbackIntrinsics.height_px,
+      horizontalFovDeg: horizontalFovFromIntrinsics(fallbackIntrinsics),
+      projection: fallbackProjection,
+    });
+  }
+
+  static fromGtSample(sample) {
+    return new ImageCamera({
+      widthPx: sample.width,
+      heightPx: sample.height,
+      horizontalFovDeg: sample.fov_deg,
+      projection: "cyltan",
+    });
+  }
+
+  get aspect() {
+    return this.widthPx / this.heightPx;
+  }
+
+  get focalLengthPx() {
+    const hfovRad = this.horizontalFovDeg * DEG;
+    return this.projection === "cyltan" ? this.widthPx / hfovRad : this.widthPx / (2 * Math.tan(hfovRad / 2));
+  }
+
+  get verticalFovDeg() {
+    return 2 * Math.atan(this.heightPx / (2 * this.focalLengthPx)) * RAD;
+  }
+
+  pitchDegFromVerticalShiftPx(shiftPx) {
+    return Math.atan(shiftPx / this.focalLengthPx) * RAD;
+  }
+
+  poseDescriptor(fields) {
+    return { ...fields, imageCamera: this };
+  }
+
+  scenePose(fields) {
+    return {
+      ...fields,
+      vfovDeg: this.verticalFovDeg,
+      aspect: this.aspect,
+      imageCamera: this,
+    };
+  }
+}
+
+function horizontalFovFromIntrinsics(intrinsics) {
+  return 2 * Math.atan(intrinsics.width_px / (2 * intrinsics.focal_length_px)) * RAD;
+}
 
 // A pose descriptor is frame-tagged: "local" (already in the scene's east/north/up frame, a placed
 // view) or "geo" (a global lat/lon + refined offset, a GT sample). resolvePose is the single place
@@ -30,12 +104,12 @@ function resolvePose(desc, terrain) {
   } else {
     position = desc.position;
   }
-  return { position, yaw_deg: desc.yaw_deg, pitch_deg: desc.pitch_deg, vfovDeg: desc.vfovDeg, aspect: desc.aspect };
+  return desc.imageCamera.scenePose({ position, yaw_deg: desc.yaw_deg, pitch_deg: desc.pitch_deg });
 }
 
 class Camera {
   constructor(fields) {
-    Object.assign(this, fields); // kind, id, label, aspect, poses, imageImmutable, hasLayers, view, solve, sample
+    Object.assign(this, fields); // kind, id, label, imageCamera, poses, imageImmutable, hasLayers, view, solve, sample
   }
 
   // The one POV path: resolve this camera's pose for a mode ("true" | "predicted") into the scene.
@@ -43,21 +117,33 @@ class Camera {
     return resolvePose(this.poses[mode], terrain);
   }
 
+  scenePoseFromLocal(extrinsics, terrain) {
+    return resolvePose(this.imageCamera.poseDescriptor({
+      frame: "local",
+      position: extrinsics.position,
+      yaw_deg: extrinsics.yaw_deg,
+      pitch_deg: extrinsics.pitch_deg,
+    }), terrain);
+  }
+
   hasPose(mode) {
     return !!this.poses[mode];
   }
 }
 
+export function viewImageCamera(view) {
+  return ImageCamera.fromPayload(view.image_camera, view.intrinsics, view.source === "gt" ? "cyltan" : "pinhole");
+}
+
 // --- placed view: pose in the local frame, image is a live DEM render (mutable) ---
 export function viewCamera(view, solve) {
-  const vfovDeg = verticalFovDeg(view.intrinsics);
-  const aspect = view.intrinsics.width_px / view.intrinsics.height_px;
-  const local = (e) => ({ frame: "local", position: e.position, yaw_deg: e.yaw_deg, pitch_deg: e.pitch_deg, vfovDeg, aspect });
+  const imageCamera = viewImageCamera(view);
+  const local = (e) => imageCamera.poseDescriptor({ frame: "local", position: e.position, yaw_deg: e.yaw_deg, pitch_deg: e.pitch_deg });
   return new Camera({
     kind: "view",
     id: view.id,
     label: view.label,
-    aspect,
+    imageCamera,
     poses: {
       true: view.true_extrinsics ? local(view.true_extrinsics) : null,
       predicted: solve ? local(solve.result.estimate.extrinsics) : null,
@@ -72,10 +158,10 @@ export function viewCamera(view, solve) {
 
 // --- GT sample: an immutable photo + a prior (refined dataset) pose in the geo frame ---
 // `adjust` (dyaw/de/dn/dv) is the live inspector adjustment applied on top of the refined pose, so
-// the True-POV camera moves as you drag the sliders.
+// the POV camera moves as you drag the sliders.
 export function gtCamera(sample, adjust = { dyaw: 0, de: 0, dn: 0, dv: 0 }) {
-  const f = sample.width / ((sample.fov_deg * Math.PI) / 180); // cyltan focal length, px/rad
-  const prior = {
+  const imageCamera = ImageCamera.fromGtSample(sample);
+  const prior = imageCamera.poseDescriptor({
     frame: "geo",
     lat: sample.lat,
     lon: sample.lon,
@@ -83,15 +169,13 @@ export function gtCamera(sample, adjust = { dyaw: 0, de: 0, dn: 0, dv: 0 }) {
     dn_m: (sample.dn_m ?? 0) + (adjust.dn ?? 0),
     up_m: sample.cam_z_m,
     yaw_deg: sample.yaw_deg + (adjust.dyaw ?? 0),
-    pitch_deg: (Math.atan(((sample.dv_px ?? 0) + (adjust.dv ?? 0)) / f) * 180) / Math.PI,
-    vfovDeg: (2 * Math.atan(sample.height / (2 * f)) * 180) / Math.PI,
-    aspect: sample.width / sample.height,
-  };
+    pitch_deg: imageCamera.pitchDegFromVerticalShiftPx((sample.dv_px ?? 0) + (adjust.dv ?? 0)),
+  });
   return new Camera({
     kind: "gt",
     id: sample.name,
     label: sample.name,
-    aspect: sample.width / sample.height,
+    imageCamera,
     poses: { true: prior }, // the refined dataset pose — a prior you can adjust and solve from
     imageImmutable: true, // the photograph
     hasLayers: true, // precomputed outline layer PNGs

@@ -10,7 +10,6 @@ import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 import { TERRAIN_DEPTH, TERRAIN_HEIGHT, TERRAIN_WIDTH, interpolate, localToScenePoint } from "../../geometry.js";
 
 const CONTOUR_INTERVAL_M = 250;
-const MAX_PEAK_LABELS = 8;
 // Hillshade direction; matches the scene's directional "sun" so baked relief and
 // real lighting agree.
 const RELIEF_LIGHT_DIR = new THREE.Vector3(-1.6, 2.4, 1.1).normalize();
@@ -26,6 +25,8 @@ export const SHADING_MODES = [
 export const DEFAULT_SHADING_MODE = SHADING_MODES[0].id;
 
 const SHADING_INDEX = new Map(SHADING_MODES.map((mode) => [mode.id, mode.index]));
+const PEAK_MARKER_SCALE = 0.034;
+const PEAK_LABEL_OFFSET = 0.052;
 
 let peakGlyphTexture = null;
 
@@ -56,6 +57,8 @@ function terrainGeometry(terrain, frame, peaks) {
   const gridHeight = terrain.grid_height;
   const positions = new Float32Array(gridWidth * gridHeight * 3);
   const regionHue = new Float32Array(gridWidth * gridHeight);
+  const massifPeaks = (peaks || []).filter((peak) => peak.prominence_m > 0);
+  const colorPeaks = massifPeaks.length ? massifPeaks : peaks;
   const indices = [];
   for (let row = 0; row < gridHeight; row += 1) {
     for (let col = 0; col < gridWidth; col += 1) {
@@ -66,7 +69,7 @@ function terrainGeometry(terrain, frame, peaks) {
       positions[index * 3] = point.x;
       positions[index * 3 + 1] = point.y;
       positions[index * 3 + 2] = point.z;
-      regionHue[index] = nearestPeakHue(east, north, peaks);
+      regionHue[index] = nearestPeakHue(east, north, colorPeaks);
     }
   }
   for (let row = 0; row < gridHeight - 1; row += 1) {
@@ -236,7 +239,9 @@ function createBasePlane(frame) {
 // a rebuild can remove them all at once — previously only the labels were returned and the marker
 // sprites leaked, leaving red triangles hanging in the air after a map switch (user-reported).
 export function addPeakLabels(scene, peaks, frame) {
-  const labeled = [...peaks].sort((a, b) => b.prominence_m - a.prominence_m).slice(0, MAX_PEAK_LABELS);
+  const labeled = [...peaks].sort(
+    (a, b) => b.prominence_m - a.prominence_m || b.elevation_m - a.elevation_m || a.name.localeCompare(b.name),
+  );
   const group = new THREE.Group();
   const labels = [];
   for (const peak of labeled) {
@@ -246,7 +251,7 @@ export function addPeakLabels(scene, peaks, frame) {
     group.add(marker);
     const label = createLabel(peak.name, "peak-label");
     label.position.copy(point);
-    label.position.y += 0.078;
+    label.position.y += PEAK_LABEL_OFFSET;
     label.userData.occlusionAnchor = marker;
     group.add(label);
     labels.push(label);
@@ -260,7 +265,7 @@ function createPeakMarker() {
     peakGlyphTexture = createPeakGlyphTexture();
   }
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: peakGlyphTexture, transparent: true, depthWrite: false }));
-  sprite.scale.setScalar(0.06);
+  sprite.scale.setScalar(PEAK_MARKER_SCALE);
   sprite.center.set(0.5, 0);
   return sprite;
 }

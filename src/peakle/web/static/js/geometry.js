@@ -16,7 +16,8 @@ export const RASTER_EPSILON = 1e-8;
 // 2.35x1.72 box while stretching its relief to a fixed height made the mountains
 // read as rugged/exaggerated (user-reported).
 const SCENE_MAX_EXTENT = 3.0;
-const SCENE_Z_EMPHASIS = 1.35;
+export const SCENE_Z_EMPHASIS = 1.35;
+export const PHYSICAL_TERRAIN_VERTICAL_SCALE = 1 / SCENE_Z_EMPHASIS;
 
 export function terrainFrame(terrain) {
   const xExtent = Math.max(terrain.x_max_m - terrain.x_min_m, 1);
@@ -34,6 +35,10 @@ export function terrainFrame(terrain) {
     sceneD: (SCENE_MAX_EXTENT * yExtent) / maxExtent,
     sceneH: (SCENE_MAX_EXTENT * (zExtent / maxExtent)) * SCENE_Z_EMPHASIS,
   };
+}
+
+export function scaledTerrainFrame(frame, verticalScale) {
+  return { ...frame, sceneH: (frame.sceneH ?? TERRAIN_HEIGHT) * verticalScale };
 }
 
 export function terrainLocalGridPoint(terrain, frame, row, col) {

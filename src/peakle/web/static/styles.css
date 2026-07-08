@@ -25,6 +25,7 @@ body {
   width: 100%;
   height: 100%;
   margin: 0;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -37,6 +38,11 @@ button {
 #layoutRoot {
   position: absolute;
   inset: 0;
+  overflow: hidden;
+}
+
+#layoutRoot .dv-shell {
+  overflow: hidden;
 }
 
 .boot-error {
@@ -69,9 +75,17 @@ button {
 
 /* Control panels scroll; the map and camera manage their own layout. */
 #configPanel,
-#viewsPanel,
 #solvePanel {
   overflow: auto;
+  padding: 14px 16px 18px;
+}
+
+#viewsPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
   padding: 14px 16px 18px;
 }
 
@@ -198,6 +212,67 @@ button {
   border-radius: 5px;
   background: rgba(20, 21, 18, 0.72);
   backdrop-filter: blur(6px);
+}
+
+.pov-solutions {
+  width: min(360px, 100%);
+  border-collapse: collapse;
+  overflow: hidden;
+  border: 1px solid rgba(240, 199, 94, 0.28);
+  border-radius: 6px;
+  background: rgba(20, 21, 18, 0.78);
+  backdrop-filter: blur(6px);
+  font-size: 11px;
+  table-layout: fixed;
+}
+
+.pov-solutions tr {
+  cursor: pointer;
+}
+
+.pov-solutions tr + tr {
+  border-top: 1px solid rgba(240, 199, 94, 0.14);
+}
+
+.pov-solutions tr:hover,
+.pov-solutions tr.active {
+  background: rgba(240, 199, 94, 0.12);
+}
+
+.pov-solutions th,
+.pov-solutions td {
+  padding: 6px 8px;
+  vertical-align: middle;
+}
+
+.pov-solutions th {
+  width: 62px;
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pov-solutions td {
+  min-width: 0;
+  color: var(--text);
+}
+
+.pov-solution-name,
+.pov-solution-detail {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pov-solution-detail {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* --- Camera panel --- */
@@ -411,11 +486,23 @@ button.primary {
   border-radius: 5px;
 }
 
+button.secondary {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+}
+
 button.primary.active {
   background: #d8a93b;
 }
 
-button.primary:disabled {
+button.primary:disabled,
+button.secondary:disabled {
   opacity: 0.6;
   cursor: default;
 }
@@ -610,15 +697,277 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   border-top: 1px solid var(--line);
 }
 
-/* --- Views panel: place button, view + solve lists, solve actions --- */
-.views-panel wa-button[slot],
-.views-panel > .control-block > wa-button,
-.views-panel .solve-actions wa-button {
+/* --- Views panel: unified view library, editor, solve actions --- */
+.library-panel {
+  min-height: 0;
+}
+
+.library-head {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.library-head-row,
+.library-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.library-head-row {
+  justify-content: space-between;
+}
+
+.library-head-row .control-eyebrow {
+  margin-bottom: 0;
+}
+
+.library-actions > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.lib-search {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.lib-action {
+  min-height: 34px;
+  font-size: 12px;
+}
+
+.lib-search {
+  width: 100%;
+  padding: 6px 9px;
+}
+
+.photo-import {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.photo-import summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  user-select: none;
+}
+
+.photo-import-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.photo-file,
+.photo-field {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.photo-file {
+  padding: 5px 7px;
+}
+
+.photo-field {
+  min-height: 28px;
+  padding: 4px 7px;
+}
+
+.photo-import-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.photo-label {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.photo-label span {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.photo-import-form button.primary {
   width: 100%;
 }
 
-.views-panel > .control-block > wa-button {
+.lib-scroll {
+  flex: 1 1 0;
+  min-height: 110px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.lib-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  align-content: start;
+}
+
+.lib-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-height: 38px;
+  padding: 6px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+
+.lib-row:hover {
+  background: var(--panel-strong);
+}
+
+.lib-row.selected {
+  border-color: rgba(240, 199, 94, 0.5);
+  background: rgba(240, 199, 94, 0.08);
+}
+
+.provider-chip {
+  width: 34px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #30342a;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.provider-chip.gt {
+  background: #2c331f;
+  color: #dfe9a6;
+}
+
+.provider-chip.photo {
+  background: #233438;
+  color: #b4e6ef;
+}
+
+.lib-main {
+  min-width: 0;
+}
+
+.lib-name {
   display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lib-peaks {
+  display: block;
+  min-width: 0;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lib-divider {
+  margin: 6px 0 2px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.view-editor {
+  flex: 0 0 auto;
+  max-height: 34%;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.view-editor:empty {
+  display: none;
+}
+
+.editor-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.editor-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.editor-actions button.secondary:hover {
+  border-color: var(--accent);
+}
+
+.editor-divider {
+  height: 1px;
+  margin: 12px 0;
+  background: var(--line);
+}
+
+.view-name-edit {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.views-panel .solve-actions button {
+  width: 100%;
 }
 
 .editor-title {
@@ -636,12 +985,34 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   margin: 10px 0 6px;
 }
 
-.solve-actions wa-select {
+.solver-select {
   min-width: 0;
+  min-height: 34px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
 }
 
 .solve-option {
   margin: 4px 0 8px;
+}
+
+.solve-option-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: center;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.solve-option-toggle small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .solve-row .solve-name {
@@ -683,21 +1054,6 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   border-radius: 999px;
 }
 
-/* --- GT dataset panel --- */
-.gt-panel .gt-block {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.gt-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
 .gt-lab-link {
   color: var(--accent);
   font-size: 11.5px;
@@ -708,68 +1064,12 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   text-decoration: underline;
 }
 
-.gt-search {
-  margin-top: 8px;
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel-strong);
-  color: var(--text);
-  font: inherit;
-  font-size: 12.5px;
-}
-
-.gt-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  display: grid;
-  gap: 3px;
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-  align-content: start;
-}
-
-.gt-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  cursor: pointer;
-}
-
-.gt-row:hover {
-  background: var(--panel-strong);
-}
-
-.gt-row.sel {
-  border-color: rgba(240, 199, 94, 0.5);
-  background: rgba(240, 199, 94, 0.08);
-}
-
-.gt-row-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.gt-name {
-  font-family: ui-monospace, Menlo, monospace;
-  font-size: 10.5px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .gt-metrics {
   display: flex;
-  gap: 7px;
+  flex-wrap: wrap;
+  gap: 3px 7px;
   align-items: center;
+  margin-top: 4px;
   color: var(--muted);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
@@ -804,6 +1104,7 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 
 /* --- GT spots on the 3D map --- */
 .gt-spot {
+  position: relative;
   pointer-events: auto;
   width: 34px;
   height: 26px;
@@ -836,6 +1137,27 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.gt-spot-focus {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(240, 199, 94, 0.8);
+  border-radius: 4px;
+  background: rgba(20, 21, 18, 0.88);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.gt-spot-focus:hover {
+  background: var(--accent);
+  color: #1d1b13;
 }
 
 .camera-label.gt-camera {
@@ -987,66 +1309,23 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   font-size: 11.5px;
 }
 
-.gt-rebuild {
-  margin-left: auto;
-  padding: 2px 9px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--panel-strong);
-  color: var(--text);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.gt-rebuild:hover:not(:disabled) {
-  border-color: var(--accent);
-}
-
-.gt-rebuild:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* --- 2D overview minimap (Leaflet) --- */
-.minimap-wrap {
-  position: absolute;
-  right: 14px;
-  top: 14px;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-}
-
-.minimap-toggle {
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(20, 21, 18, 0.9);
-  color: var(--text);
-  font-size: 15px;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-}
-
-.minimap-toggle:hover {
-  border-color: var(--accent);
-}
-
+/* --- 2D overview minimap panel (MapLibre) --- */
 .minimap {
-  width: 340px;
-  height: 260px;
+  width: 100%;
+  height: 100%;
   border: 1px solid var(--line);
-  border-radius: 8px;
   overflow: hidden;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
   background: #0c0d0b;
 }
 
-.minimap-wrap.collapsed .minimap {
-  display: none;
+.minimap-panel {
+  min-height: 0;
+  padding: 0;
+  background: #0c0d0b;
+}
+
+.minimap-panel-map {
+  border: 0;
 }
 
 /* MapLibre canvas fills the box; the OTM attribution is disabled (kept in the source). */
@@ -1070,10 +1349,17 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   object-fit: fill;
 }
 
-.gt-row-actions {
-  display: flex;
-  gap: 4px;
-  flex: 0 0 auto;
+.pov-overlay .pov-vector {
+  overflow: visible;
+}
+
+.pov-overlay .pov-dem-skyline {
+  fill: none;
+  stroke: #00c8ff;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
 }
 
 /* GT photo overlaid on the 3D render in POV (opacity slider in the HUD). */

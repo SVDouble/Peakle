@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from peakle.config import AppSettings, PoseNoiseSettings
 from peakle.contours import DEFAULT_DETECTOR, ContourDetector
-from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
+from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, ImageCamera
 from peakle.domain.contours import SkylineContour
 from peakle.domain.coordinates import LocalPoint
 from peakle.domain.peaks import Peak, PeakDetectionSpec
@@ -100,6 +100,7 @@ class View(BaseModel):
     id: str
     label: str
     intrinsics: CameraIntrinsics
+    image_camera: ImageCamera
     true_extrinsics: CameraExtrinsics | None
     eye_height_m: float
     prior: PosePrior | None
@@ -273,6 +274,7 @@ class Scene:
             current.intrinsics,
             extrinsics,
             eye,
+            image_camera=current.image_camera,
             contour=current.contour if current.source == "gt" else None,
             source=current.source,
             gt_name=current.gt_name,
@@ -324,9 +326,8 @@ class Scene:
             truth=view.true_extrinsics,
             seed=seed,
             use_position_prior=use_position_prior,
-            # a GT-derived view is a GeoPose3K crop (truly cylindrical, rows ∝ tan el); a placed
-            # synthetic camera is a pinhole render
-            projection="cyltan" if view.source == "gt" else "pinhole",
+            projection=view.image_camera.projection,
+            horizontal_fov_deg=view.image_camera.horizontal_fov_deg,
         )
         solve = Solve(
             id=f"solve-{self._solve_counter:02d}",
@@ -349,6 +350,7 @@ class Scene:
         source: str,
         gt_name: str | None = None,
         label: str | None = None,
+        image_camera: ImageCamera | None = None,
     ) -> View:
         """Add a photo-backed View at a KNOWN position (call AFTER focus_geo).
 
@@ -370,12 +372,21 @@ class Scene:
             pitch_deg=extrinsics.pitch_deg,
             horizontal_sigma_m=1.0,
             vertical_sigma_m=1.0,
-            yaw_sigma_deg=1.0,
-            pitch_sigma_deg=1.0,
+            yaw_sigma_deg=120.0 if source == "photo" else 1.0,
+            pitch_sigma_deg=20.0 if source == "photo" else 1.0,
         )
         view = self._construct_view(
-            view_id, label or gt_name or f"Photo {self._view_counter}", intrinsics, extrinsics, eye_height_m,
-            contour=contour, source=source, gt_name=gt_name, reference_photo=reference_photo, prior=prior,
+            view_id,
+            label or gt_name or f"Photo {self._view_counter}",
+            intrinsics,
+            extrinsics,
+            eye_height_m,
+            image_camera=image_camera,
+            contour=contour,
+            source=source,
+            gt_name=gt_name,
+            reference_photo=reference_photo,
+            prior=prior,
         )
         self.views[view_id] = view
         return view
@@ -388,11 +399,19 @@ class Scene:
         contour: SkylineContour,
         reference_photo: Any,
         label: str | None = None,
+        image_camera: ImageCamera | None = None,
     ) -> View:
         """Materialize a GT corpus sample as a scene View (thin wrapper over add_backed_view)."""
 
         return self.add_backed_view(
-            intrinsics, extrinsics, contour, reference_photo, source="gt", gt_name=name, label=label or name
+            intrinsics,
+            extrinsics,
+            contour,
+            reference_photo,
+            source="gt",
+            gt_name=name,
+            label=label or name,
+            image_camera=image_camera,
         )
 
     def _build_view(
@@ -422,6 +441,7 @@ class Scene:
         extrinsics: CameraExtrinsics,
         eye_height_m: float,
         *,
+        image_camera: ImageCamera | None = None,
         contour: SkylineContour | None = None,
         source: str = "placed",
         gt_name: str | None = None,
@@ -437,6 +457,7 @@ class Scene:
             id=view_id,
             label=label,
             intrinsics=intrinsics,
+            image_camera=image_camera or ImageCamera.from_intrinsics(intrinsics),
             true_extrinsics=extrinsics,
             eye_height_m=eye_height_m,
             prior=prior,
@@ -460,7 +481,7 @@ class Scene:
                 float(terrain.longitude_deg.max()) + pad,
             )
             try:
-                peaks = name_peaks_from_osm(peaks, bbox, DEFAULT_DEM_DIR)
+                peaks = name_peaks_from_osm(peaks, bbox, DEFAULT_DEM_DIR, terrain=terrain)
             except Exception:  # noqa: BLE001 — naming is cosmetic; a focus must not fail on Overpass
                 pass
         return peaks

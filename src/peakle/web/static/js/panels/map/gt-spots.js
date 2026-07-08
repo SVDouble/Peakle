@@ -52,7 +52,7 @@ export function terrainElevationAt(terrain, eastM, northM) {
   return interpolate(top, bottom, tr);
 }
 
-export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick) {
+export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick, onFocus) {
   const group = new THREE.Group();
   if (!samples || !samples.length) {
     return group;
@@ -87,6 +87,18 @@ export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick)
     img.src = api.gtThumbUrl(sample.name);
     img.alt = sample.name;
     chip.append(img);
+    if (onFocus) {
+      const focus = document.createElement("button");
+      focus.type = "button";
+      focus.className = "gt-spot-focus";
+      focus.title = "Center the 3D map here";
+      focus.textContent = "⌖";
+      focus.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onFocus(sample);
+      });
+      chip.append(focus);
+    }
     // The CSS2D layer itself ignores pointer events; the chip opts back in.
     chip.addEventListener("pointerdown", (event) => event.stopPropagation());
     chip.addEventListener("click", (event) => {
