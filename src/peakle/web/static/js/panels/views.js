@@ -1,13 +1,11 @@
 "use strict";
 
-// Views panel — ONE list of views, whatever provider they come from. A placed
-// camera and a ground-truth sample are the same kind of thing (an image + a pose
-// to work with); GT is just a different *provider*, tagged with a chip, not a
-// separate corpus in a separate tab. Selecting any row drives the map + inspector;
-// the editor below handles view metadata/pose. Solver controls and solve history
-// live in the Solve panel.
+// Views panel: a left-side library of localized images/crops/photos. GT catalogue rows stay
+// immutable; any mutable DEM/refined-pose backing view and solver outputs live under that view
+// as poses.
 
 import { el, formatNumber } from "../format.js";
+import { fuzzySearchScore, hasFuzzyMatch } from "../fuzzy-search.js";
 import { angleDeltaDeg, geoToLocal } from "../geometry.js";
 
 const PATCH_DEBOUNCE_MS = 250;
@@ -22,19 +20,19 @@ export function setupViewsPanel(store, root) {
   let runStatus = null;
   let rebuildTimer = null;
 
-  const placeButton = el("button", { type: "button", class: "primary lib-action", text: "Place camera" });
+  const placeButton = el("button", { type: "button", class: "primary lib-action", text: "Place view" });
   placeButton.addEventListener("click", () => store.setPlacing(!store.placing));
   const gtLab = el("a", { class: "gt-lab-link", href: "/gt", target: "_blank", text: "GT Lab ↗" });
-  const rebuildBtn = el("button", { type: "button", class: "secondary lib-action", text: "Rebuild", title: "Re-derive metrics/pose for the filtered GT views" });
+  const rebuildBtn = el("button", { type: "button", class: "secondary lib-action", text: "Rebuild", title: "Re-derive metrics/poses for the filtered GT views" });
   rebuildBtn.addEventListener("click", onRebuild);
-  const search = el("input", { class: "lib-search", placeholder: "Search views or peaks…", type: "text" });
+  const search = el("input", { class: "lib-search", placeholder: "Fuzzy search views or peaks…", type: "text" });
   const sortSelect = el("select", { class: "lib-sort", title: "Sort views" }, [
     el("option", { value: "default", text: "Worst GT first" }),
     el("option", { value: "name", text: "Name" }),
     el("option", { value: "on-map", text: "On map first" }),
     el("option", { value: "quality", text: "Quality" }),
     el("option", { value: "peaks", text: "Peak relevance" }),
-    el("option", { value: "solves", text: "Most solves" }),
+    el("option", { value: "solves", text: "Most poses" }),
   ]);
   const photoFile = el("input", { class: "photo-file", type: "file", accept: "image/*", required: true });
   const photoLabel = el("input", { class: "photo-field", type: "text", placeholder: "Label" });
@@ -67,7 +65,7 @@ export function setupViewsPanel(store, root) {
 
   root.replaceChildren(
     el("div", { class: "library-head" }, [
-      el("div", { class: "library-head-row" }, [el("span", { class: "control-eyebrow", text: "Images" }), gtLab]),
+      el("div", { class: "library-head-row" }, [el("span", { class: "control-eyebrow", text: "Views" }), gtLab]),
       el("div", { class: "library-actions" }, [placeButton, rebuildBtn, photoImport]),
       el("div", { class: "library-filter-row" }, [search, sortSelect]),
     ]),
@@ -75,30 +73,38 @@ export function setupViewsPanel(store, root) {
     editor,
   );
 
-  // --- unified item model -------------------------------------------------
-  // Placed/opened views first (your active working set), then the GT provider's
-  // catalogue (worst-first). A GT sample already opened as a view is shown once,
-  // as the view — never doubled.
+  // --- unified view model -------------------------------------------------
+  // Placed/photo views are localized images/crops/photos. GT catalogue samples are immutable
+  // views. Materialized GT views are hidden backing poses, not duplicate rows in the view library.
 
   function items() {
-    const filter = search.value.trim().toLowerCase();
-    const materializedGt = new Set(store.views.filter((v) => v.source === "gt" && v.gt_name).map((v) => v.gt_name));
+    const filter = search.value.trim();
     const views = store.views
+      .filter((v) => v.source !== "gt")
       .map((v) => ({ kind: "view", key: `v:${v.id}`, provider: v.source ?? "placed", label: v.label, view: v, peaks: viewPeakTags(v) }))
+      .map((item) => itemWithSearchScore(item, filter))
       .filter((item) => matchesFilter(item, filter));
     const corpus = (store.gtSamples ?? [])
-      .filter((s) => !materializedGt.has(s.name))
       .map((s) => ({ kind: "gt", key: `g:${s.name}`, provider: "gt", label: s.name, sample: s, peaks: s.visible_peaks ?? [] }))
+      .map((item) => itemWithSearchScore(item, filter))
       .filter((item) => matchesFilter(item, filter));
-    return { views: sortItems(views), corpus: sortItems(corpus) };
+    return { views: sortItems(views, filter), corpus: sortItems(corpus, filter) };
   }
 
-  function sortItems(rows) {
+  function sortItems(rows, filter) {
     const choice = sortSelect.value;
-    if (choice === "default") {
+    if (!filter && choice === "default") {
       return rows;
     }
-    return [...rows].sort((a, b) => compareItems(a, b, choice));
+    return [...rows].sort((a, b) => {
+      if (filter) {
+        const scoreDelta = b.searchScore - a.searchScore;
+        if (Math.abs(scoreDelta) > 0.05) {
+          return scoreDelta;
+        }
+      }
+      return compareItems(a, b, choice);
+    });
   }
 
   function compareItems(a, b, choice) {
@@ -139,6 +145,9 @@ export function setupViewsPanel(store, root) {
   }
 
   function solveCount(item) {
+    if (item.sample) {
+      return store.gtViewForSample(item.sample.name)?.solves?.length ?? 0;
+    }
     return item.view?.solves?.length ?? 0;
   }
 
@@ -146,11 +155,21 @@ export function setupViewsPanel(store, root) {
     if (!filter) {
       return true;
     }
-    const haystack = [item.label, ...(item.peaks ?? []).map((peak) => peak.name)].join(" ").toLowerCase();
-    return filter
-      .split(/\s+/)
-      .filter(Boolean)
-      .every((token) => haystack.includes(token));
+    return hasFuzzyMatch(filter, itemSearchFields(item));
+  }
+
+  function itemWithSearchScore(item, filter) {
+    return { ...item, searchScore: filter ? fuzzySearchScore(filter, itemSearchFields(item)) : 1 };
+  }
+
+  function itemSearchFields(item) {
+    return [
+      { text: item.label, weight: 0.85 },
+      ...(item.peaks ?? []).map((peak) => ({
+        text: peak.name,
+        weight: 1 + Math.min(0.6, Math.log1p(Math.max(0, peak.weight ?? 0)) / 7),
+      })),
+    ];
   }
 
   function inBounds(sample) {
@@ -222,7 +241,7 @@ export function setupViewsPanel(store, root) {
       providerChip(item.provider),
       el("div", { class: "lib-main" }, [
         el("button", { type: "button", class: "lib-name", text: view.label, onclick: () => store.selectView(view.id) }),
-        libPeaks(item.peaks, `${view.solves.length} solve${view.solves.length === 1 ? "" : "s"}`),
+        libPeaks(item.peaks, `${view.solves.length} solver pose${view.solves.length === 1 ? "" : "s"}`),
       ]),
     ]);
   }
@@ -297,8 +316,7 @@ export function setupViewsPanel(store, root) {
   }
 
   async function onRebuild() {
-    const filter = search.value.trim().toLowerCase();
-    const names = (store.gtSamples ?? []).filter((s) => s.name.toLowerCase().includes(filter)).map((s) => s.name).slice(0, 50);
+    const names = items().corpus.map((item) => item.sample.name).slice(0, 50);
     if (!names.length) {
       return;
     }
@@ -343,9 +361,6 @@ export function setupViewsPanel(store, root) {
     if (![lat, lon, fov, eye].every(Number.isFinite)) {
       photoStatus.textContent = "Fill in numeric location and FOV.";
       return;
-    }
-    if (store.scene?.strategies?.some((strategy) => strategy.name === "horizon")) {
-      strategyChoice = "horizon";
     }
     photoSubmit.disabled = true;
     photoStatus.textContent = "Creating photo view…";
@@ -450,17 +465,6 @@ export function setupViewsPanel(store, root) {
 
   function rebuildGtEditor(sample) {
     runStatus = el("p", { class: "control-hint" });
-    const openButton = el("button", { type: "button", class: "primary", text: "Open editable view" });
-    openButton.addEventListener("click", async () => {
-      openButton.disabled = true;
-      runStatus.textContent = `Opening ${sample.name}…`;
-      try {
-        await store.openGtView(sample.name);
-      } catch (error) {
-        runStatus.textContent = error.message;
-        openButton.disabled = false;
-      }
-    });
     const centerButton = el("button", { type: "button", class: "secondary", text: "Center map" });
     centerButton.addEventListener("click", async () => {
       centerButton.disabled = true;
@@ -476,7 +480,7 @@ export function setupViewsPanel(store, root) {
     editor.replaceChildren(
       el("div", { class: "control-block compact" }, [
         el("div", { class: "editor-header" }, [el("span", { class: "editor-title", text: sample.name }), providerChip("gt")]),
-        el("div", { class: "editor-actions" }, [openButton, centerButton]),
+        el("div", { class: "editor-actions" }, [centerButton]),
         runStatus,
       ]),
     );
@@ -508,7 +512,7 @@ export function setupViewsPanel(store, root) {
   }
 
   function renderPlacing() {
-    placeButton.textContent = store.placing ? "Click the map to place…" : "Place camera";
+    placeButton.textContent = store.placing ? "Click map to place view…" : "Place view";
     placeButton.classList.toggle("active", store.placing);
   }
 

@@ -13,6 +13,7 @@ import math
 from typing import Any
 
 import numpy as np
+from cmaes import CMA
 from numpy.typing import NDArray
 from pydantic import BaseModel
 from scipy.optimize import differential_evolution, minimize
@@ -21,6 +22,7 @@ from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.contours import SkylineContour
 from peakle.domain.pose import FitMetrics, PoseEstimate, PosePrior
 from peakle.domain.terrain import TerrainMap
+from peakle.optimization.contour_database import contour_database_seeds
 from peakle.optimization.horizon import horizon_seeds
 from peakle.optimization.objective import PoseObjective
 from peakle.optimization.pose_search import add_synthetic_truth_metrics
@@ -28,11 +30,34 @@ from peakle.optimization.scoring import match_confidence, residual_summary, robu
 from peakle.rendering.rasterizer import SyntheticRenderer
 
 SOLVE_SAMPLE_WIDTH = 360
-SOLVE_TARGET_COLUMNS = 22
+OBJECTIVE_TARGET_COLUMNS = 320
+GLOBAL_OBJECTIVE_TARGET_COLUMNS = 160
+TRACE_TARGET_COLUMNS = 22
 MAX_TRACE_FRAMES = 60
-STRATEGIES = ("powell", "nelder", "evolution", "global", "horizon")
+PRIOR_FREE_STRATEGIES = frozenset({"global"})
+STRATEGIES = ("horizon", "contourdb", "cmaes", "powell", "nelder", "evolution", "global")
 
 AVAILABLE_STRATEGIES = [
+    {
+        "name": "horizon",
+        "label": "Horizon (validated)",
+        "blurb": "The ray-cast 360 deg horizon solver validated on GeoPose3K: median-centered "
+        "shift chamfer with top-K basin polish and honesty diagnostics "
+        "(alias ratio, SNR, verdict). Solves yaw/pitch at the prior position.",
+    },
+    {
+        "name": "contourdb",
+        "label": "Contour DB (seeded)",
+        "blurb": "Precomputes compact skyline snapshots from ring viewpoints around the massif, ranks them by "
+        "normalized contour shape/depth, then locally refines the best matches with the selected priors.",
+    },
+    {
+        "name": "cmaes",
+        "label": "CMA-ES (adaptive)",
+        "blurb": "Covariance Matrix Adaptation Evolution Strategy over the full 5-DOF pose. "
+        "Better suited to coupled position/yaw/pitch basins than fixed simplex or direction-set search, "
+        "then polished locally.",
+    },
     {
         "name": "powell",
         "label": "Powell (local)",
@@ -52,13 +77,6 @@ AVAILABLE_STRATEGIES = [
         "name": "global",
         "label": "Global (no prior)",
         "blurb": "Prior-free: 360 deg horizon correlation across the whole map for position + yaw, then local refine.",
-    },
-    {
-        "name": "horizon",
-        "label": "Horizon (validated)",
-        "blurb": "The ray-cast 360 deg horizon solver validated on GeoPose3K: median-centered "
-        "shift chamfer with top-K basin polish and honesty diagnostics "
-        "(alias ratio, SNR, verdict). Solves yaw/pitch at the prior position.",
     },
 ]
 
@@ -142,6 +160,7 @@ def solve_pose(
     truth: CameraExtrinsics | None = None,
     seed: int | None = None,
     use_position_prior: bool = True,
+    use_orientation_prior: bool = True,
     projection: str = "pinhole",
     horizontal_fov_deg: float | None = None,
 ) -> PoseSolveResult:
@@ -152,10 +171,12 @@ def solve_pose(
         contour: Observed skyline contour at full image resolution.
         intrinsics: Known camera intrinsics.
         prior: Noisy pose prior.
-        strategy: One of `powell`, `nelder`, `evolution`, `global`, `horizon`.
+        strategy: One of `horizon`, `contourdb`, `cmaes`, `powell`, `nelder`, `evolution`, `global`.
         terrain_stride: Terrain subsampling stride for the objective.
         truth: Optional ground-truth pose for error metrics.
         seed: Optional seed for stochastic strategies.
+        use_position_prior: Whether to keep the position prior penalty/bounds.
+        use_orientation_prior: Whether to keep yaw/pitch prior penalty/bounds.
         projection: Crop geometry for the `horizon` strategy ("pinhole" for a
             synthetic camera, "cyltan" for a GeoPose3K crop / materialized GT view).
         horizontal_fov_deg: Image camera horizontal FOV. Defaults to the pinhole intrinsics FOV.
@@ -182,30 +203,48 @@ def solve_pose(
     renderer = SyntheticRenderer()
     reduced = _reduced_intrinsics(intrinsics, SOLVE_SAMPLE_WIDTH)
     observed_reduced = _reduce_profile(contour.to_profile(), intrinsics, reduced)
-    # The global strategy is prior-free by definition: drop both the position and
+    # These strategies are prior-free by definition: drop both the position and
     # orientation priors so the search spans the whole map and full yaw circle.
-    if strategy == "global":
+    if strategy in PRIOR_FREE_STRATEGIES:
         use_position_prior = False
+        use_orientation_prior = False
     # The objective uses the fast upsampled point-projection skyline (set up
     # inside PoseObjective); the trace display still renders at a coarse stride
     # for cheap animation frames.
-    working_stride = max(terrain_stride, round(terrain.spec.grid_width / SOLVE_TARGET_COLUMNS))
+    objective_stride = _objective_stride(terrain, terrain_stride)
+    if strategy in PRIOR_FREE_STRATEGIES or strategy == "contourdb":
+        objective_stride = max(objective_stride, round(terrain.spec.grid_width / GLOBAL_OBJECTIVE_TARGET_COLUMNS))
+    trace_stride = _trace_stride(terrain, terrain_stride)
     objective = PoseObjective(
         terrain=terrain,
         observed_profile=observed_reduced,
         intrinsics=reduced,
         prior=prior,
         renderer=renderer,
-        terrain_stride=working_stride,
+        terrain_stride=objective_stride,
         use_position_prior=use_position_prior,
-        use_orientation_prior=strategy != "global",
+        use_orientation_prior=use_orientation_prior,
     )
-    traced = _TracedSolve(objective, terrain, renderer, reduced, working_stride)
+    traced = _TracedSolve(objective, terrain, renderer, reduced, trace_stride)
+    cma_start_theta = None
+    if strategy == "cmaes" and use_orientation_prior:
+        cma_start_theta = _horizon_orientation_start(
+            terrain,
+            contour,
+            intrinsics,
+            prior,
+            projection=projection,
+            horizontal_fov_deg=horizontal_fov_deg,
+        )
 
     if strategy == "powell":
         _run_powell(traced)
+    elif strategy == "cmaes":
+        _run_cmaes(traced, seed, cma_start_theta)
     elif strategy == "nelder":
         _run_nelder_mead(traced)
+    elif strategy == "contourdb":
+        _run_contour_database(traced)
     elif strategy == "global":
         _run_global(traced)
     else:
@@ -351,6 +390,52 @@ def _solve_horizon(
     )
 
 
+def _horizon_orientation_start(
+    terrain: TerrainMap,
+    contour: SkylineContour,
+    intrinsics: CameraIntrinsics,
+    prior: PosePrior,
+    projection: str,
+    horizontal_fov_deg: float | None,
+) -> NDArray[np.float64] | None:
+    """Returns a 5-DOF theta seeded with horizon yaw/pitch, or `None` if rejected."""
+
+    from peakle.localize.solve import HorizonProfile, solve_orientation
+
+    position = prior.position
+    width, height = intrinsics.width_px, intrinsics.height_px
+    hfov_deg = horizontal_fov_deg or math.degrees(2.0 * math.atan(width / (2.0 * intrinsics.focal_length_px)))
+    pitch_bounds = (-50.0, 50.0) if projection == "cyltan" else (-30.0, 30.0)
+    grid_step = float(min(terrain.x_m[1] - terrain.x_m[0], terrain.y_m[1] - terrain.y_m[0]))
+    profile = HorizonProfile(
+        terrain,
+        position.up_m,
+        step=max(grid_step / 2.0, 10.0),
+        cam_e=position.east_m,
+        cam_n=position.north_m,
+    )
+    solve = solve_orientation(
+        contour.to_profile(),
+        height,
+        profile,
+        fov_deg=hfov_deg,
+        projection=projection,
+        pitch_bounds=pitch_bounds,
+    )
+    if solve.verdict == "REJECTED":
+        return None
+    return np.array(
+        [
+            position.east_m,
+            position.north_m,
+            position.up_m,
+            ((solve.yaw_deg + 180.0) % 360.0) - 180.0,
+            solve.pitch_deg,
+        ],
+        dtype=np.float64,
+    )
+
+
 class _TracedSolve:
     """Wraps a `PoseObjective` with eval counting and best-so-far trace frames."""
 
@@ -440,6 +525,83 @@ def _run_nelder_mead(traced: _TracedSolve) -> None:
     )
 
 
+def _run_cmaes(traced: _TracedSolve, seed: int | None, start_theta: NDArray[np.float64] | None = None) -> None:
+    """Adaptive covariance search over the normalized 5-DOF pose box."""
+
+    objective = traced.objective
+    bounds = objective.bounds()
+    theta0 = np.clip(
+        objective.theta_from_prior() if start_theta is None else start_theta,
+        np.array([low for low, _high in bounds], dtype=np.float64),
+        np.array([high for _low, high in bounds], dtype=np.float64),
+    )
+    scales = _cma_scales(objective, bounds)
+    normalized_bounds = np.array(
+        [
+            [(low - center) / scale, (high - center) / scale]
+            for (low, high), center, scale in zip(bounds, theta0, scales, strict=True)
+        ],
+        dtype=np.float64,
+    )
+    optimizer = CMA(
+        mean=np.zeros(theta0.size, dtype=np.float64),
+        sigma=0.75,
+        bounds=normalized_bounds,
+        seed=seed,
+        population_size=12,
+        lr_adapt=True,
+    )
+    traced.cost(theta0)
+    traced.record()
+    unchanged_generations = 0
+    previous_best = traced.best_score
+    for generation in range(30):
+        solutions: list[tuple[NDArray[np.float64], float]] = []
+        for _ in range(optimizer.population_size):
+            z = optimizer.ask()
+            theta = theta0 + z * scales
+            solutions.append((z, traced.cost(theta)))
+        optimizer.tell(solutions)
+        if generation % 2 == 1:
+            traced.record()
+        if traced.best_score < previous_best - 1e-3:
+            unchanged_generations = 0
+            previous_best = traced.best_score
+        else:
+            unchanged_generations += 1
+        if unchanged_generations >= 8 or optimizer.should_stop():
+            break
+
+    minimize(
+        traced.cost,
+        traced.best_theta,
+        method="Powell",
+        bounds=bounds,
+        callback=traced.record,
+        options={"maxiter": 60, "xtol": 1e-2, "ftol": 1e-2, "disp": False},
+    )
+
+
+def _cma_scales(objective: PoseObjective, bounds: list[tuple[float, float]]) -> NDArray[np.float64]:
+    prior = objective.prior
+    prior_scales = np.array(
+        [
+            prior.horizontal_sigma_m,
+            prior.horizontal_sigma_m,
+            prior.vertical_sigma_m,
+            prior.yaw_sigma_deg,
+            prior.pitch_sigma_deg,
+        ],
+        dtype=np.float64,
+    )
+    bound_scales = np.array([(high - low) / 6.0 for low, high in bounds], dtype=np.float64)
+    if not objective.use_position_prior:
+        prior_scales[:3] = bound_scales[:3]
+    if not objective.use_orientation_prior:
+        prior_scales[3:] = bound_scales[3:]
+    return np.maximum(1e-6, np.minimum(prior_scales, np.maximum(bound_scales, 1e-6)))
+
+
 def _run_global(traced: _TracedSolve) -> None:
     """Prior-free localization: horizon-correlation seeds, then local refine.
 
@@ -460,48 +622,105 @@ def _run_global(traced: _TracedSolve) -> None:
         objective.intrinsics,
         pitch_deg=prior.pitch_deg,
         eye_height_m=eye_height_m,
+        grid_east=20,
+        grid_north=20,
+        n_bins=180,
+        max_columns=80,
+        top_k=8,
+        terrain_stride=objective.terrain_stride,
     )
-    bounds = objective.bounds()
-    lows = np.array([low for low, _high in bounds], dtype=np.float64)
-    highs = np.array([high for _low, high in bounds], dtype=np.float64)
-
-    # Stage 1: cheaply polish every seed so the true basin (often outranked by
-    # ambiguous skyline matches in the coarse score) gets a fair full-objective
-    # evaluation. Stage 2: deep-refine only the few best by full-objective score.
-    polished: list[tuple[float, NDArray[np.float64]]] = []
-    for seed in seeds:
-        theta0 = np.clip(
+    _polish_seed_thetas(
+        traced,
+        [
             np.array(
                 [seed.position.east_m, seed.position.north_m, seed.position.up_m, seed.yaw_deg, seed.pitch_deg],
                 dtype=np.float64,
-            ),
-            lows,
-            highs,
-        )
-        traced.cost(theta0)
+            )
+            for seed in seeds
+        ],
+        quick_maxiter=5,
+        deep_count=2,
+        deep_maxiter=25,
+    )
+
+
+def _run_contour_database(traced: _TracedSolve) -> None:
+    """Localizes from compact projected-contour snapshot matches."""
+
+    objective = traced.objective
+    seeds = contour_database_seeds(
+        objective.terrain,
+        objective.observed_profile,
+        objective.intrinsics,
+        objective.prior,
+        traced.renderer,
+        objective.terrain_stride,
+    )
+    _polish_seed_thetas(
+        traced,
+        [
+            np.array(
+                [
+                    seed.extrinsics.position.east_m,
+                    seed.extrinsics.position.north_m,
+                    seed.extrinsics.position.up_m,
+                    seed.extrinsics.yaw_deg,
+                    seed.extrinsics.pitch_deg,
+                ],
+                dtype=np.float64,
+            )
+            for seed in seeds
+        ],
+        quick_maxiter=8,
+        deep_count=3,
+        deep_maxiter=32,
+    )
+
+
+def _polish_seed_thetas(
+    traced: _TracedSolve,
+    seeds: list[NDArray[np.float64]],
+    *,
+    quick_maxiter: int,
+    deep_count: int,
+    deep_maxiter: int,
+) -> None:
+    """Quick-polishes many pose seeds, then deeply refines the best few."""
+
+    bounds = traced.objective.bounds()
+    lows = np.array([low for low, _high in bounds], dtype=np.float64)
+    highs = np.array([high for _low, high in bounds], dtype=np.float64)
+    polished: list[tuple[float, NDArray[np.float64]]] = []
+    for seed in seeds:
+        theta0 = np.clip(seed, lows, highs)
         result = minimize(
             traced.cost,
             theta0,
             method="Powell",
             bounds=bounds,
-            options={"maxiter": 20, "xtol": 5e-2, "ftol": 5e-2, "disp": False},
+            options={"maxiter": quick_maxiter, "xtol": 1e-1, "ftol": 1e-1, "disp": False},
         )
-        theta = np.asarray(result.x, dtype=np.float64)
-        polished.append((float(traced.objective.score(theta)), theta))
+        polished.append((float(result.fun), np.asarray(result.x, dtype=np.float64)))
         traced.record()
+
+    if not polished:
+        traced.cost(np.clip(traced.objective.theta_from_prior(), lows, highs))
+        traced.record()
+        traced.candidates = [(traced.best_score, traced.best_theta.copy())]
+        return
 
     polished.sort(key=lambda item: item[0])
     refined: list[tuple[float, NDArray[np.float64]]] = []
-    for _score, theta in polished[:8]:
+    for _score, theta in polished[:deep_count]:
         result = minimize(
             traced.cost,
             theta,
             method="Powell",
             bounds=bounds,
             callback=traced.record,
-            options={"maxiter": 80, "xtol": 1e-2, "ftol": 1e-2, "disp": False},
+            options={"maxiter": deep_maxiter, "xtol": 3e-2, "ftol": 3e-2, "disp": False},
         )
-        refined.append((float(traced.objective.score(result.x)), np.asarray(result.x, dtype=np.float64)))
+        refined.append((float(result.fun), np.asarray(result.x, dtype=np.float64)))
     traced.record()
 
     # Collect every well-separated pose that fits, best-first: a single outline is
@@ -567,12 +786,12 @@ def _coarse_pose_search(traced: _TracedSolve) -> None:
     # Keep the yaw scan ~8deg-spaced so a wide (compass-distrusting) yaw prior is
     # still covered finely enough to land in the right basin.
     yaw_span = prior.yaw_sigma_deg * 3.6
-    yaw_count = int(np.clip(round(yaw_span / 8.0), 11, 60))
+    yaw_count = int(np.clip(round(yaw_span / 8.0), 9, 45))
     yaw_values = np.linspace(prior.yaw_deg - yaw_span / 2.0, prior.yaw_deg + yaw_span / 2.0, yaw_count)
     pitch_values = np.linspace(
         prior.pitch_deg - prior.pitch_sigma_deg * 1.8,
         prior.pitch_deg + prior.pitch_sigma_deg * 1.8,
-        7,
+        5,
     )
     count = 0
     for east_m in east_values:
@@ -639,6 +858,19 @@ def _reduced_intrinsics(intrinsics: CameraIntrinsics, target_width: int) -> Came
         principal_x_px=intrinsics.principal_x_px * scale,
         principal_y_px=intrinsics.principal_y_px * scale,
     )
+
+
+def _objective_stride(terrain: TerrainMap, configured_stride: int) -> int:
+    """Objective point-cloud stride: full detail on small maps, capped density on large maps."""
+
+    adaptive_stride = max(1, round(terrain.spec.grid_width / OBJECTIVE_TARGET_COLUMNS))
+    return max(1, min(configured_stride, adaptive_stride))
+
+
+def _trace_stride(terrain: TerrainMap, configured_stride: int) -> int:
+    """Trace render stride: deliberately coarse because frames are only for animation."""
+
+    return max(configured_stride, round(terrain.spec.grid_width / TRACE_TARGET_COLUMNS))
 
 
 def _reduce_profile(

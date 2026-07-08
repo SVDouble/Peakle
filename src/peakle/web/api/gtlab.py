@@ -32,7 +32,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from PIL import Image
 
 from peakle.domain.angles import angle_delta_deg
-from peakle.domain.camera import CameraExtrinsics, ImageCamera
+from peakle.domain.camera import CameraExtrinsics, CameraModel
 from peakle.domain.contours import ImagePoint, SkylineContour
 from peakle.domain.coordinates import GeoPoint, LocalFrame, LocalPoint
 from peakle.localize.copdem import load_cop_around
@@ -96,7 +96,8 @@ async def list_samples() -> list[dict[str, Any]]:
     rows = sorted(_index().values(), key=lambda r: -worst(r))
     result = []
     for r in rows:
-        lat, lon = _latlon(r["name"])
+        sample = load_sample(DATA / r["name"])
+        lat, lon = sample.lat, sample.lon
         result.append(
             {
                 k: r.get(k)
@@ -123,7 +124,15 @@ async def list_samples() -> list[dict[str, Any]]:
                     "height",
                 )
             }
-            | {"lat": lat, "lon": lon, "visible_peaks": _visible_peak_tags(r, lat, lon)}
+            | {
+                "lat": lat,
+                "lon": lon,
+                "gt_elev_m": sample.elev_m,
+                "gt_yaw_deg": sample.yaw_gt_deg,
+                "gt_pitch_deg": sample.pitch_gt_deg,
+                "gt_roll_deg": sample.roll_gt_deg,
+                "visible_peaks": _visible_peak_tags(r, lat, lon),
+            }
         )
     return result
 
@@ -215,21 +224,33 @@ def _open_gt_view(scene, name: str):
     rows = np.load(GTV2 / f"{name}.npz")["gt_skyline"].astype(float)
     contour = _rows_contour(rows, w, h, source="gt_skyline")
 
-    image_camera = ImageCamera(width_px=w, height_px=h, horizontal_fov_deg=fov, projection="cyltan")
+    image_camera = CameraModel(width_px=w, height_px=h, horizontal_fov_deg=fov, projection="cyltan")
     intrinsics = build_intrinsics(w, h, fov)
     pitch_deg = image_camera.pitch_deg_from_vertical_shift_px(rec.get("dv_px") or 0.0)
+    position = _sample_local_position(scene, s.lat, s.lon, rec)
+    if position is None:
+        scene.focus_geo(s.lat, s.lon)
+        position = LocalPoint(east_m=rec["de_m"], north_m=rec["dn_m"], up_m=rec["cam_z_m"])
     extrinsics = CameraExtrinsics(
-        position=LocalPoint(east_m=rec["de_m"], north_m=rec["dn_m"], up_m=rec["cam_z_m"]),
+        position=position,
         yaw_deg=rec["yaw_deg"],
         pitch_deg=pitch_deg,
         roll_deg=0.0,
     )
-    # GPS -> local origin; de/dn are the refinement offset. If the UI already focused this exact
-    # sample, avoid reloading the whole terrain window before building the editable view.
-    origin = scene.terrain.spec.origin
-    if abs(origin.latitude_deg - s.lat) > 1e-6 or abs(origin.longitude_deg - s.lon) > 1e-6:
-        scene.focus_geo(s.lat, s.lon)
     return scene.add_gt_view(name, intrinsics, extrinsics, contour, photo, image_camera=image_camera)
+
+
+def _sample_local_position(scene, lat: float, lon: float, rec: dict[str, Any]) -> LocalPoint | None:
+    """Return refined sample position in the current terrain frame, or None if outside it."""
+
+    local = scene.terrain.frame.geo_to_local(GeoPoint(latitude_deg=lat, longitude_deg=lon, elevation_m=0.0))
+    east_m = local.east_m + float(rec["de_m"])
+    north_m = local.north_m + float(rec["dn_m"])
+    if not (float(scene.terrain.x_m[0]) <= east_m <= float(scene.terrain.x_m[-1])):
+        return None
+    if not (float(scene.terrain.y_m[0]) <= north_m <= float(scene.terrain.y_m[-1])):
+        return None
+    return LocalPoint(east_m=east_m, north_m=north_m, up_m=float(rec["cam_z_m"]))
 
 
 def _rows_contour(rows: np.ndarray, w: int, h: int, *, source: str) -> SkylineContour:

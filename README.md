@@ -1,17 +1,23 @@
 # Peakle
 
-Peakle recovers a camera's **pose from a mountain photograph** — yaw, pitch,
-position and field of view — by matching outlines extracted from the photo
+Peakle recovers a **pose from a mountain view** — yaw, pitch,
+position and field of view — by matching outlines extracted from an image/crop/photo
 against renders of a real-world elevation model (DEM). Where a distant skyline
 is distinctive enough, it localizes from the silhouette alone, with **no EXIF and
 no compass**, and it refuses to answer when the evidence is ambiguous rather than
 guessing.
 
+Terminology in the app:
+
+- **View** — the image/crop/photo being localized. This is the left-list entity.
+- **Pose** — one candidate set of extrinsics for a view: position, yaw, pitch and roll.
+- **Camera model** — the view's intrinsics/projection: size, FOV, focal length and crop geometry.
+
 The project is two things that grew together:
 
 - an **interactive web workbench** — a full-window 3D terrain map where you
-  browse the ground-truth photo corpus, look through any camera, overlay the
-  extracted outlines, hand-adjust a pose, and run the solver; and
+  browse the ground-truth view corpus, look through any pose, overlay the
+  extracted outlines, hand-adjust poses, and run solvers; and
 - a **validated localization library** (`peakle.localize`) with an honesty
   harness: every solve reports diagnostics (chamfer, basin width, alias ratio,
   SNR) and a calibrated CONFIRMED/AMBIGUOUS verdict, benchmarked on GeoPose3K so
@@ -28,7 +34,7 @@ The app boots on real terrain when SRTM `.hgt` tiles are present (see **Data**
 below), otherwise on synthetic demo terrain. From there you can work from one
 **Views** list:
 
-- place a synthetic camera on the 3D map and solve it;
+- place a synthetic view on the 3D map and solve it;
 - open a GeoPose3K sample as an editable, solvable view;
 - use **Localize photo** to upload an arbitrary mountain photo with an approximate
   location and FOV; or
@@ -36,8 +42,9 @@ below), otherwise on synthetic demo terrain. From there you can work from one
   move or solve it.
 
 The map has a `Map | POV` toggle plus a pose table: pick the dataset pose, ground
-truth pose, or any solver result and look through that camera. The separate
-**Overview** panel is the 2D navigator for moving the terrain window.
+truth pose, or any solver pose and look through that pose with the view's camera
+model. The separate **Overview** panel is the 2D navigator for moving the terrain
+window.
 
 Other entry points:
 
@@ -107,7 +114,7 @@ src/peakle/
                 gtbuild, bench, gtquality, explanation, raycast, DEM adapters)
   web/          FastAPI app + the browser workbench (static/js: 3D map,
                 unified Views list, Overview panel, inspector, camera model)
-  scene/        in-memory workbench scene (terrain, views, solves)
+  scene/        in-memory workbench scene (terrain, views, pose solves)
   terrain/ rendering/ optimization/ domain/    supporting layers
   scripts/      first-class CLIs over the package (python -m peakle.scripts.*)
 ```

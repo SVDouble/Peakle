@@ -75,8 +75,8 @@ class CameraIntrinsics(BaseModel):
         return self
 
 
-class ImageCamera(BaseModel):
-    """Camera model of the image/crop being inspected.
+class CameraModel(BaseModel):
+    """Camera model of the view being localized.
 
     ``CameraIntrinsics`` remains the pinhole model used by the DEM rasterizer. This model describes
     the image coordinate system itself, including GeoPose3K's true cylindrical/tan crop geometry.
@@ -88,8 +88,8 @@ class ImageCamera(BaseModel):
     projection: ProjectionKind = "pinhole"
 
     @classmethod
-    def from_intrinsics(cls, intrinsics: CameraIntrinsics, projection: ProjectionKind = "pinhole") -> ImageCamera:
-        """Builds an image camera from existing pinhole intrinsics."""
+    def from_intrinsics(cls, intrinsics: CameraIntrinsics, projection: ProjectionKind = "pinhole") -> CameraModel:
+        """Builds a camera model from existing pinhole intrinsics."""
 
         return cls(
             width_px=intrinsics.width_px,
@@ -107,7 +107,7 @@ class ImageCamera(BaseModel):
         return self.width_px / (2.0 * math.tan(hfov_rad / 2.0))
 
     def vertical_fov_deg(self) -> float:
-        """Returns the perspective-camera vertical FOV equivalent for this image."""
+        """Returns the perspective-camera vertical FOV equivalent for this view."""
 
         return math.degrees(2.0 * math.atan(self.height_px / (2.0 * self.focal_length_px())))
 

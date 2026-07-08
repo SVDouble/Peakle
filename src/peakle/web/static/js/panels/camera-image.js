@@ -6,39 +6,27 @@
 
 import { api } from "../api.js";
 import { el, fitContainBox, setBox, svgElement } from "../format.js";
+import { candidatePrimaryKey, comparisonText, defaultCompareKeys, poseCandidates, poseTargetKey, selectedPoseTarget } from "../pose-candidates.js";
 
-// Per-family layer toggles (matching the GT Lab), one checkbox per outline family
-// so each can be shown/hidden independently. Each entry: [layer, label, swatch].
-// Colors mirror gtlab.py _COLORS (GT = warm/green family, DEM = cool family).
-const GT_LAYER_GROUPS = [
-  {
-    title: "Ground truth (from depth)",
-    layers: [
-      ["gt_sky", "Skyline", "#00e65a"],
-      ["gt_occ", "Occlusion", "#ff961e"],
-      ["gt_rib", "Ribs / spurs", "#ffeb3b"],
-      ["gt_cou", "Couloirs", "#e86edc"],
-    ],
-  },
-  {
-    title: "DEM @ refined pose",
-    layers: [
-      ["dem_sky", "Skyline", "#00c8ff"],
-      ["dem_occ", "Occlusion", "#ff4646"],
-      ["dem_rib", "Ribs / spurs", "#50aaff"],
-      ["dem_cou", "Couloirs", "#aa5aff"],
-    ],
-  },
-  {
-    title: "Other",
-    layers: [
-      ["edges", "Photo edges", "#f5f5f5"],
-      ["gt_depth", "GT depth", "#5aa0d0"],
-      ["dem_depth", "DEM depth", "#2a5a80"],
-    ],
-  },
+// Per-family layer toggles. GT/DEM colors mirror gtlab.py _COLORS.
+const GT_POSE_LAYERS = [
+  ["gt_sky", "Skyline", "#00e65a"],
+  ["gt_occ", "Occlusion", "#ff961e"],
+  ["gt_rib", "Ribs / spurs", "#ffeb3b"],
+  ["gt_cou", "Couloirs", "#e86edc"],
 ];
-export const GT_LAYER_NAMES = GT_LAYER_GROUPS.flatMap((g) => g.layers.map(([layer]) => layer));
+const DEM_POSE_LAYERS = [
+  ["dem_sky", "Skyline", "#00c8ff"],
+  ["dem_occ", "Occlusion", "#ff4646"],
+  ["dem_rib", "Ribs / spurs", "#50aaff"],
+  ["dem_cou", "Couloirs", "#aa5aff"],
+];
+const OTHER_LAYERS = [
+  ["edges", "Photo edges", "#f5f5f5"],
+  ["gt_depth", "GT depth", "#5aa0d0"],
+  ["dem_depth", "DEM depth", "#2a5a80"],
+];
+export const GT_LAYER_NAMES = [...GT_POSE_LAYERS, ...DEM_POSE_LAYERS, ...OTHER_LAYERS].map(([layer]) => layer);
 
 export function setupCameraPanel(store, root) {
   const image = el("img", { class: "camera-image", alt: "Rendered view" });
@@ -46,7 +34,7 @@ export function setupCameraPanel(store, root) {
   overlay.setAttribute("preserveAspectRatio", "none");
   const gtOverlays = el("div", { class: "gt-overlays" });
   const box = el("div", { class: "frame-box camera-box" }, [image, overlay, gtOverlays]);
-  const placeholder = el("p", { class: "control-hint", text: "Select a view or a GT sample to inspect it." });
+  const placeholder = el("p", { class: "control-hint", text: "Select a view to inspect it." });
   const legend = el("div", { class: "camera-image-legend" }, [
     el("span", { html: '<i class="observed-swatch"></i>Observed (truth)' }),
     el("span", { html: '<i class="predicted-swatch"></i>Predicted' }),
@@ -63,33 +51,39 @@ export function setupCameraPanel(store, root) {
     el("span", { text: "Overlay photo on 3D map (POV)" }),
   ]);
 
-  const gtControls = el("div", { class: "gt-inspect-controls" }, [
-    el(
-      "div",
-      { class: "gt-toggle-groups" },
-      GT_LAYER_GROUPS.map((group) =>
-        el("div", { class: "gt-toggle-group" }, [
-          el("span", { class: "gt-toggle-title", text: group.title }),
-          ...group.layers.map(([layer, label, color]) => {
-            const input = el("input", { type: "checkbox" });
-            input.checked = !!store.gtDisplay[layer];
-            input.addEventListener("change", () => store.setGtDisplay({ [layer]: input.checked }));
-            return el("label", { class: "toggle" }, [
-              input,
-              el("span", { class: "swatch", style: `background:${color}` }),
-              el("span", { text: label }),
-            ]);
-          }),
-          ...(group.title === "Other" ? [photoOverlayToggle] : []),
-        ]),
-      ),
-    ),
-    el("div", { class: "gt-inspect-meta" }),
-  ]);
+  const gtToggleGroups = el("div", { class: "gt-toggle-groups" });
+  const gtControls = el("div", { class: "gt-inspect-controls" }, [gtToggleGroups, el("div", { class: "gt-inspect-meta" })]);
   gtControls.hidden = true;
+  const compareList = el("ul", { class: "inspect-compare-list" });
+  const compareA = el("select", { class: "solver-select compare-select", "aria-label": "First pose to compare" });
+  const compareB = el("select", { class: "solver-select compare-select", "aria-label": "Second pose to compare" });
+  const compareMetricA = el("span", { class: "pose-metrics", text: "map fit -" });
+  const compareMetricB = el("span", { class: "pose-metrics", text: "map fit -" });
+  const compareStatus = el("p", { class: "control-hint compare-status" });
+  const comparePickers = el("div", { class: "inspect-compare-pickers" }, [
+    el("label", {}, [el("span", { class: "compare-column-title", text: "Pose A" }), compareA, compareMetricA]),
+    el("label", {}, [el("span", { class: "compare-column-title", text: "Pose B" }), compareB, compareMetricB]),
+  ]);
+  const compareControls = el("div", { class: "inspect-compare-controls" }, [
+    el("span", { class: "control-eyebrow", text: "Poses for this view" }),
+    compareList,
+    comparePickers,
+    compareStatus,
+  ]);
+  compareControls.hidden = true;
   const cameraFrame = el("div", { class: "camera-frame" }, [box]);
-  root.replaceChildren(cameraFrame, legend, gtControls, placeholder);
+  root.replaceChildren(cameraFrame, legend, gtControls, compareControls, placeholder);
   const gtMeta = gtControls.querySelector(".gt-inspect-meta");
+  let compareKeys = [];
+  let lastCompareTargetKey = "";
+  compareA.addEventListener("change", () => {
+    updateCompareKeys("a");
+    layoutAndDraw();
+  });
+  compareB.addEventListener("change", () => {
+    updateCompareKeys("b");
+    layoutAndDraw();
+  });
 
   function syncPhotoOverlayInput() {
     photoOverlayInput.checked = store.photoOpacity > 0;
@@ -101,19 +95,27 @@ export function setupCameraPanel(store, root) {
   }
 
   function layoutAndDraw() {
-    // One selection source (the unified camera); a camera with precomputed outline layers (a GT
-    // sample) renders its photo + layers, otherwise the placed-view render + skyline SVG.
-    const cam = store.selectedCamera();
+    renderCandidateCompare();
+    // One selection source: a selected view descriptor with camera model and poses. GT catalogue
+    // views render their immutable photo + layers; mutable views render their image/SVG overlay.
+    const cam = store.selectedViewDescriptor();
     if (cam?.hasLayers) {
       layoutGtSample(cam.sample);
       return;
     }
+    const selectedView = store.selectedView();
+    const selectedViewSample = selectedView?.gt_name ? store.gtByName(selectedView.gt_name) : null;
+    if (store.activePoseKey?.() === "gt-depth" && selectedViewSample) {
+      layoutGtSample(selectedViewSample);
+      return;
+    }
     gtControls.hidden = true;
     gtOverlays.replaceChildren();
-    const view = store.selectedView();
+    const view = selectedView;
     if (!view) {
       box.hidden = true;
       legend.hidden = true;
+      compareControls.hidden = true;
       placeholder.hidden = false;
       return;
     }
@@ -139,6 +141,189 @@ export function setupCameraPanel(store, root) {
     drawOverlay(view, fit);
   }
 
+  function renderCandidateCompare() {
+    const targetInfo = selectedPoseTarget(store);
+    const targetKey = poseTargetKey(targetInfo);
+    const candidates = poseCandidates(store, targetInfo);
+    const targetChanged = targetKey !== lastCompareTargetKey;
+    lastCompareTargetKey = targetKey;
+    syncComparisonKeys(candidates, targetChanged);
+    renderGtToggleGroups(candidates);
+    compareControls.hidden = candidates.length === 0;
+    if (!candidates.length) {
+      compareList.replaceChildren();
+      compareMetricA.textContent = "map fit -";
+      compareMetricB.textContent = "map fit -";
+      compareStatus.textContent = "";
+      return;
+    }
+    compareList.replaceChildren(...candidates.map((candidate) => compareRow(candidate, targetInfo)));
+    const canCompare = candidates.length >= 2;
+    comparePickers.hidden = !canCompare;
+    compareStatus.hidden = !canCompare;
+    if (!canCompare) {
+      compareMetricA.textContent = "map fit -";
+      compareMetricB.textContent = "map fit -";
+      compareStatus.textContent = "";
+      return;
+    }
+    renderComparePickers(candidates);
+    const selected = compareKeys.map((key) => candidates.find((candidate) => candidate.key === key)).filter(Boolean);
+    compareStatus.textContent = selected.length === 2 ? comparisonText(selected[0], selected[1]) : "Choose two poses to compare map-fit metrics.";
+  }
+
+  function syncComparisonKeys(candidates, targetChanged) {
+    const valid = new Set(candidates.map((candidate) => candidate.key));
+    compareKeys = compareKeys.filter((key) => valid.has(key)).slice(-2);
+    if (targetChanged || compareKeys.length < Math.min(candidates.length, 2)) {
+      compareKeys = defaultCompareKeys(candidates, candidatePrimaryKey(store));
+    }
+  }
+
+  function updateCompareKeys(changed) {
+    const targetInfo = selectedPoseTarget(store);
+    const candidates = poseCandidates(store, targetInfo);
+    let a = compareA.value;
+    let b = compareB.value;
+    if (a === b && candidates.length > 1) {
+      const alternate = candidates.find((candidate) => candidate.key !== (changed === "a" ? a : b))?.key;
+      if (changed === "a") {
+        b = alternate ?? b;
+      } else {
+        a = alternate ?? a;
+      }
+    }
+    compareKeys = [a, b].filter(Boolean);
+  }
+
+  function renderGtToggleGroups(candidates) {
+    const selected = compareKeys.map((key) => candidates.find((candidate) => candidate.key === key)).filter(Boolean);
+    const groups = selected
+      .map((candidate, index) => poseToggleGroup(`Pose ${index === 0 ? "A" : "B"} · ${candidate.label}`, poseLayerDefs(candidate)))
+      .filter(Boolean);
+    groups.push(toggleGroup("Other", OTHER_LAYERS.map(layerDef), [photoOverlayToggle]));
+    gtToggleGroups.replaceChildren(...groups);
+  }
+
+  function poseToggleGroup(title, layers) {
+    return layers.length ? toggleGroup(title, layers) : null;
+  }
+
+  function toggleGroup(title, layers, extraNodes = []) {
+    return el("div", { class: "gt-toggle-group" }, [
+      el("span", { class: "gt-toggle-title", text: title }),
+      ...layers.map((layer) => {
+        const input = el("input", { type: "checkbox" });
+        input.checked = layerChecked(layer);
+        input.addEventListener("change", () => store.setGtDisplay({ [layer.key]: input.checked }));
+        return el("label", { class: "toggle" }, [
+          input,
+          el("span", { class: "swatch", style: `background:${layer.color}` }),
+          el("span", { text: layer.label }),
+        ]);
+      }),
+      ...extraNodes,
+    ]);
+  }
+
+  function poseLayerDefs(candidate) {
+    if (!candidate) {
+      return [];
+    }
+    if (candidate.key === "gt-depth") {
+      return GT_POSE_LAYERS.map(layerDef);
+    }
+    if (candidate.key === "truth") {
+      return DEM_POSE_LAYERS.map(layerDef);
+    }
+    if (candidate.key.startsWith("solve:")) {
+      return [layerDef([`${candidate.key}:sky`, "Skyline", "#ff8c42", "solve"])];
+    }
+    return [];
+  }
+
+  function layerDef([key, label, color, source = "png"]) {
+    return { key, label, color, source };
+  }
+
+  function layerChecked(layer) {
+    return store.gtDisplay[layer.key] ?? (layer.key.endsWith("_sky") || layer.key.endsWith(":sky"));
+  }
+
+  function enabledOverlayLayers(candidates) {
+    const selected = compareKeys.map((key) => candidates.find((candidate) => candidate.key === key)).filter(Boolean);
+    return [
+      ...selected.flatMap((candidate) => poseLayerDefs(candidate)),
+      ...OTHER_LAYERS.map(layerDef),
+    ].filter(layerChecked);
+  }
+
+  function compareRow(candidate, targetInfo) {
+    const selected = candidate.key === activeCandidateKey();
+    const select = selectCandidateHandler(candidate, targetInfo);
+    const content = [
+      el("div", { class: "inspect-compare-copy" }, [
+        el("span", { class: "solve-strategy", text: candidate.label }),
+        el("span", { class: "solve-stat", text: candidate.stat }),
+      ]),
+      el("span", { class: "pose-metrics", text: candidate.metricText ?? "map fit -" }),
+    ];
+    const remove = deleteCandidateButton(candidate, targetInfo);
+    if (remove) {
+      content.push(remove);
+    }
+    return el(
+      "li",
+      {
+        class: `inspect-compare-row${selected ? " selected" : ""}${candidate.kind === "truth" ? " truth-row" : ""}${select ? " clickable" : ""}`,
+        onclick: select,
+      },
+      content,
+    );
+  }
+
+  function activeCandidateKey() {
+    return store.activePoseKey?.() ?? (store.selectedSolveId ? `solve:${store.selectedSolveId}` : "truth");
+  }
+
+  function selectCandidateHandler(candidate, targetInfo) {
+    return () => {
+      store.selectPose(targetInfo, candidate.key).catch((error) => {
+        compareStatus.textContent = error.message;
+      });
+    };
+  }
+
+  function deleteCandidateButton(candidate, targetInfo) {
+    if (candidate.kind !== "solve") {
+      return null;
+    }
+    const view = targetInfo?.kind === "gt" ? targetInfo.view ?? store.gtViewForSample(targetInfo.sample.name) : targetInfo?.view;
+    if (!view) {
+      return null;
+    }
+    const remove = el("button", { type: "button", class: "icon-button", title: "Delete solver pose", text: "✕" });
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      store.deleteSolve(view.id, candidate.id);
+    });
+    return remove;
+  }
+
+  function renderComparePickers(candidates) {
+    const options = candidates.map((candidate) => el("option", { value: candidate.key, text: candidate.label }));
+    compareA.replaceChildren(...options.map((option) => option.cloneNode(true)));
+    compareB.replaceChildren(...options.map((option) => option.cloneNode(true)));
+    compareA.value = compareKeys[0] ?? candidates[0]?.key ?? "";
+    compareB.value = compareKeys[1] ?? candidates[1]?.key ?? candidates[0]?.key ?? "";
+    compareMetricA.textContent = candidateMetricText(candidates, compareA.value);
+    compareMetricB.textContent = candidateMetricText(candidates, compareB.value);
+  }
+
+  function candidateMetricText(candidates, key) {
+    return candidates.find((candidate) => candidate.key === key)?.metricText ?? "map fit -";
+  }
+
   function layoutGtSample(sample) {
     box.hidden = false;
     legend.hidden = true;
@@ -155,17 +340,13 @@ export function setupCameraPanel(store, root) {
       image.src = desiredSrc;
     }
 
-    const layers = GT_LAYER_NAMES.filter((layer) => store.gtDisplay[layer]);
-    const want = layers.map((layer) => api.gtLayerUrl(sample.name, layer));
+    const targetInfo = selectedPoseTarget(store);
+    const layers = enabledOverlayLayers(poseCandidates(store, targetInfo));
+    const want = layers.map((layer) => layerSignature(sample, layer));
     const have = [...gtOverlays.children].map((node) => node.dataset.src);
     if (want.join("|") !== have.join("|")) {
       gtOverlays.replaceChildren(
-        ...want.map((src) => {
-          const img = el("img", { class: "gt-layer", alt: "" });
-          img.dataset.src = src;
-          img.src = src;
-          return img;
-        }),
+        ...layers.map((layer) => createGtOverlayLayer(sample, layer)).filter(Boolean),
       );
     }
 
@@ -182,6 +363,53 @@ export function setupCameraPanel(store, root) {
       ` · pos <b>${num(sample.de_m, 0)}E/${num(sample.dn_m, 0)}N m</b>` +
       (Number.isFinite(sample.lat) ? ` · <b>${num(sample.lat, 4)}, ${num(sample.lon, 4)}</b>` : "") +
       `</div>${reasons}`;
+  }
+
+  function layerSignature(sample, layer) {
+    if (layer.source === "solve") {
+      const solveId = layer.key.slice("solve:".length, -":sky".length);
+      const solve = store.solveCache.get(solveId);
+      return solve ? `solve-sky:${solveId}:${sample.name}:${solve.result.predicted_profile_full?.length ?? 0}` : `solve-sky-missing:${solveId}`;
+    }
+    return api.gtLayerUrl(sample.name, layer.key);
+  }
+
+  function createGtOverlayLayer(sample, layer) {
+    if (layer.source === "solve") {
+      return createSolveSkylineLayer(sample, layer);
+    }
+    const src = api.gtLayerUrl(sample.name, layer.key);
+    const img = el("img", { class: "gt-layer", alt: "" });
+    img.dataset.src = src;
+    img.src = src;
+    return img;
+  }
+
+  function createSolveSkylineLayer(sample, layer) {
+    const solveId = layer.key.slice("solve:".length, -":sky".length);
+    const solve = store.solveCache.get(solveId);
+    const profile = solve?.result.predicted_profile_full;
+    if (!profile) {
+      return null;
+    }
+    const svg = svgElement("svg", {
+      class: "gt-layer",
+      viewBox: `0 0 ${sample.width} ${sample.height}`,
+      preserveAspectRatio: "none",
+    });
+    svg.dataset.src = layerSignature(sample, layer);
+    const points = profile
+      .map((value, col) => {
+        if (value === null || value === undefined) {
+          return null;
+        }
+        const x = (col / Math.max(1, profile.length - 1)) * sample.width;
+        return `${x.toFixed(1)},${Number(value).toFixed(1)}`;
+      })
+      .filter(Boolean)
+      .join(" ");
+    svg.replaceChildren(svgElement("polyline", { class: "predicted-line", points }));
+    return svg;
   }
 
   function drawOverlay(view, fit) {

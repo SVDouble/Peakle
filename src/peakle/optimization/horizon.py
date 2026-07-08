@@ -35,6 +35,7 @@ def horizon_seeds(
     n_bins: int = 360,
     max_columns: int = 140,
     top_k: int = 20,
+    terrain_stride: int = 1,
 ) -> list[CameraExtrinsics]:
     """Returns the best `top_k` pose seeds by horizon correlation over the map.
 
@@ -49,12 +50,13 @@ def horizon_seeds(
         n_bins: Azimuth bins for the 360 deg horizon (yaw resolution).
         max_columns: Subsample of observed columns used for matching.
         top_k: Number of seeds to return.
+        terrain_stride: Terrain point stride used for the coarse 360 deg horizon.
 
     Returns:
         Candidate extrinsics ordered best-first.
     """
 
-    points = dense_terrain_points(terrain, 1)
+    points = dense_terrain_points(terrain, 1, stride=terrain_stride)
     offset_count, elev_obs = _observed_descriptor(observed_profile, intrinsics, pitch_deg, n_bins, max_columns)
     bin_width_deg = 360.0 / n_bins
     shifts = np.arange(n_bins)

@@ -24,19 +24,35 @@ ORIENTATION_WEIGHT = 0.35
 POINT_UPSAMPLE_FACTOR = 2
 
 
-def dense_terrain_points(terrain: TerrainMap, factor: int) -> NDArray[np.float64]:
-    """Returns terrain points on a `factor`x-upsampled grid as an `(N, 3)` array."""
+def dense_terrain_points(terrain: TerrainMap, factor: int, stride: int = 1) -> NDArray[np.float64]:
+    """Returns terrain points on a strided, optionally upsampled grid as an `(N, 3)` array."""
 
+    if stride < 1:
+        msg = "stride must be positive"
+        raise ValueError(msg)
+    row_index = _sample_indices(terrain.elevation_m.shape[0], stride)
+    col_index = _sample_indices(terrain.elevation_m.shape[1], stride)
+    x_m = terrain.x_m[col_index]
+    y_m = terrain.y_m[row_index]
+    elevation_m = terrain.elevation_m[np.ix_(row_index, col_index)]
     if factor <= 1:
-        return terrain.flattened_points(stride=1)
-    grid_height, grid_width = terrain.elevation_m.shape
+        x_grid, y_grid = np.meshgrid(x_m, y_m)
+        return np.column_stack((x_grid.ravel(), y_grid.ravel(), elevation_m.ravel())).astype(np.float64)
+    grid_height, grid_width = elevation_m.shape
     rows = np.linspace(0.0, grid_height - 1, (grid_height - 1) * factor + 1)
     cols = np.linspace(0.0, grid_width - 1, (grid_width - 1) * factor + 1)
     row_grid, col_grid = np.meshgrid(rows, cols, indexing="ij")
-    elevation = map_coordinates(terrain.elevation_m, [row_grid.ravel(), col_grid.ravel()], order=1, mode="nearest")
-    east = np.interp(col_grid.ravel(), np.arange(grid_width), terrain.x_m)
-    north = np.interp(row_grid.ravel(), np.arange(grid_height), terrain.y_m)
+    elevation = map_coordinates(elevation_m, [row_grid.ravel(), col_grid.ravel()], order=1, mode="nearest")
+    east = np.interp(col_grid.ravel(), np.arange(grid_width), x_m)
+    north = np.interp(row_grid.ravel(), np.arange(grid_height), y_m)
     return np.column_stack((east, north, elevation)).astype(np.float64)
+
+
+def _sample_indices(size: int, stride: int) -> NDArray[np.int64]:
+    indices = np.arange(0, size, stride, dtype=np.int64)
+    if indices[-1] != size - 1:
+        indices = np.append(indices, size - 1)
+    return indices
 
 
 class PoseObjective:
@@ -69,7 +85,7 @@ class PoseObjective:
         self.terrain_stride = terrain_stride
         # Build the (upsampled) terrain points once; every score() reuses them for
         # the fast point-projection skyline instead of re-flattening + rasterizing.
-        self._points = dense_terrain_points(terrain, POINT_UPSAMPLE_FACTOR)
+        self._points = dense_terrain_points(terrain, POINT_UPSAMPLE_FACTOR, stride=terrain_stride)
         # When False, position (resp. orientation) is recovered purely from the
         # skyline: no penalty pulls it toward the prior and its bounds open up
         # (whole terrain for position, full circle for yaw).

@@ -1,14 +1,15 @@
 "use strict";
 
-// The 3D map: orbitable terrain with peak labels, click-to-place camera creation,
-// the selected view's ground-truth + predicted cameras with FOV coverage, and a
-// Map/POV switch backed by a small pose table (ground truth + solves).
+// The 3D map: orbitable terrain with peak labels, click-to-place view creation,
+// the selected view's poses with FOV coverage, and a Map/POV switch backed by
+// a small pose table.
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 
 import { api } from "../../api.js";
+import { gtCamera } from "../../camera.js";
 import {
   PHYSICAL_TERRAIN_VERTICAL_SCALE,
   cameraTargetScenePoint,
@@ -21,6 +22,7 @@ import {
 } from "../../geometry.js";
 import { el, fitContainBox, formatNumber, svgElement } from "../../format.js";
 import { GT_LAYER_NAMES } from "../camera-image.js";
+import { selectedPoseTarget } from "../pose-candidates.js";
 import { buildSelectionLayer } from "./cameras.js";
 import { buildGtSpotsLayer } from "./gt-spots.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
@@ -135,7 +137,7 @@ export function setupMapPanel(store, root) {
   let mode = "map";
   let povPoseKey = null;
   let lastSelectionKey = null;
-  let lastSelectedSolveId = null;
+  let lastSelectedPoseKey = null;
   let povAspect = null; // aspect of the active POV camera image, for letterboxing
   let povZoomKey = "";
   let povZoom = { scale: 1, x: 0, y: 0 };
@@ -276,30 +278,45 @@ export function setupMapPanel(store, root) {
       povPoseKey = null;
       lastSelectionKey = selectionKey;
     }
-    if (store.selectedSolveId && store.selectedSolveId !== lastSelectedSolveId) {
-      povPoseKey = `solve:${store.selectedSolveId}`;
+    const selectedPoseKey = store.activePoseKey?.() ?? (store.selectedSolveId ? `solve:${store.selectedSolveId}` : "truth");
+    if (selectedPoseKey && selectedPoseKey !== lastSelectedPoseKey) {
+      povPoseKey = selectedPoseKey;
     }
-    lastSelectedSolveId = store.selectedSolveId;
+    lastSelectedPoseKey = selectedPoseKey;
   }
 
   function povRows() {
     const view = store.selectedView();
     if (view?.true_extrinsics) {
-      const cam = store.selectedCamera();
+      const cam = store.selectedViewDescriptor();
       if (!cam) {
         return [];
       }
-      const rows = [
-        {
-          key: "truth",
-          role: view.source === "gt" ? "GT" : "Truth",
-          name: view.source === "gt" ? "Dataset pose" : "Ground truth",
-          detail: `${formatNumber(view.true_extrinsics.yaw_deg, "deg")} · ${formatNumber(view.true_extrinsics.pitch_deg, "deg")}`,
-          pose: cam.scenePoseFromLocal(view.true_extrinsics, store.terrain),
-          label: `${view.label} · Ground truth`,
-          photoSrc: view.photo_url ?? null,
-        },
-      ];
+      const rows = [];
+      const sample = view.gt_name ? store.gtByName(view.gt_name) : null;
+      if (sample) {
+        const gtDescriptor = gtCamera(sample);
+        rows.push({
+          key: "gt-depth",
+          role: "GT",
+          name: "Ground truth pose (depth)",
+          detail: `${formatNumber(sample.gt_yaw_deg ?? sample.yaw_deg, "deg")} · ${formatNumber(sample.gt_pitch_deg ?? 0, "deg")}`,
+          pose: gtDescriptor.scenePose(store.terrain, "gtDepth"),
+          label: `${view.label} · Ground truth pose`,
+          photoSrc: view.photo_url ?? gtDescriptor.photoSrc ?? null,
+          layersSample: sample,
+        });
+      }
+      rows.push({
+        key: "truth",
+        role: view.source === "gt" ? "DEM" : "Pose",
+        name: view.source === "gt" ? "DEM @ refined pose" : "Baseline pose",
+        detail: `${formatNumber(view.true_extrinsics.yaw_deg, "deg")} · ${formatNumber(view.true_extrinsics.pitch_deg, "deg")}`,
+        pose: cam.scenePoseFromLocal(view.true_extrinsics, store.terrain),
+        label: `${view.label} · ${view.source === "gt" ? "DEM @ refined pose" : "Baseline pose"}`,
+        photoSrc: view.photo_url ?? null,
+        layersSample: sample,
+      });
       for (const summary of view.solves) {
         rows.push({
           key: `solve:${summary.id}`,
@@ -319,20 +336,47 @@ export function setupMapPanel(store, root) {
     if (!sample) {
       return [];
     }
-    const cam = store.selectedCamera();
-    const pose = cam?.scenePose(store.terrain, "true");
-    return [
+    const cam = store.selectedViewDescriptor();
+    const backingView = store.gtViewForSample(sample.name);
+    const rows = [
+      {
+        key: "gt-depth",
+        role: "GT",
+        name: "Ground truth pose (depth)",
+        detail: `${formatNumber(sample.gt_yaw_deg ?? sample.yaw_deg, "deg")} · ${formatNumber(sample.gt_pitch_deg ?? 0, "deg")}`,
+        pose: cam?.scenePose(store.terrain, "gtDepth"),
+        label: `${sample.name} · Ground truth pose`,
+        photoSrc: cam?.photoSrc ?? null,
+        layersSample: cam?.hasLayers ? sample : null,
+      },
       {
         key: "truth",
-        role: "GT",
-        name: "Dataset pose",
-        detail: `${sample.quality} · fov ${formatNumber(sample.fov_deg, "deg")}`,
-        pose,
-        label: sample.name,
+        role: "DEM",
+        name: "DEM @ refined pose",
+        detail: backingView?.true_extrinsics
+          ? `${formatNumber(backingView.true_extrinsics.yaw_deg, "deg")} · ${formatNumber(backingView.true_extrinsics.pitch_deg, "deg")}`
+          : `${sample.quality} · fov ${formatNumber(sample.fov_deg, "deg")}`,
+        pose: backingView?.true_extrinsics ? cam?.scenePoseFromLocal(backingView.true_extrinsics, store.terrain) : cam?.scenePose(store.terrain, "true"),
+        label: `${sample.name} · DEM @ refined pose`,
         photoSrc: cam?.photoSrc ?? null,
         layersSample: cam?.hasLayers ? sample : null,
       },
     ];
+    if (backingView) {
+      for (const summary of backingView.solves) {
+        rows.push({
+          key: `solve:${summary.id}`,
+          role: "Solve",
+          name: strategyLabel(summary.strategy),
+          detail: `yaw ${formatNumber(summary.metrics.yaw_error_deg, "deg")} · fit ${formatNumber(summary.metrics.contour_mae_px, "px")}`,
+          pose: cam?.scenePoseFromLocal(summary.extrinsics, store.terrain),
+          label: `${sample.name} · ${strategyLabel(summary.strategy)}`,
+          photoSrc: cam?.photoSrc ?? null,
+          solveId: summary.id,
+        });
+      }
+    }
+    return rows;
   }
 
   function strategyLabel(name) {
@@ -345,7 +389,8 @@ export function setupMapPanel(store, root) {
       return null;
     }
     if (!povPoseKey || !rows.some((row) => row.key === povPoseKey)) {
-      povPoseKey = store.selectedSolveId && rows.some((row) => row.key === `solve:${store.selectedSolveId}`) ? `solve:${store.selectedSolveId}` : rows[0].key;
+      const selectedPoseKey = store.activePoseKey?.() ?? (store.selectedSolveId ? `solve:${store.selectedSolveId}` : "truth");
+      povPoseKey = selectedPoseKey && rows.some((row) => row.key === selectedPoseKey) ? selectedPoseKey : rows[0].key;
     }
     const row = rows.find((candidate) => candidate.key === povPoseKey) ?? rows[0];
     return row.pose ? row : null;
@@ -382,11 +427,9 @@ export function setupMapPanel(store, root) {
 
   function selectPovRow(row) {
     povPoseKey = row.key;
-    if (row.solveId && store.selectedViewId && row.solveId !== store.selectedSolveId) {
-      store.selectSolve(store.selectedViewId, row.solveId).catch((error) => {
-        hint.textContent = error.message;
-      });
-    }
+    store.selectPose(selectedPoseTarget(store), row.key).catch((error) => {
+      hint.textContent = error.message;
+    });
     applyPov("pov");
   }
 
@@ -476,7 +519,7 @@ export function setupMapPanel(store, root) {
       resize();
       updatePovOverlay();
       updatePovPhoto();
-      hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view or GT sample, then choose a POV.";
+      hint.textContent = store.placing ? "Click the map to place a view." : "Free orbit. Select a view, then choose a POV.";
       return;
     }
     povAspect = active.pose.aspect;
@@ -684,7 +727,7 @@ export function setupMapPanel(store, root) {
     store.focusScene(lat, lon).then(
       () => {
         if (mode === "map") {
-          hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view or GT sample, then choose a POV.";
+          hint.textContent = store.placing ? "Click the map to place a view." : "Free orbit. Select a view, then choose a POV.";
         }
       },
       (error) => {
@@ -712,7 +755,7 @@ export function setupMapPanel(store, root) {
       () => {
         terrainFollowInFlight = false;
         if (mode === "map") {
-          hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Pan to keep moving the terrain window.";
+          hint.textContent = store.placing ? "Click the map to place a view." : "Free orbit. Pan to keep moving the terrain window.";
         }
       },
       (error) => {
@@ -776,7 +819,7 @@ export function setupMapPanel(store, root) {
     const local = sceneToLocalEastNorth(hits[0].point, frame);
     const yaw = headingToTallestPeak(local);
     // Turn off placing immediately so a second click during the in-flight render
-    // does not drop a second camera.
+    // does not drop a second view.
     store.setPlacing(false);
     store.createView({ east_m: local.east_m, north_m: local.north_m, yaw_deg: yaw, pitch_deg: 3.0, eye_height_m: 150.0 }).catch((error) => {
       hint.textContent = error.message;
@@ -919,6 +962,11 @@ export function setupMapPanel(store, root) {
   store.on("display", applyDisplay);
   store.on("views", rebuildSelection);
   store.on("selection", rebuildSelection);
+  store.on("pose-selection", () => {
+    if (povRows().length) {
+      applyPov("pov");
+    }
+  });
   store.on("gt", () => {
     syncPovSelection();
     renderPovTable();
@@ -935,7 +983,7 @@ export function setupMapPanel(store, root) {
   store.on("placing", () => {
     viewport.classList.toggle("placing", store.placing);
     if (mode === "map") {
-      hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Select a view and choose a POV.";
+      hint.textContent = store.placing ? "Click the map to place a view." : "Free orbit. Select a view and choose a POV.";
     }
   });
   rebuildTerrain();

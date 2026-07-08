@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from peakle.optimization.solve import STRATEGIES
 from peakle.scene.providers import PROVIDER_KINDS
 
-StrategyName = Literal["powell", "nelder", "evolution", "global", "horizon"]
+StrategyName = Literal["horizon", "contourdb", "cmaes", "powell", "nelder", "evolution", "global"]
 ProviderName = Literal["demo", "srtm"]
 assert set(STRATEGIES) == set(get_args(StrategyName))  # noqa: S101 - keep schema and solver list in sync
 assert set(PROVIDER_KINDS) == set(get_args(ProviderName))  # noqa: S101 - keep schema and provider list in sync
@@ -32,7 +32,7 @@ class SceneConfigRequest(BaseModel):
     image_width: int = Field(ge=160, le=4096)
     image_height: int = Field(ge=120, le=4096)
     horizontal_fov_deg: float = Field(gt=1.0, lt=179.0)
-    default_strategy: StrategyName = "powell"
+    default_strategy: StrategyName = "horizon"
 
 
 class SceneFocusRequest(BaseModel):
@@ -50,7 +50,7 @@ class SceneFocusRequest(BaseModel):
 
 
 class ViewCreateRequest(BaseModel):
-    """Request to place a camera and create a view.
+    """Request to place a baseline pose and create a view.
 
     Attributes:
         east_m: Camera easting in meters.
@@ -85,7 +85,7 @@ class SolveRequest(BaseModel):
 
     Attributes:
         strategy: Solver strategy to run.
-        params: Optional solver parameters (e.g. `seed`).
+        params: Optional solver parameters (e.g. `seed`, `position_prior`, `orientation_prior`).
     """
 
     strategy: StrategyName

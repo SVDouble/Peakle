@@ -1,8 +1,8 @@
 """Mutable, in-memory workbench scene.
 
 A `Scene` owns the elevation map (via a `MapProvider`), the detected peaks, the
-known intrinsics, and the user-created `View`s. Views are placed by clicking the
-map; each carries a rendered image and an unbounded set of `Solve`s. State lives
+default camera model/intrinsics, and the user-created `View`s. Views are placed
+by clicking the map; each carries an image and solver-generated poses. State lives
 in memory for the life of the server process (one scene per server).
 """
 
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from peakle.config import AppSettings, PoseNoiseSettings
 from peakle.contours import DEFAULT_DETECTOR, ContourDetector
-from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, ImageCamera
+from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
 from peakle.domain.contours import SkylineContour
 from peakle.domain.coordinates import LocalPoint
 from peakle.domain.peaks import Peak, PeakDetectionSpec
@@ -81,18 +81,19 @@ class Solve(BaseModel):
 
 
 class View(BaseModel):
-    """A user-placed camera view with a rendered image and its solves.
+    """A localizable view: image/crop/photo plus camera model and pose candidates.
 
     Attributes:
         id: Stable view identifier.
         label: Display label.
-        intrinsics: Known camera intrinsics.
-        true_extrinsics: Ground-truth pose (None for a real photo with no truth).
-        eye_height_m: Camera height above the terrain surface.
-        prior: Fixed noisy prior shared by every solve of this view.
+        intrinsics: Pinhole intrinsics used by the DEM renderer.
+        image_camera: Camera model for the source image/crop/photo.
+        true_extrinsics: Baseline pose (None for a real photo with no known pose).
+        eye_height_m: Baseline pose height above the terrain surface.
+        prior: Fixed pose prior shared by every solver run for this view.
         contour: Detected skyline contour.
         render_arrays: In-memory render outputs (image, mask, profile).
-        solves: Solve attempts keyed by id.
+        solves: Solver-generated pose candidates keyed by id.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -100,15 +101,15 @@ class View(BaseModel):
     id: str
     label: str
     intrinsics: CameraIntrinsics
-    image_camera: ImageCamera
+    image_camera: CameraModel
     true_extrinsics: CameraExtrinsics | None
     eye_height_m: float
     prior: PosePrior | None
     contour: SkylineContour
     render_arrays: RenderArrays
     solves: dict[str, Solve] = {}
-    # A view can carry a reference photograph and a known/prior pose — that is what makes it
-    # "ground truth". A placed synthetic camera has neither (source "placed"); a view materialized
+    # A view can carry a reference photograph and a known/prior pose. A placed synthetic view has
+    # neither (source "placed"); a view materialized
     # from a GT sample carries the photo (reference_photo) and the corpus name (gt_name).
     source: str = "placed"
     gt_name: str | None = None
@@ -164,7 +165,7 @@ class Scene:
             image_width=settings.render.image_width,
             image_height=settings.render.image_height,
             horizontal_fov_deg=settings.render.horizontal_fov_deg,
-            default_strategy="powell",
+            default_strategy="horizon",
         )
         scene = cls(
             config=config,
@@ -315,6 +316,7 @@ class Scene:
         params = dict(params or {})
         seed = params.get("seed")
         use_position_prior = bool(params.get("position_prior", True))
+        use_orientation_prior = bool(params.get("orientation_prior", True))
         self._solve_counter += 1
         result = solve_pose(
             terrain=self.terrain,
@@ -326,6 +328,7 @@ class Scene:
             truth=view.true_extrinsics,
             seed=seed,
             use_position_prior=use_position_prior,
+            use_orientation_prior=use_orientation_prior,
             projection=view.image_camera.projection,
             horizontal_fov_deg=view.image_camera.horizontal_fov_deg,
         )
@@ -350,15 +353,15 @@ class Scene:
         source: str,
         gt_name: str | None = None,
         label: str | None = None,
-        image_camera: ImageCamera | None = None,
+        image_camera: CameraModel | None = None,
     ) -> View:
-        """Add a photo-backed View at a KNOWN position (call AFTER focus_geo).
+        """Add a photo-backed View at a known position (call after focus_geo).
 
         Backs both a materialized GT sample (``source="gt"``) and an arbitrary uploaded photo
         (``source="photo"``): the view carries the photograph and the observed skyline extracted
         from it, with an EXACT-position prior (the position is known — GPS — so the horizon solver
         recovers orientation there; a noisy prior would flip the yaw). From here it is an ordinary
-        View — it lists, POVs, adjusts and SOLVES like any placed camera.
+        View — it lists, POVs, adjusts and solves like any placed view.
         """
 
         self._view_counter += 1
@@ -399,7 +402,7 @@ class Scene:
         contour: SkylineContour,
         reference_photo: Any,
         label: str | None = None,
-        image_camera: ImageCamera | None = None,
+        image_camera: CameraModel | None = None,
     ) -> View:
         """Materialize a GT corpus sample as a scene View (thin wrapper over add_backed_view)."""
 
@@ -441,7 +444,7 @@ class Scene:
         extrinsics: CameraExtrinsics,
         eye_height_m: float,
         *,
-        image_camera: ImageCamera | None = None,
+        image_camera: CameraModel | None = None,
         contour: SkylineContour | None = None,
         source: str = "placed",
         gt_name: str | None = None,
@@ -457,7 +460,7 @@ class Scene:
             id=view_id,
             label=label,
             intrinsics=intrinsics,
-            image_camera=image_camera or ImageCamera.from_intrinsics(intrinsics),
+            image_camera=image_camera or CameraModel.from_intrinsics(intrinsics),
             true_extrinsics=extrinsics,
             eye_height_m=eye_height_m,
             prior=prior,

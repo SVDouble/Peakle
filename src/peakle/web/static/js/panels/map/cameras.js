@@ -1,8 +1,7 @@
 "use strict";
 
-// Camera marker glyphs (body + lens + frustum + label) placed at a pose, and the
-// per-selection layer that shows the selected view's ground-truth and predicted
-// cameras together with their FOV coverage overlays.
+// Pose marker glyphs (body + lens + frustum + label) and the per-selection layer
+// that shows a view's baseline/solver poses with camera-model FOV coverage.
 
 import * as THREE from "three";
 
@@ -75,9 +74,9 @@ function createCandidateMarker(extrinsics, frame, color) {
   return group;
 }
 
-// Rebuilds the dynamic layer for the current selection: a small marker for every
-// view, the selected view's ground-truth camera + FOV, and the selected solve's
-// predicted camera + FOV.
+// Rebuilds the dynamic layer for the current selection: a small baseline-pose
+// marker for every view, the selected view's baseline FOV, and the selected
+// solver pose's FOV.
 export function buildSelectionLayer(terrain, frame, views, selectedViewId, selectedSolve) {
   const group = new THREE.Group();
   for (const view of views) {
@@ -96,12 +95,12 @@ export function buildSelectionLayer(terrain, frame, views, selectedViewId, selec
       group.add(marker);
       continue;
     }
-    group.add(createCameraMarker(view.true_extrinsics, frame, TRUE_COLOR, `${view.label} · True`, "true-camera"));
+    group.add(createCameraMarker(view.true_extrinsics, frame, TRUE_COLOR, `${view.label} · Baseline pose`, "true-camera"));
     group.add(createFovOverlay(terrain, frame, view.true_extrinsics, view.intrinsics, TRUE_COLOR));
 
     if (selectedSolve && view.solves.some((s) => s.id === selectedSolve.id)) {
       const predicted = selectedSolve.result.estimate.extrinsics;
-      group.add(createCameraMarker(predicted, frame, PREDICTED_COLOR, "Predicted", "predicted-camera"));
+      group.add(createCameraMarker(predicted, frame, PREDICTED_COLOR, "Solver pose", "predicted-camera"));
       group.add(createFovOverlay(terrain, frame, predicted, view.intrinsics, PREDICTED_COLOR));
       // Other plausible locations from a prior-free search ("find all of them").
       for (const candidate of (selectedSolve.result.candidates ?? []).slice(1)) {

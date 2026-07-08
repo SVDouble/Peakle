@@ -607,8 +607,7 @@ button.secondary:disabled {
 }
 
 /* --- View list / editor --- */
-.view-list,
-.solve-list {
+.view-list {
   display: grid;
   gap: 4px;
   margin: 8px 0 0;
@@ -616,8 +615,7 @@ button.secondary:disabled {
   list-style: none;
 }
 
-.view-row,
-.solve-row {
+.view-row {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -627,7 +625,7 @@ button.secondary:disabled {
 }
 
 .view-row.selected,
-.solve-row.selected {
+.inspect-compare-row.selected {
   border-color: rgba(240, 199, 94, 0.5);
   background: rgba(240, 199, 94, 0.08);
 }
@@ -646,6 +644,14 @@ button.secondary:disabled {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.pose-metrics {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .view-meta {
@@ -1108,26 +1114,6 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   font-size: 11px;
 }
 
-.candidate-compare {
-  flex: 0 0 auto;
-  display: inline-grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-}
-
-.candidate-compare input {
-  width: 14px;
-  height: 14px;
-}
-
-.solve-row .solve-name {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  align-items: flex-start;
-}
-
 .solve-strategy {
   font-size: 13px;
   color: var(--text);
@@ -1351,6 +1337,75 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
 
 .gt-inspect-meta b {
   color: var(--text);
+}
+
+.inspect-compare-controls {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inspect-compare-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.inspect-compare-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 7px;
+  align-items: center;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.inspect-compare-row.clickable {
+  cursor: pointer;
+}
+
+.inspect-compare-row.clickable:hover {
+  border-color: rgba(240, 199, 94, 0.35);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.inspect-compare-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.inspect-compare-pickers {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.inspect-compare-pickers label {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: end;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.inspect-compare-pickers .compare-column-title {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.inspect-compare-pickers .compare-select {
+  min-width: 0;
 }
 
 .gt-name-row {

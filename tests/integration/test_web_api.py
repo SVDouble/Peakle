@@ -28,6 +28,8 @@ def test_scene_terrain_peaks_endpoints(client: TestClient) -> None:
     assert scene["providers"] == ["demo", "srtm"]
     assert {strategy["name"] for strategy in scene["strategies"]} == {
         "powell",
+        "cmaes",
+        "contourdb",
         "nelder",
         "evolution",
         "global",

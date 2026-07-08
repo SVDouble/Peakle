@@ -62,7 +62,7 @@ export function localToScenePoint(localPoint, frame) {
 }
 
 // Inverse of localToScenePoint for the east/north plane (used when the user
-// clicks the terrain to place a camera).
+// clicks the terrain to place a view).
 export function sceneToLocalEastNorth(point, frame) {
   const east = (point.x / (frame.sceneW ?? TERRAIN_WIDTH) + 0.5) * (frame.xMax - frame.xMin) + frame.xMin;
   const north = (-point.z / (frame.sceneD ?? TERRAIN_DEPTH) + 0.5) * (frame.yMax - frame.yMin) + frame.yMin;

@@ -41,9 +41,8 @@ Collected from the app-feedback session. Grouped by status. Newest feedback at t
       solve) that you pick to look through.
 - [x] **Solve arbitrary (non-corpus) photos.** `POST /api/views/from-photo` plus the "Localize
       photo" UI create photo-backed, solvable views from an image + location + FOV.
-- [x] **Adjust ANY view uniformly** (not just GT). Placed views have pose sliders; GT samples
-      have the inspector adjust. Fold into one "move this view" flow now that duplicate+rename
-      exist.
+- [x] **Adjust ANY mutable view uniformly** (not GT catalogue samples). Materialized
+      GT/photo/placed views use the same pose sliders; raw GT samples stay immutable baselines.
 - [x] **Cleaner interface / remove scattered buttons.** List rows are selection-only; per-item
       actions live in contextual editor groups.
 - [x] **(Optional) Make the 2D minimap a separate window/panel** instead of a corner overlay.
@@ -53,8 +52,30 @@ Collected from the app-feedback session. Grouped by status. Newest feedback at t
 - [x] **GT selection now focuses before rendering overlays** — list rows and 3D photo thumbnails
       both route through the same "center-if-needed" guard, avoiding Matterhorn contours on the
       wrong terrain chunk.
+- [x] **Inspect compares two poses for the selected view** — the DEM/refined-pose baseline and
+      solver outputs share one candidate model; two dropdown columns compare map-fit metrics only.
+- [x] **Inspect is the single pose list** — the duplicate pose rows were removed from Solve;
+      Solve only runs solvers and shows diagnostics for the selected solver pose.
+- [x] **Solvers sped up for large maps** — objective scoring now uses adaptive strided terrain
+      point clouds, global uses bounded coarse candidate polishing, and horizon is the startup default.
+- [x] **Added a modern adaptive black-box solver** — CMA-ES is now available as a full-pose
+      solver, seeded by the domain-specific horizon orientation and polished locally.
+- [x] **Added a contour-database seeding strategy** — projected skyline snapshots are sampled
+      from ring viewpoints around the massif, encoded as compact normalized contour signatures,
+      ranked against the observed outline, and locally polished with the selected pose priors.
+- [x] **GT views expose both built-in poses** — each GT view now lists the immutable
+      ground-truth/depth reference separately from the DEM/refined pose before solver outputs.
+- [x] **View/pose/camera-model terminology clarified** — the left list is Views
+      (image/crop/photo inputs), the second list is Poses (extrinsics), and camera model means
+      intrinsics/projection. GT backing views stay hidden and solver runs append poses there.
+- [x] **Solver priors are selectable** — position and orientation priors are independent toggles
+      where the selected strategy supports them.
+- [x] **Opening editable GT views avoids unnecessary terrain reloads** — if the GT camera is
+      already inside the current terrain frame, it materializes in that frame instead of recentering.
 - [x] **Peak-name search shipped** — visible peak tags are returned for GT samples, shown under
       rows, and used by the Views filter.
+- [x] **Views peak search is fuzzy** — typo-tolerant matching now scores view labels and visible
+      mountain names, weighted by peak relevance so prominent central peaks rank higher.
 - [x] **Views panel compacted** — consistent native buttons/selects, wrapped metrics, peak tags,
       and a shorter editor keep the left column usable.
 - [x] **Views panel overflow fixed** — the page/Dockview root no longer scrolls through empty
@@ -65,7 +86,7 @@ Collected from the app-feedback session. Grouped by status. Newest feedback at t
 - [x] **OSM peak-name fallback tightened** — nearest-pair assignment plus an extended second pass
       reduced the live scene from 7 spot-height labels to 1 legitimate unmatched local maximum.
 - [x] **Map POV controls simplified** — the map now has a `Map | POV` toggle plus a compact pose
-      table for the selected image's ground-truth/dataset pose and solves.
+      table for the selected view's ground-truth/dataset pose and solver poses.
 - [x] **Arbitrary photo localization shipped** — raw-image upload endpoint + "Localize photo"
       UI create photo-backed views with extracted skylines, broad yaw/pitch priors, and default
       to the horizon solver.

@@ -1,18 +1,16 @@
 "use strict";
 
-// One camera type for the whole UI. A placed view and a GT sample are the SAME thing — a camera
-// with a pose you look through, an image you inspect, and outlines you overlay. They differ only
-// in two data facts the user named: a GT sample's image is IMMUTABLE (a photograph, not a
-// re-render) and it carries a PRIOR pose (the dataset label). Everything behavioural —
-// resolving the pose into the scene, POV, inspection — is shared here; the two builders at the
-// bottom just extract source-specific fields into the same shape.
+// One selected-view descriptor for the whole UI. A placed view and a GT sample are the same
+// left-list entity: a view (image/crop/photo) with a camera model and one or more poses. GT
+// samples differ only in two data facts: their view image is immutable and their baseline pose
+// comes from the dataset/refinement pipeline.
 
 import { geoToLocal } from "./geometry.js";
 
 const DEG = Math.PI / 180;
 const RAD = 180 / Math.PI;
 
-export class ImageCamera {
+export class CameraModel {
   constructor({ widthPx, heightPx, horizontalFovDeg, projection = "pinhole" }) {
     this.widthPx = widthPx;
     this.heightPx = heightPx;
@@ -22,7 +20,7 @@ export class ImageCamera {
 
   static fromPayload(payload, fallbackIntrinsics = null, fallbackProjection = "pinhole") {
     if (payload) {
-      return new ImageCamera({
+      return new CameraModel({
         widthPx: payload.width_px,
         heightPx: payload.height_px,
         horizontalFovDeg: payload.horizontal_fov_deg,
@@ -32,7 +30,7 @@ export class ImageCamera {
     if (!fallbackIntrinsics) {
       return null;
     }
-    return new ImageCamera({
+    return new CameraModel({
       widthPx: fallbackIntrinsics.width_px,
       heightPx: fallbackIntrinsics.height_px,
       horizontalFovDeg: horizontalFovFromIntrinsics(fallbackIntrinsics),
@@ -41,7 +39,7 @@ export class ImageCamera {
   }
 
   static fromGtSample(sample) {
-    return new ImageCamera({
+    return new CameraModel({
       widthPx: sample.width,
       heightPx: sample.height,
       horizontalFovDeg: sample.fov_deg,
@@ -67,7 +65,7 @@ export class ImageCamera {
   }
 
   poseDescriptor(fields) {
-    return { ...fields, imageCamera: this };
+    return { ...fields, cameraModel: this };
   }
 
   scenePose(fields) {
@@ -75,7 +73,7 @@ export class ImageCamera {
       ...fields,
       vfovDeg: this.verticalFovDeg,
       aspect: this.aspect,
-      imageCamera: this,
+      cameraModel: this,
     };
   }
 }
@@ -86,7 +84,7 @@ function horizontalFovFromIntrinsics(intrinsics) {
 
 // A pose descriptor is frame-tagged: "local" (already in the scene's east/north/up frame, a placed
 // view) or "geo" (a global lat/lon + refined offset, a GT sample). resolvePose is the single place
-// that difference lives — every consumer just asks the camera for scenePose(terrain, mode).
+// that difference lives — every consumer just asks the selected view for scenePose(terrain, mode).
 function resolvePose(desc, terrain) {
   if (!desc) {
     return null;
@@ -104,21 +102,21 @@ function resolvePose(desc, terrain) {
   } else {
     position = desc.position;
   }
-  return desc.imageCamera.scenePose({ position, yaw_deg: desc.yaw_deg, pitch_deg: desc.pitch_deg });
+  return desc.cameraModel.scenePose({ position, yaw_deg: desc.yaw_deg, pitch_deg: desc.pitch_deg });
 }
 
-class Camera {
+class SelectedView {
   constructor(fields) {
-    Object.assign(this, fields); // kind, id, label, imageCamera, poses, imageImmutable, hasLayers, view, solve, sample
+    Object.assign(this, fields); // kind, id, label, cameraModel, poses, imageImmutable, hasLayers, view, solve, sample
   }
 
-  // The one POV path: resolve this camera's pose for a mode ("true" | "predicted") into the scene.
+  // The one POV path: resolve this view's pose for a mode ("true" | "predicted") into the scene.
   scenePose(terrain, mode) {
     return resolvePose(this.poses[mode], terrain);
   }
 
   scenePoseFromLocal(extrinsics, terrain) {
-    return resolvePose(this.imageCamera.poseDescriptor({
+    return resolvePose(this.cameraModel.poseDescriptor({
       frame: "local",
       position: extrinsics.position,
       yaw_deg: extrinsics.yaw_deg,
@@ -131,19 +129,19 @@ class Camera {
   }
 }
 
-export function viewImageCamera(view) {
-  return ImageCamera.fromPayload(view.image_camera, view.intrinsics, view.source === "gt" ? "cyltan" : "pinhole");
+export function viewCameraModel(view) {
+  return CameraModel.fromPayload(view.image_camera, view.intrinsics, view.source === "gt" ? "cyltan" : "pinhole");
 }
 
 // --- placed view: pose in the local frame, image is a live DEM render (mutable) ---
 export function viewCamera(view, solve) {
-  const imageCamera = viewImageCamera(view);
-  const local = (e) => imageCamera.poseDescriptor({ frame: "local", position: e.position, yaw_deg: e.yaw_deg, pitch_deg: e.pitch_deg });
-  return new Camera({
+  const cameraModel = viewCameraModel(view);
+  const local = (e) => cameraModel.poseDescriptor({ frame: "local", position: e.position, yaw_deg: e.yaw_deg, pitch_deg: e.pitch_deg });
+  return new SelectedView({
     kind: "view",
     id: view.id,
     label: view.label,
-    imageCamera,
+    cameraModel,
     poses: {
       true: view.true_extrinsics ? local(view.true_extrinsics) : null,
       predicted: solve ? local(solve.result.estimate.extrinsics) : null,
@@ -158,8 +156,16 @@ export function viewCamera(view, solve) {
 
 // --- GT sample: an immutable photo + the refined dataset pose in the geo frame ---
 export function gtCamera(sample) {
-  const imageCamera = ImageCamera.fromGtSample(sample);
-  const prior = imageCamera.poseDescriptor({
+  const cameraModel = CameraModel.fromGtSample(sample);
+  const gtDepth = cameraModel.poseDescriptor({
+    frame: "geo",
+    lat: sample.lat,
+    lon: sample.lon,
+    up_m: sample.gt_elev_m ?? sample.cam_z_m,
+    yaw_deg: sample.gt_yaw_deg ?? sample.yaw_deg,
+    pitch_deg: sample.gt_pitch_deg ?? cameraModel.pitchDegFromVerticalShiftPx(sample.dv_px ?? 0),
+  });
+  const refined = cameraModel.poseDescriptor({
     frame: "geo",
     lat: sample.lat,
     lon: sample.lon,
@@ -167,14 +173,17 @@ export function gtCamera(sample) {
     dn_m: sample.dn_m ?? 0,
     up_m: sample.cam_z_m,
     yaw_deg: sample.yaw_deg,
-    pitch_deg: imageCamera.pitchDegFromVerticalShiftPx(sample.dv_px ?? 0),
+    pitch_deg: cameraModel.pitchDegFromVerticalShiftPx(sample.dv_px ?? 0),
   });
-  return new Camera({
+  return new SelectedView({
     kind: "gt",
     id: sample.name,
     label: sample.name,
-    imageCamera,
-    poses: { true: prior }, // the refined dataset pose: a baseline candidate you can open and solve from
+    cameraModel,
+    poses: {
+      gtDepth,
+      true: refined,
+    },
     imageImmutable: true, // the photograph
     hasLayers: true, // precomputed outline layer PNGs
     sample,

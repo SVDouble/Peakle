@@ -11,7 +11,8 @@ from peakle.scene.scene import Scene
 
 # `global` is prior-free and intentionally searches the whole map; on a tiny test
 # scene its skyline match is ambiguous, so it is covered by a looser smoke test.
-PRIOR_STRATEGIES = tuple(strategy for strategy in STRATEGIES if strategy != "global")
+PRIOR_FREE_STRATEGIES = {"global"}
+PRIOR_STRATEGIES = tuple(strategy for strategy in STRATEGIES if strategy not in PRIOR_FREE_STRATEGIES)
 
 
 def _place_near_prominent_peak(scene: Scene):
@@ -49,6 +50,17 @@ def test_global_strategy_runs_prior_free(scene: Scene) -> None:
     result = solve.result
     assert result.strategy == "global"
     assert result.trace, "expected a non-empty convergence trace"
+    assert math.isfinite(result.estimate.metrics.contour_mae_px)
+    assert result.estimate.metrics.yaw_error_deg is not None
+
+
+def test_contour_database_strategy_returns_ranked_candidates(scene: Scene) -> None:
+    view = _place_near_prominent_peak(scene)
+    solve = scene.run_solve(view.id, "contourdb", {})
+    result = solve.result
+    assert result.strategy == "contourdb"
+    assert result.trace, "expected a non-empty convergence trace"
+    assert result.candidates, "expected ranked database candidates"
     assert math.isfinite(result.estimate.metrics.contour_mae_px)
     assert result.estimate.metrics.yaw_error_deg is not None
 

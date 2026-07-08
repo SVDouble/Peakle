@@ -145,18 +145,13 @@ class SyntheticRenderer:
         width = intrinsics.width_px
         height = intrinsics.height_px
         u_px, v_px, _depth, valid = project_points(points, intrinsics, extrinsics)
-        columns = np.floor(np.nan_to_num(u_px, nan=-1.0)).astype(np.int64)
-        good = valid & np.isfinite(v_px) & (columns >= 0) & (columns < width)
-        profile = np.full(width, np.nan, dtype=np.float64)
-        good_columns = columns[good]
-        if good_columns.size:
-            # Per-column minimum via a single sort + segmented reduce, far faster
-            # than np.minimum.at for the dense (upsampled) point cloud.
-            order = np.argsort(good_columns, kind="stable")
-            sorted_columns = good_columns[order]
-            sorted_v = v_px[good][order]
-            unique_columns, first = np.unique(sorted_columns, return_index=True)
-            profile[unique_columns] = np.minimum.reduceat(sorted_v, first)
+        finite = valid & np.isfinite(u_px) & np.isfinite(v_px)
+        columns = np.floor(u_px[finite]).astype(np.int64)
+        inside = (columns >= 0) & (columns < width)
+        profile = np.full(width, np.inf, dtype=np.float64)
+        if np.any(inside):
+            np.minimum.at(profile, columns[inside], v_px[finite][inside])
+        profile[~np.isfinite(profile)] = np.nan
         profile = interpolate_profile(profile, fallback=float(height) * 0.62)
         return np.clip(profile, 0.0, float(height - 1))
 

@@ -3,7 +3,7 @@
 // GT sample spots on the 3D map: a pin + clickable photo-thumbnail chip for
 // every corpus sample inside the current terrain window. Clicking a chip selects
 // the sample (inspector + list follow); the selected sample additionally shows a
-// camera glyph at its refined pose so the labelled placement is visible in 3D.
+// pose glyph at its refined placement so it is visible in 3D.
 
 import * as THREE from "three";
 import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
@@ -67,7 +67,7 @@ export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick,
     label.position.y += 0.028;
     group.add(label);
 
-    // Show the labelled camera placement for the selected sample: position is
+    // Show the labelled pose placement for the selected sample: position is
     // GPS + the refinement's east/north correction, heading is the refined yaw.
     if (selected && sample.yaw_deg !== undefined) {
       const extrinsics = {
@@ -79,7 +79,7 @@ export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick,
         yaw_deg: sample.yaw_deg,
         pitch_deg: 0,
       };
-      group.add(createCameraMarker(extrinsics, frame, 0xffd24a, `${sample.name} · GT`, "gt-camera"));
+      group.add(createCameraMarker(extrinsics, frame, 0xffd24a, `${sample.name} · GT pose`, "gt-camera"));
     }
   }
   return group;
