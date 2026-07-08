@@ -1103,3 +1103,28 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   accent-color: var(--accent);
   width: 120px;
 }
+
+/* View editor header: editable name + duplicate */
+.editor-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.view-name-edit {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.view-name-edit:focus {
+  outline: none;
+  border-color: var(--accent);
+}

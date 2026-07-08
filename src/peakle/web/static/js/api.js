@@ -41,6 +41,7 @@ export const api = {
   createView: (placement) => request("POST", "/api/views", placement),
   patchView: (id, changes) => request("PATCH", `/api/views/${id}`, changes),
   deleteView: (id) => request("DELETE", `/api/views/${id}`),
+  duplicateView: (id, label) => request("POST", `/api/views/${id}/duplicate`, label ? { label } : {}),
   viewImageUrl: (id) => `/api/views/${id}/image`,
   viewPhotoUrl: (id) => `/api/views/${id}/photo`,
 

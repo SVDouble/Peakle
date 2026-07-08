@@ -114,9 +114,29 @@ export function setupViewsPanel(store, root) {
     runStatus = el("p", { class: "control-hint" });
     solvesHost = el("ul", { class: "solve-list" });
 
+    // Editable name (rename it yourself) + a Duplicate action, grouped in the editor header.
+    const nameInput = el("input", { class: "view-name-edit", type: "text", value: view.label });
+    nameInput.addEventListener("change", () => {
+      const label = nameInput.value.trim();
+      if (label && label !== view.label) {
+        store.patchView(view.id, { label }).catch((error) => (runStatus.textContent = error.message));
+      }
+    });
+    const dupButton = el("button", { type: "button", class: "icon-button", title: "Duplicate this view", text: "⎘" });
+    dupButton.addEventListener("click", async () => {
+      const label = window.prompt("Name for the duplicate", `${view.label} copy`);
+      if (label !== null) {
+        try {
+          await store.duplicateView(view.id, label.trim() || undefined);
+        } catch (error) {
+          runStatus.textContent = error.message;
+        }
+      }
+    });
+
     editor.replaceChildren(
       el("div", { class: "control-block compact" }, [
-        el("strong", { class: "editor-title", text: view.label }),
+        el("div", { class: "editor-header" }, [nameInput, dupButton]),
         poseSlider("Yaw", ext.yaw_deg, -180, 180, 1, "deg", view.id, (v) => ({ yaw_deg: v })),
         poseSlider("Pitch", ext.pitch_deg, -30, 30, 0.5, "deg", view.id, (v) => ({ pitch_deg: v })),
         poseSlider("Eye height", view.eye_height_m, 0, 1000, 10, "m", view.id, (v) => ({ eye_height_m: v })),

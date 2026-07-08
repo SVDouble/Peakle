@@ -127,6 +127,16 @@ class Store {
     return view;
   }
 
+  // Fork any view (placed or GT-derived) under a new name; the copy is selected so you can move it
+  // freely while the original stays put.
+  async duplicateView(id, label) {
+    const view = await api.duplicateView(id, label);
+    this.views = [...this.views, view];
+    this.emit("views");
+    this.selectView(view.id);
+    return view;
+  }
+
   async patchView(id, changes) {
     const view = await api.patchView(id, changes);
     this.views = this.views.map((existing) => (existing.id === id ? view : existing));

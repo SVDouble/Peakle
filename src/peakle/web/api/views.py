@@ -69,6 +69,17 @@ async def patch_view(view_id: str, body: ViewPatchRequest, request: Request) -> 
     return view_payload(view)
 
 
+@router.post("/views/{view_id}/duplicate", status_code=201)
+async def duplicate_view(view_id: str, request: Request, body: dict[str, str] | None = None) -> dict[str, Any]:
+    """Duplicate a view (any kind) under a new id + optional custom label, without its solves."""
+
+    scene = _scene(request)
+    _require_view(scene, view_id)
+    async with request.app.state.scene_lock:
+        dup = await to_thread.run_sync(scene.duplicate_view, view_id, (body or {}).get("label"))
+    return view_payload(dup)
+
+
 @router.delete("/views/{view_id}", status_code=204)
 async def delete_view(view_id: str, request: Request) -> Response:
     """Removes a view."""

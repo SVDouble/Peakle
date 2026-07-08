@@ -283,6 +283,21 @@ class Scene:
         self.views[view_id] = rebuilt
         return rebuilt
 
+    def duplicate_view(self, view_id: str, label: str | None = None) -> View:
+        """Copy a view (any kind) under a new id + label, without its solves.
+
+        The duplicate keeps the source view's pose, intrinsics, source, gt_name and reference photo,
+        so you can fork a placed camera OR a GT-derived view, rename it, and move the copy freely
+        while the original stays put.
+        """
+
+        src = self.views[view_id]
+        self._view_counter += 1
+        new_id = f"view-{self._view_counter:02d}"
+        dup = src.model_copy(update={"id": new_id, "label": label or f"{src.label} copy", "solves": {}})
+        self.views[new_id] = dup
+        return dup
+
     def delete_view(self, view_id: str) -> None:
         """Removes a view."""
 
