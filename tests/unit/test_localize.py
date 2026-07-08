@@ -11,7 +11,7 @@ import pytest
 
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import LocalPoint
-from peakle.localize.raycast import skyline_cyl, skyline_pinhole
+from peakle.localize.raycast import _distance_samples, skyline_cyl, skyline_pinhole
 from peakle.localize.solve import HorizonProfile, solve_orientation
 
 
@@ -57,6 +57,15 @@ def _pose(yaw, pitch, cam_z):
     return CameraExtrinsics(
         position=LocalPoint(east_m=0.0, north_m=0.0, up_m=cam_z), yaw_deg=yaw, pitch_deg=pitch, roll_deg=0.0
     )
+
+
+def test_adaptive_raycast_samples_close_terrain_more_densely():
+    coarse = _distance_samples(20_000.0, 25.0)
+    fine = _distance_samples(20_000.0, 5.0, patch=object())
+
+    assert np.diff(coarse[coarse < 4_000.0]).max() <= 10.0
+    assert np.diff(fine[fine < 4_000.0]).max() <= 5.0
+    assert np.diff(fine[fine > 12_000.0]).min() >= 25.0
 
 
 @pytest.fixture(scope="module")

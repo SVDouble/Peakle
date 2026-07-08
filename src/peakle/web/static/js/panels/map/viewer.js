@@ -12,15 +12,17 @@ import { api } from "../../api.js";
 import {
   PHYSICAL_TERRAIN_VERTICAL_SCALE,
   cameraTargetScenePoint,
+  localTerrainToGeo,
   localToScenePoint,
   scaledTerrainFrame,
   sceneToLocalEastNorth,
+  terrainElevationAt,
   terrainFrame,
 } from "../../geometry.js";
 import { el, fitContainBox, formatNumber, svgElement } from "../../format.js";
 import { GT_LAYER_NAMES } from "../camera-image.js";
 import { buildSelectionLayer } from "./cameras.js";
-import { buildGtSpotsLayer, terrainElevationAt } from "./gt-spots.js";
+import { buildGtSpotsLayer } from "./gt-spots.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";
 
 const CAMERA_INITIAL_POSITION = new THREE.Vector3(0.1, 1.55, 2.65);
@@ -28,6 +30,14 @@ const CAMERA_TARGET = new THREE.Vector3(0, 0.22, 0);
 const PICK_MAX_DRAG_PX = 5;
 const LABEL_OCCLUSION_MARGIN = 0.018;
 const SCENE_DEM_SKY_LAYER = "dem_sky";
+const TERRAIN_FOLLOW_EDGE_FRACTION = 0.24;
+const PEAK_LABEL_LOD = [
+  { distance: 3.2, maxLabels: 12, minProminenceM: 180, allowSpotHeights: false },
+  { distance: 2.2, maxLabels: 24, minProminenceM: 110, allowSpotHeights: false },
+  { distance: 1.25, maxLabels: 55, minProminenceM: 45, allowSpotHeights: false },
+  { distance: 0.62, maxLabels: 120, minProminenceM: 12, allowSpotHeights: true },
+  { distance: 0, maxLabels: 260, minProminenceM: 0, allowSpotHeights: true },
+];
 
 export function setupMapPanel(store, root) {
   root.classList.add("map-panel");
@@ -120,6 +130,8 @@ export function setupMapPanel(store, root) {
   let lastSelectionKey = null;
   let lastSelectedSolveId = null;
   let povAspect = null; // aspect of the active POV camera image, for letterboxing
+  let terrainFollowInFlight = false;
+  let pendingTerrainFollowView = null;
   // One raycaster, used only for click-to-place picking (a single cast per click).
   // Label occlusion samples the elevation heightfield instead: raycasting the full
   // terrain mesh per label per frame collapsed to ~4 fps on a focused 320x320 grid
@@ -151,6 +163,7 @@ export function setupMapPanel(store, root) {
     const peakBuilt = addPeakLabels(scene, store.peaks, frame);
     peakGroup = peakBuilt.group;
     peakLabels = peakBuilt.labels;
+    restoreMapViewAfterTerrainFollow();
     rebuildSelection();
     rebuildGtSpots();
   }
@@ -509,6 +522,8 @@ export function setupMapPanel(store, root) {
     button.addEventListener("click", () => applyPov(button.dataset.pov));
   }
 
+  controls.addEventListener("end", followTerrainWindowAfterPan);
+
   // Double-click any terrain point to recenter the geographic window there (the
   // in-3D "move the map"): raycast the terrain, convert the hit to lat/lon via the
   // frame's geographic corners, and focus the heightmap on it.
@@ -527,9 +542,7 @@ export function setupMapPanel(store, root) {
       return;
     }
     const local = sceneToLocalEastNorth(hits[0].point, frame);
-    const t = store.terrain;
-    const lon = t.lon_min_deg + ((local.east_m - t.x_min_m) / (t.x_max_m - t.x_min_m)) * (t.lon_max_deg - t.lon_min_deg);
-    const lat = t.lat_min_deg + ((local.north_m - t.y_min_m) / (t.y_max_m - t.y_min_m)) * (t.lat_max_deg - t.lat_min_deg);
+    const { lat, lon } = localTerrainToGeo(store.terrain, local);
     hint.textContent = "Recentering map…";
     store.focusScene(lat, lon).then(
       () => {
@@ -542,6 +555,58 @@ export function setupMapPanel(store, root) {
       },
     );
   });
+
+  function followTerrainWindowAfterPan() {
+    if (mode !== "map" || terrainFollowInFlight || !store.terrain?.lat_min_deg || !frame) {
+      return;
+    }
+    const local = sceneToLocalEastNorth(controls.target, frame);
+    if (!shouldFollowTerrainWindow(local)) {
+      return;
+    }
+    const { lat, lon } = localTerrainToGeo(store.terrain, local);
+    pendingTerrainFollowView = {
+      cameraOffset: camera.position.clone().sub(controls.target),
+      targetY: controls.target.y,
+    };
+    terrainFollowInFlight = true;
+    hint.textContent = "Loading next terrain window…";
+    store.focusScene(lat, lon).then(
+      () => {
+        terrainFollowInFlight = false;
+        if (mode === "map") {
+          hint.textContent = store.placing ? "Click the map to place a camera." : "Free orbit. Pan to keep moving the terrain window.";
+        }
+      },
+      (error) => {
+        pendingTerrainFollowView = null;
+        terrainFollowInFlight = false;
+        hint.textContent = error.message;
+      },
+    );
+  }
+
+  function shouldFollowTerrainWindow(local) {
+    const xMargin = (frame.xMax - frame.xMin) * TERRAIN_FOLLOW_EDGE_FRACTION;
+    const yMargin = (frame.yMax - frame.yMin) * TERRAIN_FOLLOW_EDGE_FRACTION;
+    return (
+      local.east_m < frame.xMin + xMargin ||
+      local.east_m > frame.xMax - xMargin ||
+      local.north_m < frame.yMin + yMargin ||
+      local.north_m > frame.yMax - yMargin
+    );
+  }
+
+  function restoreMapViewAfterTerrainFollow() {
+    if (!pendingTerrainFollowView || mode !== "map") {
+      return;
+    }
+    const view = pendingTerrainFollowView;
+    pendingTerrainFollowView = null;
+    controls.target.set(0, view.targetY, 0);
+    camera.position.copy(controls.target).add(view.cameraOffset);
+    controls.update();
+  }
 
   // Click-to-place: raycast the terrain and create a view aimed at the tallest peak.
   let pointerDown = null;
@@ -629,13 +694,48 @@ export function setupMapPanel(store, root) {
     const cameraPosition = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
     const target = new THREE.Vector3();
     const projected = new THREE.Vector3();
-    for (const label of [...peakLabels, ...selectionLabels, ...gtSpotLabels]) {
+    const peakLod = peakLabelLod(cameraPosition.distanceTo(controls.target));
+    for (const label of peakLabels) {
+      const lodVisible = peakLabelAllowed(label, peakLod);
+      const marker = label.userData.peakMarker;
+      if (!lodVisible) {
+        label.visible = false;
+        if (marker) {
+          marker.visible = false;
+        }
+        continue;
+      }
+      const anchor = label.userData.occlusionAnchor ?? label;
+      anchor.getWorldPosition(target);
+      projected.copy(target).project(camera);
+      const inView = projected.z >= -1 && projected.z <= 1 && Math.abs(projected.x) <= 1.08 && Math.abs(projected.y) <= 1.08;
+      label.visible = inView && !(store.terrain && frame && terrainOccludes(cameraPosition, target));
+      if (marker) {
+        marker.visible = label.visible;
+      }
+    }
+    for (const label of [...selectionLabels, ...gtSpotLabels]) {
       const anchor = label.userData.occlusionAnchor ?? label;
       anchor.getWorldPosition(target);
       projected.copy(target).project(camera);
       const inView = projected.z >= -1 && projected.z <= 1 && Math.abs(projected.x) <= 1.08 && Math.abs(projected.y) <= 1.08;
       label.visible = inView && !(store.terrain && frame && terrainOccludes(cameraPosition, target));
     }
+  }
+
+  function peakLabelLod(distance) {
+    return PEAK_LABEL_LOD.find((tier) => distance >= tier.distance) ?? PEAK_LABEL_LOD[PEAK_LABEL_LOD.length - 1];
+  }
+
+  function peakLabelAllowed(label, lod) {
+    const peak = label.userData.peakLod;
+    if (!peak) {
+      return true;
+    }
+    if (!lod.allowSpotHeights && !peak.named) {
+      return false;
+    }
+    return peak.rank < lod.maxLabels && (peak.prominenceM >= lod.minProminenceM || peak.rank < Math.ceil(lod.maxLabels / 3));
   }
 
   function viewportBox() {

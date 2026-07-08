@@ -7,7 +7,7 @@
 // resolving the pose into the scene, POV, inspection — is shared here; the two builders at the
 // bottom just extract source-specific fields into the same shape.
 
-import { geoToLocal } from "./panels/map/gt-spots.js";
+import { geoToLocal } from "./geometry.js";
 
 const DEG = Math.PI / 180;
 const RAD = 180 / Math.PI;

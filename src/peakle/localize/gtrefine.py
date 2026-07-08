@@ -90,7 +90,7 @@ def rows_from_el(el: np.ndarray, w: int, h: int, fov_deg: float) -> np.ndarray:
 
 
 def dem_skyline(terrain, cam_z, az_deg, w, h, fov_deg, de=0.0, dn=0.0, patch=None) -> np.ndarray:
-    step = 10.0 if patch is not None else 25.0  # the fine patch deserves a finer ray march
+    step = 5.0 if patch is not None else 25.0  # the fine patch deserves a finer ray march
     el = horizon_elevation(terrain, np.radians(az_deg), cam_z, step=step, cam_e=de, cam_n=dn, patch=patch)
     return rows_from_el(el, w, h, fov_deg)
 
@@ -119,7 +119,7 @@ def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, t
     GT-Lab depth layer."""
 
     az_s = az_deg[::sub]
-    step = 10.0 if patch is not None else 25.0
+    step = 5.0 if patch is not None else 25.0
     el, ds = _elevation_angle_grid(
         terrain, np.radians(az_s), cam_z, step=step, d_max=None, cam_e=de, cam_n=dn, patch=patch
     )

@@ -8,7 +8,7 @@
 // (materialized so it can be solved) transparently the first time you solve it.
 
 import { el, formatNumber } from "../format.js";
-import { geoToLocal } from "./map/gt-spots.js";
+import { angleDeltaDeg, geoToLocal } from "../geometry.js";
 
 const PATCH_DEBOUNCE_MS = 250;
 const CORPUS_CAP = 400;
@@ -147,10 +147,6 @@ export function setupViewsPanel(store, root) {
       scored.push({ name: peak.name, weight });
     }
     return scored.sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name)).slice(0, limit);
-  }
-
-  function angleDeltaDeg(a, b) {
-    return ((((a - b + 180) % 360) + 360) % 360) - 180;
   }
 
   function selectedKey() {

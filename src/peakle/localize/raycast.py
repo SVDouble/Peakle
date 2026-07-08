@@ -21,6 +21,8 @@ from scipy.ndimage import map_coordinates
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 
 EARTH_R = 6371000.0
+ADAPTIVE_CLOSE_M = 4_000.0
+ADAPTIVE_MID_M = 12_000.0
 
 
 def _elevation_angle_grid(
@@ -49,7 +51,7 @@ def _elevation_angle_grid(
     y0, dy = ym[0], (ym[-1] - ym[0]) / (len(ym) - 1)
     if d_max is None:
         d_max = 0.95 * min(xm[-1] - xm[0], ym[-1] - ym[0]) / 2
-    ds = np.arange(step, d_max, step)
+    ds = _distance_samples(d_max, step, patch=patch)
     east = cam_e + ds[None, :] * np.sin(az_rad)[:, None]
     north = cam_n + ds[None, :] * np.cos(az_rad)[:, None]
     ci = (east - x0) / dx
@@ -68,6 +70,23 @@ def _elevation_angle_grid(
     drop = ds[None, :] ** 2 / (2 * EARTH_R)
     el = np.arctan2(z - cam_z - drop, ds[None, :])
     return np.where(inb, el, -np.inf), ds
+
+
+def _distance_samples(d_max: float, step: float, patch=None) -> np.ndarray:
+    """Ray distances with dense near-field sampling and coarser far-field sampling."""
+
+    close_step = min(step, 5.0 if patch is not None else 10.0)
+    mid_step = max(close_step, min(step * 2.0, 25.0))
+    far_step = max(step, 25.0)
+    bands = [
+        np.arange(close_step, min(d_max, ADAPTIVE_CLOSE_M), close_step),
+        np.arange(max(ADAPTIVE_CLOSE_M, close_step), min(d_max, ADAPTIVE_MID_M), mid_step),
+        np.arange(max(ADAPTIVE_MID_M, close_step), d_max, far_step),
+    ]
+    ds = np.unique(np.concatenate([band for band in bands if band.size]))
+    if ds.size == 0:
+        ds = np.asarray([min(close_step, d_max)], dtype=float)
+    return ds.astype(float, copy=False)
 
 
 def horizon_elevation(

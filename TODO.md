@@ -4,6 +4,18 @@ Collected from the app-feedback session. Grouped by status. Newest feedback at t
 
 ## 🐛 To fix (open bugs)
 
+- [x] **Matterhorn blue DEM skyline too coarse.** The focused Copernicus map grid is denser
+      but capped for browser performance; GT POV skylines now use cached swissALTI3D at 5 m
+      ray-march resolution when the current map origin is in Switzerland, with adaptive ray
+      distances so close terrain is sampled more densely than the far horizon.
+- [x] **Peak labels overwhelm the map.** Peak labels/markers now use distance-based LOD: far
+      zoom shows only major named peaks, then progressively reveals less prominent and spot-height
+      labels as you zoom in.
+- [x] **3D map should feel continuous without an infinite mesh.** Panning near the terrain edge
+      now loads the next bounded terrain window after pan end, preserving the orbit view while
+      avoiding a giant always-loaded heightfield.
+- [x] **Duplicate map/geometry helpers removed.** Coordinate conversion, terrain height lookup,
+      angular distance, terrain resolution, and scene-refresh flows now use shared helpers.
 - [x] **GT photo could be selected on a terrain window where its target mountain was not present.**
       Selecting a GT row or map thumbnail now recenters first when the current terrain is not
       centered on that photo, so the POV/skyline overlay is not drawn against the wrong map chunk.
@@ -13,8 +25,8 @@ Collected from the app-feedback session. Grouped by status. Newest feedback at t
       unified list owns the only scrollbar.
 - [x] **Peaks sometimes labelled `Pt <height> m` instead of their real name.** OSM peak matching
       now uses nearest-pair assignment with a confident pass and an extended shoulder pass.
-- [x] **Map GT image spot has no "center map here" button.** Every visible photo chip now has a
-      small center-map action.
+- [x] **Map GT image spot needs quick recentering.** Double-clicking a visible photo chip centers
+      the map there.
 
 ## 🔭 To do (features / redesign)
 
@@ -49,7 +61,7 @@ Collected from the app-feedback session. Grouped by status. Newest feedback at t
       space; the unified list owns the only scrollbar.
 - [x] **Unified Views list styled and shipped** — placed/opened views and GT corpus samples live
       in one list with provider chips, search, rebuild, center, solve and editor flows.
-- [x] **GT map spot center button added** — every visible photo chip has a small ⌖ action.
+- [x] **GT map spot recentering added** — double-clicking a visible photo chip centers the map.
 - [x] **OSM peak-name fallback tightened** — nearest-pair assignment plus an extended second pass
       reduced the live scene from 7 spot-height labels to 1 legitimate unmatched local maximum.
 - [x] **Map POV controls simplified** — the map now has a `Map | POV` toggle plus a compact pose

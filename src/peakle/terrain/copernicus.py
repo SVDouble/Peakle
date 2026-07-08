@@ -16,13 +16,15 @@ from peakle.domain.terrain import TerrainMap, TerrainSpec
 from peakle.localize.copdem import load_cop_around
 
 DEFAULT_COP_DIR = Path(__file__).resolve().parents[3] / "local/data/copernicus"
+DEFAULT_TARGET_RESOLUTION_M = 30.0
+DEFAULT_MAX_GRID = 960
 
 
 def load_copernicus_terrain(
     center_lat_deg: float,
     center_lon_deg: float,
     extent_m: float = 40000.0,
-    grid: int = 720,  # ~56 m/cell over a 40 km window (sampled at ~28 m ≈ native 30 m, then pooled)
+    grid: int | None = None,
     tile_dir: Path = DEFAULT_COP_DIR,
 ) -> TerrainMap:
     """Square `extent_m` window centred on a lat/lon, as a `TerrainMap`.
@@ -30,8 +32,10 @@ def load_copernicus_terrain(
     The terrain origin is the requested coordinate (a camera there sits at local 0,0).
     """
 
+    if grid is None:
+        grid = focused_grid_for_extent(extent_m)
     # Sample at 2x the target grid and mean-pool: point-sampling a 30 m surface model at
-    # ~75 m spacing aliases badly — the mesh reads as spiky/rugged (user-reported).
+    # coarse spacing aliases badly — the mesh reads as spiky/rugged (user-reported).
     cop = load_cop_around(tile_dir, center_lat_deg, center_lon_deg, extent_m=extent_m, grid=grid * 2)
     elevation = cop.elevation_m.astype(np.float64).reshape(grid, 2, grid, 2).mean(axis=(1, 3))
     x_m = cop.x_m.reshape(grid, 2).mean(axis=1)
@@ -59,3 +63,14 @@ def load_copernicus_terrain(
         latitude_deg=lat_grid.astype(np.float64),
         longitude_deg=lon_grid.astype(np.float64),
     )
+
+
+def focused_grid_for_extent(
+    extent_m: float,
+    target_resolution_m: float = DEFAULT_TARGET_RESOLUTION_M,
+    max_grid: int = DEFAULT_MAX_GRID,
+) -> int:
+    """Chooses the densest focused-map grid that stays under the browser payload cap."""
+
+    requested = int(np.ceil(extent_m / target_resolution_m)) + 1
+    return max(64, min(max_grid, requested))

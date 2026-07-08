@@ -1139,27 +1139,6 @@ wa-button[appearance~="accent"][variant="brand"]::part(base) {
   object-fit: cover;
 }
 
-.gt-spot-focus {
-  position: absolute;
-  right: 1px;
-  bottom: 1px;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: 1px solid rgba(240, 199, 94, 0.8);
-  border-radius: 4px;
-  background: rgba(20, 21, 18, 0.88);
-  color: var(--text);
-  font-size: 12px;
-  line-height: 16px;
-  cursor: pointer;
-}
-
-.gt-spot-focus:hover {
-  background: var(--accent);
-  color: #1d1b13;
-}
-
 .camera-label.gt-camera {
   border-color: rgba(240, 199, 94, 0.7);
 }

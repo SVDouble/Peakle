@@ -244,7 +244,7 @@ export function addPeakLabels(scene, peaks, frame) {
   );
   const group = new THREE.Group();
   const labels = [];
-  for (const peak of labeled) {
+  for (const [rank, peak] of labeled.entries()) {
     const point = localToScenePoint(peak.local_position, frame);
     const marker = createPeakMarker();
     marker.position.copy(point);
@@ -253,6 +253,13 @@ export function addPeakLabels(scene, peaks, frame) {
     label.position.copy(point);
     label.position.y += PEAK_LABEL_OFFSET;
     label.userData.occlusionAnchor = marker;
+    label.userData.peakMarker = marker;
+    label.userData.peakLod = {
+      rank,
+      prominenceM: peak.prominence_m ?? 0,
+      elevationM: peak.elevation_m ?? 0,
+      named: !/^Pt \d+(?:\.\d+)? m$/.test(peak.name),
+    };
     group.add(label);
     labels.push(label);
   }

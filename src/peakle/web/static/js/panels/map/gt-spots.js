@@ -9,48 +9,11 @@ import * as THREE from "three";
 import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 
 import { api } from "../../api.js";
-import { interpolate, localToScenePoint, normalize } from "../../geometry.js";
+import { geoToLocal, localToScenePoint, terrainElevationAt } from "../../geometry.js";
 import { createCameraMarker } from "./cameras.js";
 
 const SPOT_CAP = 250;
 export const GT_COLOR = 0x8ee08e;
-
-// Linear lat/lon -> local east/north across the terrain window (plenty accurate
-// at map scale). Returns null when the point is outside the window.
-export function geoToLocal(terrain, latDeg, lonDeg) {
-  if (
-    !Number.isFinite(latDeg) ||
-    !Number.isFinite(lonDeg) ||
-    terrain.lat_min_deg === undefined ||
-    latDeg < terrain.lat_min_deg ||
-    latDeg > terrain.lat_max_deg ||
-    lonDeg < terrain.lon_min_deg ||
-    lonDeg > terrain.lon_max_deg
-  ) {
-    return null;
-  }
-  // NOTE: geometry.js `normalize` clamps its denominator to >= 1 (a guard for
-  // meter ranges); degree spans are ~0.2, so it must not be used here.
-  const lonT = (lonDeg - terrain.lon_min_deg) / (terrain.lon_max_deg - terrain.lon_min_deg);
-  const latT = (latDeg - terrain.lat_min_deg) / (terrain.lat_max_deg - terrain.lat_min_deg);
-  return {
-    east_m: interpolate(terrain.x_min_m, terrain.x_max_m, lonT),
-    north_m: interpolate(terrain.y_min_m, terrain.y_max_m, latT),
-  };
-}
-
-export function terrainElevationAt(terrain, eastM, northM) {
-  const col = normalize(eastM, terrain.x_min_m, terrain.x_max_m) * (terrain.grid_width - 1);
-  const row = normalize(northM, terrain.y_min_m, terrain.y_max_m) * (terrain.grid_height - 1);
-  const c0 = Math.max(0, Math.min(terrain.grid_width - 2, Math.floor(col)));
-  const r0 = Math.max(0, Math.min(terrain.grid_height - 2, Math.floor(row)));
-  const tc = Math.max(0, Math.min(1, col - c0));
-  const tr = Math.max(0, Math.min(1, row - r0));
-  const e = terrain.elevation_m;
-  const top = interpolate(e[r0][c0], e[r0][c0 + 1], tc);
-  const bottom = interpolate(e[r0 + 1][c0], e[r0 + 1][c0 + 1], tc);
-  return interpolate(top, bottom, tr);
-}
 
 export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick, onFocus) {
   const group = new THREE.Group();
@@ -81,29 +44,21 @@ export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick,
 
     const chip = document.createElement("div");
     chip.className = `gt-spot${selected ? " sel" : ""}${sample.quality === "CLEAN" ? "" : " suspect"}`;
-    chip.title = sample.name;
+    chip.title = `${sample.name}\nDouble-click to center the map`;
     const img = document.createElement("img");
     img.loading = "lazy";
     img.src = api.gtThumbUrl(sample.name);
     img.alt = sample.name;
     chip.append(img);
-    if (onFocus) {
-      const focus = document.createElement("button");
-      focus.type = "button";
-      focus.className = "gt-spot-focus";
-      focus.title = "Center the 3D map here";
-      focus.textContent = "⌖";
-      focus.addEventListener("click", (event) => {
-        event.stopPropagation();
-        onFocus(sample);
-      });
-      chip.append(focus);
-    }
     // The CSS2D layer itself ignores pointer events; the chip opts back in.
     chip.addEventListener("pointerdown", (event) => event.stopPropagation());
     chip.addEventListener("click", (event) => {
       event.stopPropagation();
       onPick(sample.name);
+    });
+    chip.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      onFocus?.(sample);
     });
     // Occlusion tests against the floating chip itself, not the surface pin —
     // a surface anchor self-occludes against its own slope and hides every chip.

@@ -31,16 +31,18 @@ from anyio import to_thread
 from fastapi import APIRouter, HTTPException, Request, Response
 from PIL import Image
 
+from peakle.domain.angles import angle_delta_deg
 from peakle.domain.camera import CameraExtrinsics, ImageCamera
 from peakle.domain.contours import ImagePoint, SkylineContour
-from peakle.domain.coordinates import GeoPoint, LocalPoint
+from peakle.domain.coordinates import GeoPoint, LocalFrame, LocalPoint
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.geopose import load_sample, read_pfm
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image, dem_skyline, quality_tier, shift_align
 from peakle.localize.photo_support import edge_mask, support_report
+from peakle.localize.swissdem import in_switzerland, load_swiss_patch
 from peakle.localize.typed_outlines import extract_typed_outlines
 from peakle.scene.state import build_intrinsics
-from peakle.web.payloads import view_payload
+from peakle.web.payloads import terrain_resolution_m, view_payload
 
 router = APIRouter(tags=["gtlab"])
 
@@ -49,7 +51,10 @@ DATA = BASE / "local/data/geopose"
 GTV2 = BASE / "local/derived/gt_v2"
 LAYERS = GTV2 / "layers"
 TILES = BASE / "local/data/copernicus"
+SWISS_DIR = BASE / "local/data/swissalti"
 OSM_CACHE = BASE / "data/dem_samples"
+SWISS_SKYLINE_RES_M = 5.0
+SWISS_SKYLINE_RADIUS_M = 12_000.0
 
 # GT = warm/green family; DEM = cool family — two parallel curves in sibling colors = the error
 _COLORS = {
@@ -159,14 +164,22 @@ def _visible_peak_tags(rec: dict, lat: float, lon: float, limit: int = 8) -> lis
     fov = rec.get("fov_deg")
     if yaw is None or fov is None:
         return []
-    cam_lat, cam_lon = _offset_latlon(lat, lon, float(rec.get("de_m") or 0.0), float(rec.get("dn_m") or 0.0))
+    base_frame = LocalFrame(origin=GeoPoint(latitude_deg=lat, longitude_deg=lon, elevation_m=0.0))
+    cam_geo = base_frame.local_to_geo(
+        LocalPoint(east_m=float(rec.get("de_m") or 0.0), north_m=float(rec.get("dn_m") or 0.0), up_m=0.0)
+    )
+    cam_frame = LocalFrame(origin=cam_geo)
     half_fov = max(1.0, float(fov) / 2.0)
     tagged: list[tuple[float, str]] = []
     for summit in _named_summits():
-        bearing, distance_m = _bearing_distance_m(cam_lat, cam_lon, float(summit["lat"]), float(summit["lon"]))
+        local = cam_frame.geo_to_local(
+            GeoPoint(latitude_deg=float(summit["lat"]), longitude_deg=float(summit["lon"]), elevation_m=0.0)
+        )
+        bearing = math.degrees(math.atan2(local.east_m, local.north_m)) % 360.0
+        distance_m = math.hypot(local.east_m, local.north_m)
         if distance_m < 800.0 or distance_m > 80_000.0:
             continue
-        delta = abs(_angle_delta_deg(bearing, float(yaw)))
+        delta = angle_delta_deg(bearing, float(yaw))
         if delta > half_fov:
             continue
         centrality = max(0.0, 1.0 - delta / half_fov)
@@ -181,23 +194,6 @@ def _visible_peak_tags(rec: dict, lat: float, lon: float, limit: int = 8) -> lis
         {"name": name, "weight": round(weight, 4)}
         for name, weight in sorted(best_by_name.items(), key=lambda item: (-item[1], item[0]))[:limit]
     ]
-
-
-def _offset_latlon(lat: float, lon: float, east_m: float, north_m: float) -> tuple[float, float]:
-    lat2 = lat + north_m / 111_320.0
-    lon2 = lon + east_m / max(111_320.0 * math.cos(math.radians(lat)), 1e-6)
-    return lat2, lon2
-
-
-def _bearing_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[float, float]:
-    meters_per_deg_lon = 111_320.0 * math.cos(math.radians(lat1))
-    east_m = (lon2 - lon1) * meters_per_deg_lon
-    north_m = (lat2 - lat1) * 111_320.0
-    return math.degrees(math.atan2(east_m, north_m)) % 360.0, math.hypot(east_m, north_m)
-
-
-def _angle_delta_deg(a: float, b: float) -> float:
-    return ((a - b + 180.0) % 360.0) - 180.0
 
 
 def _open_gt_view(scene, name: str):
@@ -417,9 +413,43 @@ def _scene_rows(
     cam_e = sample_local.east_m + rec["de_m"] + de
     cam_n = sample_local.north_m + rec["dn_m"] + dn
     az = crop_az_deg(rec["width"], rec["fov_deg"], rec["yaw_deg"] + dyaw)
-    rows = dem_skyline(scene.terrain, rec["cam_z_m"], az, rec["width"], rec["height"], rec["fov_deg"], cam_e, cam_n)
+    patch = _scene_skyline_patch(scene)
+    rows = dem_skyline(
+        scene.terrain,
+        rec["cam_z_m"],
+        az,
+        rec["width"],
+        rec["height"],
+        rec["fov_deg"],
+        cam_e,
+        cam_n,
+        patch=patch,
+    )
     shifted = rows + rec["dv_px"] + dv
-    return {"rows": [round(float(row), 1) if np.isfinite(row) else None for row in shifted]}
+    return {
+        "rows": [round(float(row), 1) if np.isfinite(row) else None for row in shifted],
+        "skyline_resolution_m": SWISS_SKYLINE_RES_M if patch is not None else terrain_resolution_m(scene.terrain),
+        "skyline_patch": "swissalti3d" if patch is not None else None,
+    }
+
+
+def _scene_skyline_patch(scene):
+    """Returns a cached 5 m Swiss terrain patch in the current scene's local frame when available."""
+
+    origin = scene.terrain.spec.origin
+    lat = float(origin.latitude_deg)
+    lon = float(origin.longitude_deg)
+    if not in_switzerland(lat, lon):
+        return None
+    try:
+        return _cached_swiss_patch(round(lat, 6), round(lon, 6))
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=4)
+def _cached_swiss_patch(lat: float, lon: float):
+    return load_swiss_patch(SWISS_DIR, lat, lon, res=SWISS_SKYLINE_RES_M, radius_m=SWISS_SKYLINE_RADIUS_M)
 
 
 @router.get("/gt/samples/{name}/skyline")

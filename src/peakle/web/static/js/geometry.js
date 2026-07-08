@@ -10,6 +10,7 @@ export const TERRAIN_WIDTH = 2.35;
 export const TERRAIN_DEPTH = 1.72;
 export const TERRAIN_HEIGHT = 0.66;
 export const RASTER_EPSILON = 1e-8;
+const DEG = Math.PI / 180;
 
 // The scene box is derived from the terrain's REAL proportions (with mild vertical
 // emphasis), not fixed constants: squashing a square 24 km focus window into a
@@ -66,6 +67,54 @@ export function sceneToLocalEastNorth(point, frame) {
   const east = (point.x / (frame.sceneW ?? TERRAIN_WIDTH) + 0.5) * (frame.xMax - frame.xMin) + frame.xMin;
   const north = (-point.z / (frame.sceneD ?? TERRAIN_DEPTH) + 0.5) * (frame.yMax - frame.yMin) + frame.yMin;
   return { east_m: east, north_m: north };
+}
+
+// Linear geographic <-> local mapping across the focused terrain window. This is accurate enough
+// at the app's map scale and keeps every panel using the same convention.
+export function geoToLocal(terrain, latDeg, lonDeg) {
+  if (
+    !Number.isFinite(latDeg) ||
+    !Number.isFinite(lonDeg) ||
+    terrain.lat_min_deg === undefined ||
+    latDeg < terrain.lat_min_deg ||
+    latDeg > terrain.lat_max_deg ||
+    lonDeg < terrain.lon_min_deg ||
+    lonDeg > terrain.lon_max_deg
+  ) {
+    return null;
+  }
+  const lonT = (lonDeg - terrain.lon_min_deg) / (terrain.lon_max_deg - terrain.lon_min_deg);
+  const latT = (latDeg - terrain.lat_min_deg) / (terrain.lat_max_deg - terrain.lat_min_deg);
+  return {
+    east_m: interpolate(terrain.x_min_m, terrain.x_max_m, lonT),
+    north_m: interpolate(terrain.y_min_m, terrain.y_max_m, latT),
+  };
+}
+
+export function localTerrainToGeo(terrain, local) {
+  return {
+    lon: terrain.lon_min_deg + ((local.east_m - terrain.x_min_m) / (terrain.x_max_m - terrain.x_min_m)) * (terrain.lon_max_deg - terrain.lon_min_deg),
+    lat: terrain.lat_min_deg + ((local.north_m - terrain.y_min_m) / (terrain.y_max_m - terrain.y_min_m)) * (terrain.lat_max_deg - terrain.lat_min_deg),
+  };
+}
+
+export function terrainElevationAt(terrain, eastM, northM) {
+  const col = normalize(eastM, terrain.x_min_m, terrain.x_max_m) * (terrain.grid_width - 1);
+  const row = normalize(northM, terrain.y_min_m, terrain.y_max_m) * (terrain.grid_height - 1);
+  const c0 = Math.max(0, Math.min(terrain.grid_width - 2, Math.floor(col)));
+  const r0 = Math.max(0, Math.min(terrain.grid_height - 2, Math.floor(row)));
+  const tc = Math.max(0, Math.min(1, col - c0));
+  const tr = Math.max(0, Math.min(1, row - r0));
+  const elevation = terrain.elevation_m;
+  const top = interpolate(elevation[r0][c0], elevation[r0][c0 + 1], tc);
+  const bottom = interpolate(elevation[r0 + 1][c0], elevation[r0 + 1][c0 + 1], tc);
+  return interpolate(top, bottom, tr);
+}
+
+export function geoDistanceMeters(lat1Deg, lon1Deg, lat2Deg, lon2Deg) {
+  const metersPerDegLat = 111_320;
+  const metersPerDegLon = metersPerDegLat * Math.cos(((lat1Deg + lat2Deg) / 2) * DEG);
+  return Math.hypot((lon2Deg - lon1Deg) * metersPerDegLon, (lat2Deg - lat1Deg) * metersPerDegLat);
 }
 
 export function cameraTargetScenePoint(extrinsics, frame, lookDistanceM = 3600) {
@@ -131,7 +180,7 @@ export function distanceMeters(a, b) {
 }
 
 export function angleDeltaDeg(a, b) {
-  return Math.abs(((a - b + 180) % 360) - 180);
+  return Math.abs(((((a - b + 180) % 360) + 360) % 360) - 180);
 }
 
 export function wrapDeg(value) {

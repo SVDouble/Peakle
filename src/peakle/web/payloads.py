@@ -37,6 +37,7 @@ def terrain_payload(terrain: TerrainMap) -> dict[str, Any]:
     return {
         "grid_width": terrain.spec.grid_width,
         "grid_height": terrain.spec.grid_height,
+        "resolution_m": terrain_resolution_m(terrain),
         "x_min_m": float(terrain.x_m[0]),
         "x_max_m": float(terrain.x_m[-1]),
         "y_min_m": float(terrain.y_m[0]),
@@ -124,4 +125,13 @@ def _terrain_bounds(terrain: TerrainMap) -> dict[str, float]:
         "y_max_m": float(terrain.y_m[-1]),
         "elevation_min_m": float(terrain.elevation_m.min()),
         "elevation_max_m": float(terrain.elevation_m.max()),
+        "resolution_m": terrain_resolution_m(terrain),
     }
+
+
+def terrain_resolution_m(terrain: TerrainMap) -> float:
+    """Returns the coarser horizontal sample spacing of a terrain grid."""
+
+    dx = (float(terrain.x_m[-1]) - float(terrain.x_m[0])) / max(terrain.x_m.size - 1, 1)
+    dy = (float(terrain.y_m[-1]) - float(terrain.y_m[0])) / max(terrain.y_m.size - 1, 1)
+    return round(max(abs(dx), abs(dy)), 1)

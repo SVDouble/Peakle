@@ -7,6 +7,7 @@ from itertools import product
 import numpy as np
 from scipy.optimize import minimize
 
+from peakle.domain.angles import angle_delta_deg
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.contours import SkylineContour
 from peakle.domain.pose import FitMetrics, PoseEstimate, PosePrior
@@ -150,16 +151,11 @@ def add_synthetic_truth_metrics(
     metrics = estimate.metrics.model_copy(
         update={
             "position_error_m": position_error,
-            "yaw_error_deg": _angle_delta_deg(estimated.yaw_deg, truth.yaw_deg),
+            "yaw_error_deg": angle_delta_deg(estimated.yaw_deg, truth.yaw_deg),
             "pitch_error_deg": abs(estimated.pitch_deg - truth.pitch_deg),
         }
     )
     return PoseEstimate(extrinsics=estimate.extrinsics, metrics=metrics)
-
-
-def _angle_delta_deg(a_deg: float, b_deg: float) -> float:
-    delta = (a_deg - b_deg + 180.0) % 360.0 - 180.0
-    return abs(float(delta))
 
 
 def _offset_values(center: float, sigma: float) -> list[float]:

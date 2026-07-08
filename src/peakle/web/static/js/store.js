@@ -6,6 +6,7 @@
 
 import { api } from "./api.js";
 import { gtCamera, viewCamera } from "./camera.js";
+import { geoDistanceMeters } from "./geometry.js";
 
 class Store {
   constructor() {
@@ -92,31 +93,19 @@ class Store {
   // --- actions ---
 
   async init() {
-    const [scene, terrain, peaks, views] = await Promise.all([
-      api.getScene(),
-      api.getTerrain(),
-      api.getPeaks(),
-      api.listViews(),
-    ]);
-    this.scene = scene;
-    this.terrain = terrain;
-    this.peaks = peaks;
-    this.views = views;
-    this.emit("scene");
-    this.emit("views");
+    await this.refreshSceneState();
+    this.emitSceneAndViews();
     this.emit("selection");
   }
 
   async rebuildScene(config) {
-    this.scene = await api.setConfig(config);
-    [this.terrain, this.peaks, this.views] = await Promise.all([api.getTerrain(), api.getPeaks(), api.listViews()]);
+    await this.refreshSceneState(await api.setConfig(config));
     this.selectedViewId = null;
     this.selectedSolveId = null;
     this.selectedGtName = null;
     this.gtAdjust = { dyaw: 0, de: 0, dn: 0, dv: 0 };
     this.solveCache.clear();
-    this.emit("scene");
-    this.emit("views");
+    this.emitSceneAndViews();
     this.emit("selection");
   }
 
@@ -131,16 +120,10 @@ class Store {
 
   async createPhotoView(file, params) {
     const view = await api.createViewFromPhoto(file, params);
-    [this.scene, this.terrain, this.peaks, this.views] = await Promise.all([
-      api.getScene(),
-      api.getTerrain(),
-      api.getPeaks(),
-      api.listViews(),
-    ]);
+    await this.refreshSceneState();
     this.selectedGtName = null;
     this.solveCache.clear();
-    this.emit("scene");
-    this.emit("views");
+    this.emitSceneAndViews();
     this.emit("gt");
     this.selectView(view.id);
     return view;
@@ -269,9 +252,7 @@ class Store {
     }
     const centerLat = (terrain.lat_min_deg + terrain.lat_max_deg) / 2;
     const centerLon = (terrain.lon_min_deg + terrain.lon_max_deg) / 2;
-    const metersPerDegLon = 111320 * Math.cos((centerLat * Math.PI) / 180);
-    const distance = Math.hypot((sample.lon - centerLon) * metersPerDegLon, (sample.lat - centerLat) * 111320);
-    return distance > toleranceM;
+    return geoDistanceMeters(sample.lat, sample.lon, centerLat, centerLon) > toleranceM;
   }
 
   setGtDisplay(changes) {
@@ -299,8 +280,7 @@ class Store {
   }
 
   async focusScene(latDeg, lonDeg, extentM, options = {}) {
-    this.scene = await api.focusScene(latDeg, lonDeg, extentM);
-    [this.terrain, this.peaks, this.views] = await Promise.all([api.getTerrain(), api.getPeaks(), api.listViews()]);
+    await this.refreshSceneState(await api.focusScene(latDeg, lonDeg, extentM));
     this.selectedViewId = null;
     this.selectedSolveId = null;
     this.selectedGtName = options.selectedGtName ?? null;
@@ -309,8 +289,7 @@ class Store {
     }
     this.gtError = null;
     this.solveCache.clear();
-    this.emit("scene");
-    this.emit("views");
+    this.emitSceneAndViews();
     this.emit("selection");
     this.emit("gt");
   }
@@ -323,19 +302,32 @@ class Store {
   // scene state and then select the new view — from here it is an ordinary View (POV, adjust, solve).
   async openGtView(name) {
     const view = await api.openGtView(name);
-    [this.scene, this.terrain, this.peaks, this.views] = await Promise.all([
-      api.getScene(),
-      api.getTerrain(),
-      api.getPeaks(),
-      api.listViews(),
-    ]);
+    await this.refreshSceneState();
     this.selectedGtName = null;
     this.solveCache.clear();
-    this.emit("scene");
-    this.emit("views");
+    this.emitSceneAndViews();
     this.emit("gt");
     this.selectView(view.id);
     return view;
+  }
+
+  async refreshSceneState(scene = undefined) {
+    if (scene === undefined) {
+      [this.scene, this.terrain, this.peaks, this.views] = await Promise.all([
+        api.getScene(),
+        api.getTerrain(),
+        api.getPeaks(),
+        api.listViews(),
+      ]);
+      return;
+    }
+    this.scene = scene;
+    [this.terrain, this.peaks, this.views] = await Promise.all([api.getTerrain(), api.getPeaks(), api.listViews()]);
+  }
+
+  emitSceneAndViews() {
+    this.emit("scene");
+    this.emit("views");
   }
 
   setDisplay(changes) {
