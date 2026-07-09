@@ -10,6 +10,8 @@ import { geoToLocal } from "./geometry.js";
 const DEG = Math.PI / 180;
 const RAD = 180 / Math.PI;
 
+// Browser-side mirror of peakle.domain.camera/projection for interactive Three.js rendering.
+// Solver, audit, and skyline math should stay in Python and come through API payloads.
 export class CameraModel {
   constructor({ widthPx, heightPx, horizontalFovDeg, projection = "pinhole" }) {
     this.widthPx = widthPx;

@@ -15,12 +15,12 @@ diagnostics so verdict calibration can measure which of them predict correctness
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
+from peakle.domain.projection import vertical_shift_px_from_pitch_deg
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.explanation import arbitrate_by_explanation
 from peakle.localize.extract import extract_candidates
@@ -116,7 +116,7 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path | None = Non
     # GT consistency: chamfer between the GT-depth skyline and OUR DEM rendered at the GT yaw —
     # a per-sample cleanliness score flagging bad GT (mislocated/misoriented pose) or DEM trouble.
     dem_gt = profile.rows_cyl_tan(w_p, h_p, gt.fov_deg, gt.yaw_gt_deg, 0.0)
-    dv_lim = int((w_p / math.radians(gt.fov_deg)) * math.tan(math.radians(PITCH_BOUNDS[1]))) + 1
+    dv_lim = int(vertical_shift_px_from_pitch_deg(w_p, gt.fov_deg, "cyltan", PITCH_BOUNDS[1])) + 1
     gt_cons, _ = _best_shift_chamfer(oracle, dem_gt, np.arange(-dv_lim, dv_lim + 1, 8), 60.0)
     rec["gt_consistency_px"] = round(gt_cons, 1)
 

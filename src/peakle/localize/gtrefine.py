@@ -25,7 +25,13 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from peakle.localize.raycast import _elevation_angle_grid, horizon_elevation
+from peakle.domain.projection import (
+    azimuths_deg,
+    elevation_rad_from_rows,
+    rows_from_elevation_rad,
+    vertical_shift_px_from_pitch_deg,
+)
+from peakle.localize.raycast import _elevation_angle_grid, horizon_elevation, horizon_elevation_and_distance
 from peakle.localize.solve import _best_shift_chamfer
 
 PITCH_LIM_DEG = 50.0
@@ -44,6 +50,7 @@ GATE_DYAW_DEG = 3.0
 # bar than the pfm-targeted GATE_CONTOUR_PX, since contours are the ONLY cross-check available).
 GATE_PHOTO_SUPPORT = 0.5
 GATE_PHOTO_CONTOUR_PX = 18.0
+GATE_PHOTO_PFM_CONS_PX = 25.0
 
 
 @dataclass
@@ -69,8 +76,16 @@ class RefinedGT:
     # preferred — the pfm has registration outliers) or "pfm"
     obs_support: float | None = None  # DexiNed edge support of the chosen observation curve
     sky_support: float | None = None  # fraction of the OBSERVED skyline lying on photo edges (GT-vs-photo)
+    pfm_support: float | None = None  # fraction of the original GT-depth skyline lying on photo edges
     pfm_offset_px: float | None = None  # median |pfm skyline - detected skyline| (registration health)
     pfm_cons_px: float | None = None  # reconstruction vs the pfm render (two-terrain-model metric)
+    sky_error_m: float | None = None  # vertical-equivalent DEM-vs-observed skyline error
+    sky_error_median_m: float | None = None
+    sky_error_p90_m: float | None = None
+    pfm_error_m: float | None = None  # vertical-equivalent DEM-vs-original-PFM skyline error
+    pfm_error_median_m: float | None = None
+    pfm_error_p90_m: float | None = None
+    sky_range_median_m: float | None = None
     quality: str = field(default="CLEAN")
     reasons: list[str] = field(default_factory=list)
 
@@ -79,20 +94,29 @@ class RefinedGT:
 
 
 def crop_az_deg(w: int, fov_deg: float, yaw_deg: float) -> np.ndarray:
-    return yaw_deg + np.degrees((np.arange(w) - (w - 1) / 2.0) * (math.radians(fov_deg) / w))
+    return azimuths_deg(w, fov_deg, yaw_deg, "cyltan")
 
 
 def rows_from_el(el: np.ndarray, w: int, h: int, fov_deg: float) -> np.ndarray:
     """TRUE cylindrical mapping: rows linear in tan(elevation), f = W/hfov both axes."""
 
-    f = w / math.radians(fov_deg)
-    return (h - 1) / 2.0 - f * np.tan(el)
+    return rows_from_elevation_rad(el, w, h, fov_deg, "cyltan")
 
 
 def dem_skyline(terrain, cam_z, az_deg, w, h, fov_deg, de=0.0, dn=0.0, patch=None) -> np.ndarray:
     step = 5.0 if patch is not None else 25.0  # the fine patch deserves a finer ray march
     el = horizon_elevation(terrain, np.radians(az_deg), cam_z, step=step, cam_e=de, cam_n=dn, patch=patch)
     return rows_from_el(el, w, h, fov_deg)
+
+
+def dem_skyline_with_range(terrain, cam_z, az_deg, w, h, fov_deg, de=0.0, dn=0.0, patch=None):
+    """DEM skyline rows and horizontal range to the terrain sample forming the skyline."""
+
+    step = 5.0 if patch is not None else 25.0
+    el, range_m = horizon_elevation_and_distance(
+        terrain, np.radians(az_deg), cam_z, step=step, cam_e=de, cam_n=dn, patch=patch
+    )
+    return rows_from_el(el, w, h, fov_deg), range_m
 
 
 def gt_contour_mask(depth: np.ndarray, w: int, h: int, jump: float = CONTOUR_JUMP) -> np.ndarray:
@@ -124,7 +148,6 @@ def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, t
         terrain, np.radians(az_s), cam_z, step=step, d_max=None, cam_e=de, cam_n=dn, patch=patch
     )
     cummax = np.maximum.accumulate(el, axis=1)
-    f = w / math.radians(fov_deg)
     rows_s = np.arange(0, h, sub)
     cols_c = np.arange(0, w, sub, dtype=float) - (w - 1) / 2.0
     tilt_dv = math.tan(math.radians(tilt_deg)) * cols_c
@@ -133,7 +156,14 @@ def dem_depth_image(terrain, cam_z, az_deg, w, h, fov_deg, dv, de=0.0, dn=0.0, t
     hit_idx = np.full((n_r, n_c), -1, int)
     el_pix_all = np.empty((n_r, n_c))
     for c in range(n_c):
-        el_pix = np.arctan(((h - 1) / 2.0 + dv + tilt_dv[c] - rows_s) / f)
+        el_pix = elevation_rad_from_rows(
+            rows_s.astype(float),
+            w,
+            h,
+            fov_deg,
+            "cyltan",
+            vertical_shift_px=dv + tilt_dv[c],
+        )
         el_pix_all[:, c] = el_pix
         env = cummax[c]
         idx = np.searchsorted(env, el_pix)
@@ -230,8 +260,7 @@ def shift_align(obs: np.ndarray, rows: np.ndarray, dvs: np.ndarray, step: int = 
 def refine_pose(terrain, cam_z, obs, w, h, fov_deg, yaw_label, gt_dt=None):
     """Joint local pose polish; see module docstring.  Returns a dict of the fit."""
 
-    f = w / math.radians(fov_deg)
-    dv_lim = int(f * math.tan(math.radians(PITCH_LIM_DEG))) + 1
+    dv_lim = int(vertical_shift_px_from_pitch_deg(w, fov_deg, "cyltan", PITCH_LIM_DEG)) + 1
     dvs = np.arange(-dv_lim, dv_lim + 1, 8)
 
     def align(dyaw, de, dn, step=6):
@@ -353,6 +382,7 @@ def quality_tier(
     *,
     obs_source: str | None = None,
     sky_support: float | None = None,
+    pfm_cons: float | None = None,
 ) -> tuple[str, list[str]]:
     """CLEAN samples may score solvers/extractors; everything else is quarantined with reasons.
 
@@ -379,4 +409,8 @@ def quality_tier(
                 else f"{contour_cons:.0f}px > {GATE_PHOTO_CONTOUR_PX:.0f}"
             )
             reasons.append(f"photo-targeted pose unconfirmed by contours ({detail})")
+        if pfm_cons is not None and pfm_cons > GATE_PHOTO_PFM_CONS_PX:
+            reasons.append(
+                f"photo-targeted pose disagrees with GT depth skyline ({pfm_cons:.0f}px > {GATE_PHOTO_PFM_CONS_PX:.0f})"
+            )
     return ("CLEAN" if not reasons else "SUSPECT"), reasons

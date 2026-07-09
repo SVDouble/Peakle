@@ -26,11 +26,13 @@ from scipy.ndimage import distance_transform_edt
 
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.extract import extract_candidates
-from peakle.localize.geopose import load_sample, oracle_skyline, read_pfm
+from peakle.localize.geopose import load_sample, read_pfm, resampled_oracle_skyline
+from peakle.localize.gtquality import skyline_vertical_error_stats_m
 from peakle.localize.gtrefine import (
     RefinedGT,
     crop_az_deg,
     dem_contour_mask,
+    dem_skyline_with_range,
     gt_contour_mask,
     quality_tier,
     refine_pose,
@@ -41,6 +43,11 @@ from peakle.localize.paths import COP_TILES_DIR, GEOPOSE_DIR, GTV2_DIR, STD_WIDT
 from peakle.localize.photo_support import edge_mask, family_support
 
 MAX_W = STD_WIDTH
+PHOTO_SWITCH_OFFSET_PX = 10.0
+PHOTO_SWITCH_COVERAGE_MIN = 0.8
+PHOTO_SWITCH_SUPPORT_MIN = 0.6
+PFM_PHOTO_SUPPORT_GOOD = 0.75
+PHOTO_SWITCH_SUPPORT_MARGIN = 0.15
 
 
 def build_one(
@@ -59,14 +66,7 @@ def build_one(
     h = round(h0 * w / w0)
 
     depth = read_pfm(s.depth_path)
-    o = oracle_skyline(s.depth_path)
-    x = np.linspace(0, 1, len(o))
-    fin = np.isfinite(o)
-    obs = np.where(
-        np.interp(np.linspace(0, 1, w), x, fin.astype(float)) > 0.5,
-        np.interp(np.linspace(0, 1, w), x[fin], o[fin]) * (h / depth.shape[0]),
-        np.nan,
-    )
+    obs = resampled_oracle_skyline(s.depth_path, w, h)
 
     # HYBRID observation targeting.  The pfm skyline is the CLEANEST target (a render: complete,
     # noise-free) and our DEM can match it to ~1px — so it stays the DEFAULT.  But it carries
@@ -76,9 +76,10 @@ def build_one(
     # trees/extraction noise floor — measured, reverted.)
     rgb = np.asarray(Image.open(s.photo_path).convert("RGB").resize((w, h), Image.Resampling.BILINEAR), np.uint8)
     edges = edge_mask(rgb)
-    obs_source, obs_support, pfm_offset = "pfm", None, None
+    obs_source, obs_support, pfm_offset, pfm_support = "pfm", None, None, None
     pfm_obs = obs.copy()
     if edges is not None:
+        pfm_support = family_support(rows_to_mask(pfm_obs, h), edges)
         best = None
         for cand in extract_candidates(rgb).values():
             if cand.coverage < 0.5:
@@ -92,7 +93,18 @@ def build_one(
             both = np.isfinite(cand.rows) & np.isfinite(obs)
             if both.sum() > 0.3 * w:
                 pfm_offset = float(np.median(np.abs((cand.rows - obs)[both])))
-            if pfm_offset is not None and pfm_offset > 10.0 and cand.coverage >= 0.8 and sup >= 0.6:
+            pfm_already_supported = (
+                pfm_support is not None
+                and pfm_support >= PFM_PHOTO_SUPPORT_GOOD
+                and sup < pfm_support + PHOTO_SWITCH_SUPPORT_MARGIN
+            )
+            if (
+                pfm_offset is not None
+                and pfm_offset > PHOTO_SWITCH_OFFSET_PX
+                and cand.coverage >= PHOTO_SWITCH_COVERAGE_MIN
+                and sup >= PHOTO_SWITCH_SUPPORT_MIN
+                and not pfm_already_supported
+            ):
                 obs = np.where(np.isfinite(cand.rows), cand.rows, np.nan)
                 obs_source = "photo"
 
@@ -118,17 +130,40 @@ def build_one(
     # across targeting modes (vs-photo cons carries a trees/extraction noise floor the DEM can't
     # reproduce; vs-pfm cons is the two-terrain-model agreement)
     pfm_cons, _ = shift_align(pfm_obs, fit["rows"], fit["dv"] + np.arange(-40.0, 41.0, 2.0), step=2)
+    _, horizon_range_m = dem_skyline_with_range(
+        terrain,
+        fit["cam_z"],
+        crop_az_deg(w, s.fov_deg, yaw0 + fit["dyaw"]),
+        w,
+        h,
+        s.fov_deg,
+        fit["de"],
+        fit["dn"],
+    )
+    sky_m = skyline_vertical_error_stats_m(obs, fit["rows"] + fit["dv"], horizon_range_m, w, h, s.fov_deg)
+    pfm_m = skyline_vertical_error_stats_m(pfm_obs, fit["rows"] + fit["dv"], horizon_range_m, w, h, s.fov_deg)
 
     terrain_cols = np.isfinite(obs).sum()
     density = float(gt_mask.any(axis=0).sum() / max(terrain_cols, 1))
     extra = []
-    if obs_source == "pfm" and pfm_offset is not None and pfm_offset > 15.0:
+    if (
+        obs_source == "pfm"
+        and pfm_offset is not None
+        and pfm_offset > 15.0
+        and (pfm_support is None or pfm_support < PFM_PHOTO_SUPPORT_GOOD)
+    ):
         extra.append(f"pfm registration off {pfm_offset:.0f}px and photo skyline untrusted")
     # GT-vs-photo check: does the observed skyline actually lie on the photo's own edges?
     # Feeds the photo-targeting confirmation gate in quality_tier.
     sky_support = family_support(rows_to_mask(obs, h), edges) if edges is not None else None
     quality, reasons = quality_tier(
-        fit["cons"], fit["ccons"], fit["dyaw"], extra, obs_source=obs_source, sky_support=sky_support
+        fit["cons"],
+        fit["ccons"],
+        fit["dyaw"],
+        extra,
+        obs_source=obs_source,
+        sky_support=sky_support,
+        pfm_cons=pfm_cons,
     )
 
     rec = RefinedGT(
@@ -150,13 +185,22 @@ def build_one(
         obs_source=obs_source,
         obs_support=obs_support,
         sky_support=(round(sky_support, 3) if sky_support is not None else None),
+        pfm_support=(round(pfm_support, 3) if pfm_support is not None else None),
         pfm_offset_px=(round(pfm_offset, 1) if pfm_offset is not None else None),
         pfm_cons_px=round(float(pfm_cons), 2),
+        sky_error_m=sky_m["mean_m"],
+        sky_error_median_m=sky_m["median_m"],
+        sky_error_p90_m=sky_m["p90_m"],
+        pfm_error_m=pfm_m["mean_m"],
+        pfm_error_median_m=pfm_m["median_m"],
+        pfm_error_p90_m=pfm_m["p90_m"],
+        sky_range_median_m=sky_m["range_median_m"],
         quality=quality,
         reasons=reasons,
     )
     np.savez_compressed(
         out_dir / f"{name}.npz",
+        pfm_skyline=pfm_obs.astype(np.float32),
         gt_skyline=obs.astype(np.float32),  # the OBSERVATION the pose was refined against
         dem_skyline=(fit["rows"] + fit["dv"]).astype(np.float32),
         gt_contours=np.packbits(gt_mask),

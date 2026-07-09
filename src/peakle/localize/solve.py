@@ -20,6 +20,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from peakle.domain.projection import (
+    ProjectionName,
+    azimuths_deg,
+    pitch_deg_from_vertical_shift_px,
+    rows_from_elevation_rad,
+    vertical_shift_px_from_pitch_deg,
+)
 from peakle.localize.raycast import horizon_elevation
 
 AZ_STEP_DEG = 0.1  # resolution of the one-time 360° horizon profile
@@ -113,12 +120,9 @@ class HorizonProfile:
         return np.where(np.isnan(e0) | np.isnan(e1), np.nan, out)
 
     def rows_cyl(self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
-        hfov = math.radians(fov_deg)
-        vfov = hfov * height / width
-        cols = np.arange(width)
-        az = yaw_deg + np.degrees((cols - (width - 1) / 2.0) * (hfov / width))
+        az = azimuths_deg(width, fov_deg, yaw_deg, "cyl")
         el = self._el_at(az)
-        return (height - 1) / 2.0 - (el - math.radians(pitch_deg)) * (height / vfov)
+        return rows_from_elevation_rad(el, width, height, fov_deg, "cyl", pitch_deg=pitch_deg)
 
     def rows_cyl_tan(
         self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0
@@ -128,38 +132,33 @@ class HorizonProfile:
         el-linear mapping needs 1.79x the theoretical slope (impossible) while tan fits at 1.017.
         Focal length is the same horizontally and vertically: f = W/hfov px per radian."""
 
-        hfov = math.radians(fov_deg)
-        f = width / hfov
-        cols = np.arange(width)
-        az = yaw_deg + np.degrees((cols - (width - 1) / 2.0) * (hfov / width))
+        az = azimuths_deg(width, fov_deg, yaw_deg, "cyltan")
         el = self._el_at(az)
-        return (height - 1) / 2.0 - f * (np.tan(el) - math.tan(math.radians(pitch_deg)))
+        return rows_from_elevation_rad(el, width, height, fov_deg, "cyltan", pitch_deg=pitch_deg)
 
     def rows_pinhole(
         self, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0
     ) -> np.ndarray:
-        f = width / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
-        cols = np.arange(width)
-        az = yaw_deg + np.degrees(np.arctan((cols - (width - 1) / 2.0) / f))
+        az = azimuths_deg(width, fov_deg, yaw_deg, "pinhole")
         el = self._el_at(az)
-        return (height - 1) / 2.0 - f * np.tan(el - math.radians(pitch_deg))
+        return rows_from_elevation_rad(el, width, height, fov_deg, "pinhole", pitch_deg=pitch_deg)
 
     def rows(
-        self, projection: str, width: int, height: int, fov_deg: float, yaw_deg: float, pitch_deg: float = 0.0
+        self,
+        projection: ProjectionName,
+        width: int,
+        height: int,
+        fov_deg: float,
+        yaw_deg: float,
+        pitch_deg: float = 0.0,
     ) -> np.ndarray:
         fn = {"cyl": self.rows_cyl, "cyltan": self.rows_cyl_tan, "pinhole": self.rows_pinhole}[projection]
         return fn(width, height, fov_deg, yaw_deg, pitch_deg)
 
-    def pitch_from_shift(self, projection: str, width: int, height: int, fov_deg: float, dv: float) -> float:
+    def pitch_from_shift(self, projection: ProjectionName, width: int, height: int, fov_deg: float, dv: float) -> float:
         """Pitch implied by shifting the pitch-0 skyline DOWN by ``dv`` rows."""
 
-        hfov = math.radians(fov_deg)
-        if projection == "cyl":
-            return math.degrees(dv * (hfov * height / width) / height)
-        if projection == "cyltan":
-            return math.degrees(math.atan(dv / (width / hfov)))
-        f = width / (2.0 * math.tan(hfov / 2.0))
-        return math.degrees(math.atan(dv / f))
+        return pitch_deg_from_vertical_shift_px(width, fov_deg, projection, dv)
 
 
 def _basin(yaws: np.ndarray, ch: np.ndarray, best_i: int) -> tuple[float, np.ndarray]:
@@ -309,13 +308,8 @@ def solve_orientation(
 
 
 def _dv_for_pitch(projection: str, width: int, height: int, fov: float, pitch_deg: float) -> int:
-    hfov = math.radians(fov)
-    if projection == "cyl":
-        return int(math.radians(pitch_deg) * height / (hfov * height / width)) + 1
-    if projection == "cyltan":
-        return int((width / hfov) * math.tan(math.radians(pitch_deg))) + 1
-    f = width / (2.0 * math.tan(hfov / 2.0))
-    return int(f * math.tan(math.radians(pitch_deg))) + 1
+    del height
+    return int(abs(vertical_shift_px_from_pitch_deg(width, fov, projection, pitch_deg))) + 1
 
 
 def _best_shift_chamfer(

@@ -8,6 +8,7 @@ in memory for the life of the server process (one scene per server).
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -140,6 +141,7 @@ class Scene:
         self._peak_detection = peak_detection
         self.renderer = SyntheticRenderer()
         self.detector: ContourDetector = DEFAULT_DETECTOR
+        self._mutation_lock = threading.RLock()
         self.views: dict[str, View] = {}
         self._view_counter = 0
         self._solve_counter = 0
@@ -191,20 +193,21 @@ class Scene:
     ) -> None:
         """Rebuilds the map and intrinsics, clearing all views."""
 
-        self.config = SceneConfig(
-            provider=provider,
-            seed=seed,
-            image_width=image_width,
-            image_height=image_height,
-            horizontal_fov_deg=horizontal_fov_deg,
-            default_strategy=default_strategy,
-        )
-        self.terrain = _build_terrain(self.config, self._terrain_spec)
-        self.peaks = self._detect_peaks(self.terrain)
-        self.intrinsics = build_intrinsics(image_width, image_height, horizontal_fov_deg)
-        self.views = {}
-        self._view_counter = 0
-        self._solve_counter = 0
+        with self._mutation_lock:
+            self.config = SceneConfig(
+                provider=provider,
+                seed=seed,
+                image_width=image_width,
+                image_height=image_height,
+                horizontal_fov_deg=horizontal_fov_deg,
+                default_strategy=default_strategy,
+            )
+            self.terrain = _build_terrain(self.config, self._terrain_spec)
+            self.peaks = self._detect_peaks(self.terrain)
+            self.intrinsics = build_intrinsics(image_width, image_height, horizontal_fov_deg)
+            self.views = {}
+            self._view_counter = 0
+            self._solve_counter = 0
 
     def focus_geo(self, lat_deg: float, lon_deg: float, extent_m: float = 40000.0) -> None:
         """Recenters the map on a geographic point (Copernicus mosaic), clearing views.
@@ -215,10 +218,11 @@ class Scene:
 
         from peakle.terrain.copernicus import load_copernicus_terrain
 
-        self.terrain = load_copernicus_terrain(lat_deg, lon_deg, extent_m=extent_m)
-        self._geo_focused = True
-        self.peaks = self._detect_peaks(self.terrain)
-        self.views = {}
+        with self._mutation_lock:
+            self.terrain = load_copernicus_terrain(lat_deg, lon_deg, extent_m=extent_m)
+            self._geo_focused = True
+            self.peaks = self._detect_peaks(self.terrain)
+            self.views = {}
 
     def create_view(
         self,
@@ -231,13 +235,14 @@ class Scene:
     ) -> View:
         """Places a camera, renders its image, and detects its contour."""
 
-        self._view_counter += 1
-        view_id = f"view-{self._view_counter:02d}"
-        view = self._build_view(
-            view_id, label or f"View {self._view_counter}", east_m, north_m, yaw_deg, pitch_deg, eye_height_m
-        )
-        self.views[view_id] = view
-        return view
+        with self._mutation_lock:
+            self._view_counter += 1
+            view_id = f"view-{self._view_counter:02d}"
+            view = self._build_view(
+                view_id, label or f"View {self._view_counter}", east_m, north_m, yaw_deg, pitch_deg, eye_height_m
+            )
+            self.views[view_id] = view
+            return view
 
     def update_view(
         self,
@@ -251,40 +256,41 @@ class Scene:
     ) -> View:
         """Edits a view's pose/label; re-renders and clears stale solves."""
 
-        current = self.views[view_id]
-        truth = current.true_extrinsics
-        if truth is None:
-            msg = f"view {view_id!r} has no placement to edit"
-            raise ValueError(msg)
-        eye = current.eye_height_m if eye_height_m is None else eye_height_m
-        e_m = truth.position.east_m if east_m is None else east_m
-        n_m = truth.position.north_m if north_m is None else north_m
-        up_m = self.terrain.elevation_at(e_m, n_m) + eye
-        extrinsics = CameraExtrinsics(
-            position=LocalPoint(east_m=e_m, north_m=n_m, up_m=up_m),
-            yaw_deg=truth.yaw_deg if yaw_deg is None else yaw_deg,
-            pitch_deg=truth.pitch_deg if pitch_deg is None else pitch_deg,
-            roll_deg=0.0,
-        )
-        # Rebuild with the VIEW's own intrinsics/source/photo (a GT view keeps its sample intrinsics
-        # and photograph when its pose is edited); the contour is re-detected from the new render
-        # for placed views, but a GT view keeps its photo-derived observed contour.
-        rebuilt = self._construct_view(
-            view_id,
-            label if label is not None else current.label,
-            current.intrinsics,
-            extrinsics,
-            eye,
-            image_camera=current.image_camera,
-            contour=current.contour if current.source == "gt" else None,
-            source=current.source,
-            gt_name=current.gt_name,
-            reference_photo=current.reference_photo,
-        )
-        if rebuilt.true_extrinsics == truth:
-            rebuilt = rebuilt.model_copy(update={"solves": current.solves, "prior": current.prior})
-        self.views[view_id] = rebuilt
-        return rebuilt
+        with self._mutation_lock:
+            current = self.views[view_id]
+            truth = current.true_extrinsics
+            if truth is None:
+                msg = f"view {view_id!r} has no placement to edit"
+                raise ValueError(msg)
+            eye = current.eye_height_m if eye_height_m is None else eye_height_m
+            e_m = truth.position.east_m if east_m is None else east_m
+            n_m = truth.position.north_m if north_m is None else north_m
+            up_m = self.terrain.elevation_at(e_m, n_m) + eye
+            extrinsics = CameraExtrinsics(
+                position=LocalPoint(east_m=e_m, north_m=n_m, up_m=up_m),
+                yaw_deg=truth.yaw_deg if yaw_deg is None else yaw_deg,
+                pitch_deg=truth.pitch_deg if pitch_deg is None else pitch_deg,
+                roll_deg=0.0,
+            )
+            # Rebuild with the VIEW's own intrinsics/source/photo (a GT view keeps its sample intrinsics
+            # and photograph when its pose is edited); the contour is re-detected from the new render
+            # for placed views, but a GT view keeps its photo-derived observed contour.
+            rebuilt = self._construct_view(
+                view_id,
+                label if label is not None else current.label,
+                current.intrinsics,
+                extrinsics,
+                eye,
+                image_camera=current.image_camera,
+                contour=current.contour if current.source == "gt" else None,
+                source=current.source,
+                gt_name=current.gt_name,
+                reference_photo=current.reference_photo,
+            )
+            if rebuilt.true_extrinsics == truth:
+                rebuilt = rebuilt.model_copy(update={"solves": current.solves, "prior": current.prior})
+            self.views[view_id] = rebuilt
+            return rebuilt
 
     def duplicate_view(self, view_id: str, label: str | None = None) -> View:
         """Copy a view (any kind) under a new id + label, without its solves.
@@ -294,54 +300,80 @@ class Scene:
         while the original stays put.
         """
 
-        src = self.views[view_id]
-        self._view_counter += 1
-        new_id = f"view-{self._view_counter:02d}"
-        dup = src.model_copy(update={"id": new_id, "label": label or f"{src.label} copy", "solves": {}})
-        self.views[new_id] = dup
-        return dup
+        with self._mutation_lock:
+            src = self.views[view_id]
+            self._view_counter += 1
+            new_id = f"view-{self._view_counter:02d}"
+            dup = src.model_copy(update={"id": new_id, "label": label or f"{src.label} copy", "solves": {}})
+            self.views[new_id] = dup
+            return dup
 
     def delete_view(self, view_id: str) -> None:
         """Removes a view."""
 
-        self.views.pop(view_id, None)
+        with self._mutation_lock:
+            self.views.pop(view_id, None)
+
+    def attach_solves(self, view_id: str, solves: list[Solve]) -> View:
+        """Attach persisted solves to a view, keeping existing solves."""
+
+        with self._mutation_lock:
+            view = self.views[view_id]
+            for solve in solves:
+                view.solves.setdefault(solve.id, solve)
+                self._solve_counter = max(self._solve_counter, _solve_index(solve.id))
+            return view
 
     def run_solve(self, view_id: str, strategy: str, params: dict[str, Any] | None = None) -> Solve:
         """Runs a solver against a view and stores the result."""
 
-        view = self.views[view_id]
-        if view.prior is None:
-            msg = f"view {view_id!r} has no prior to solve from"
-            raise ValueError(msg)
         params = dict(params or {})
         seed = params.get("seed")
         use_position_prior = bool(params.get("position_prior", True))
         use_orientation_prior = bool(params.get("orientation_prior", True))
-        self._solve_counter += 1
+        with self._mutation_lock:
+            view = self.views[view_id]
+            if view.prior is None:
+                msg = f"view {view_id!r} has no prior to solve from"
+                raise ValueError(msg)
+            terrain = self.terrain
+            terrain_stride = self.terrain_stride
+            contour = view.contour
+            intrinsics = view.intrinsics
+            prior = view.prior
+            truth = view.true_extrinsics
+            projection = view.image_camera.projection
+            horizontal_fov_deg = view.image_camera.horizontal_fov_deg
+
         result = solve_pose(
-            terrain=self.terrain,
-            contour=view.contour,
-            intrinsics=view.intrinsics,
-            prior=view.prior,
+            terrain=terrain,
+            contour=contour,
+            intrinsics=intrinsics,
+            prior=prior,
             strategy=strategy,
-            terrain_stride=self.terrain_stride,
-            truth=view.true_extrinsics,
+            terrain_stride=terrain_stride,
+            truth=truth,
             seed=seed,
             use_position_prior=use_position_prior,
             use_orientation_prior=use_orientation_prior,
-            projection=view.image_camera.projection,
-            horizontal_fov_deg=view.image_camera.horizontal_fov_deg,
+            projection=projection,
+            horizontal_fov_deg=horizontal_fov_deg,
         )
-        solve = Solve(
-            id=f"solve-{self._solve_counter:02d}",
-            created_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            strategy=strategy,
-            params=params,
-            prior=view.prior,
-            result=result,
-        )
-        view.solves[solve.id] = solve
-        return solve
+        with self._mutation_lock:
+            if self.views.get(view_id) is not view:
+                msg = f"view {view_id!r} changed before the solve finished"
+                raise ValueError(msg)
+            self._solve_counter += 1
+            solve = Solve(
+                id=f"solve-{self._solve_counter:02d}",
+                created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+                strategy=strategy,
+                params=params,
+                prior=prior,
+                result=result,
+            )
+            view.solves[solve.id] = solve
+            return solve
 
     def add_backed_view(
         self,
@@ -364,35 +396,36 @@ class Scene:
         View — it lists, POVs, adjusts and solves like any placed view.
         """
 
-        self._view_counter += 1
-        view_id = f"view-{self._view_counter:02d}"
-        eye_height_m = extrinsics.position.up_m - self.terrain.elevation_at(
-            extrinsics.position.east_m, extrinsics.position.north_m
-        )
-        prior = PosePrior(
-            position=extrinsics.position,
-            yaw_deg=extrinsics.yaw_deg,
-            pitch_deg=extrinsics.pitch_deg,
-            horizontal_sigma_m=1.0,
-            vertical_sigma_m=1.0,
-            yaw_sigma_deg=120.0 if source == "photo" else 1.0,
-            pitch_sigma_deg=20.0 if source == "photo" else 1.0,
-        )
-        view = self._construct_view(
-            view_id,
-            label or gt_name or f"Photo {self._view_counter}",
-            intrinsics,
-            extrinsics,
-            eye_height_m,
-            image_camera=image_camera,
-            contour=contour,
-            source=source,
-            gt_name=gt_name,
-            reference_photo=reference_photo,
-            prior=prior,
-        )
-        self.views[view_id] = view
-        return view
+        with self._mutation_lock:
+            self._view_counter += 1
+            view_id = f"view-{self._view_counter:02d}"
+            eye_height_m = extrinsics.position.up_m - self.terrain.elevation_at(
+                extrinsics.position.east_m, extrinsics.position.north_m
+            )
+            prior = PosePrior(
+                position=extrinsics.position,
+                yaw_deg=extrinsics.yaw_deg,
+                pitch_deg=extrinsics.pitch_deg,
+                horizontal_sigma_m=1.0,
+                vertical_sigma_m=1.0,
+                yaw_sigma_deg=120.0 if source == "photo" else 1.0,
+                pitch_sigma_deg=20.0 if source == "photo" else 1.0,
+            )
+            view = self._construct_view(
+                view_id,
+                label or gt_name or f"Photo {self._view_counter}",
+                intrinsics,
+                extrinsics,
+                eye_height_m,
+                image_camera=image_camera,
+                contour=contour,
+                source=source,
+                gt_name=gt_name,
+                reference_photo=reference_photo,
+                prior=prior,
+            )
+            self.views[view_id] = view
+            return view
 
     def add_gt_view(
         self,
@@ -498,3 +531,10 @@ class Scene:
 def _build_terrain(config: SceneConfig, base_spec: TerrainSpec) -> TerrainMap:
     spec = base_spec.model_copy(update={"seed": config.seed})
     return build_provider(config.provider, spec).generate()
+
+
+def _solve_index(solve_id: str) -> int:
+    try:
+        return int(solve_id.rsplit("-", 1)[-1])
+    except ValueError:
+        return 0

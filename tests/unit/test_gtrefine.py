@@ -173,7 +173,7 @@ def test_dem_depth_image_has_no_ray_march_terraces():
 
 def test_quality_tier_photo_targeting_requires_confirmation():
     # a well-confirmed sample is CLEAN regardless of targeting
-    q, _ = quality_tier(6.0, 8.0, 1.0, obs_source="photo", sky_support=0.95)
+    q, _ = quality_tier(6.0, 8.0, 1.0, obs_source="photo", sky_support=0.95, pfm_cons=4.0)
     assert q == "CLEAN"
     # photo-targeted with poor contour agreement (a foreground edge masquerading as the skyline)
     q, reasons = quality_tier(10.0, 25.0, 1.5, obs_source="photo", sky_support=0.94)
@@ -181,6 +181,9 @@ def test_quality_tier_photo_targeting_requires_confirmation():
     # photo-targeted skyline that doesn't lie on photo edges at all
     q, reasons = quality_tier(6.0, 8.0, 1.0, obs_source="photo", sky_support=0.2)
     assert q == "SUSPECT" and any("image edges" in r for r in reasons)
+    # photo-targeted pose that fits the photo edge but contradicts the original GT depth render
+    q, reasons = quality_tier(6.0, 8.0, 1.0, obs_source="photo", sky_support=0.95, pfm_cons=60.0)
+    assert q == "SUSPECT" and any("GT depth skyline" in r for r in reasons)
     # the SAME weak-contour numbers on a pfm-targeted sample stay CLEAN (pfm is its cross-check)
     q, _ = quality_tier(10.0, 20.0, 1.5, obs_source="pfm", sky_support=None)
     assert q == "CLEAN"

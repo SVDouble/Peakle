@@ -7,7 +7,8 @@ per-sample metadata, and per-layer transparent PNGs generated lazily and cached 
   photo            the cylindrical crop
   gt_depth         GT depth render, colormapped (from distance_crop.pfm)
   dem_depth        our DEM depth render at the refined pose, same colormap
-  gt_sky/dem_sky   skyline curves
+  pfm_sky          original GT depth/PFM skyline, before any photo-target substitution
+  gt_sky/dem_sky   chosen GT-v2 observation skyline and DEM reconstruction
   gt_occ/dem_occ   type-1 occlusion (jump) contours
   gt_rib/dem_rib   type-2a convex creases (spurs / counterforts)
   gt_cou/dem_cou   type-2b concave creases (couloirs)
@@ -28,7 +29,7 @@ from typing import Any
 
 import numpy as np
 from anyio import to_thread
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from PIL import Image
 
 from peakle.domain.angles import angle_delta_deg
@@ -36,7 +37,8 @@ from peakle.domain.camera import CameraExtrinsics, CameraModel
 from peakle.domain.contours import ImagePoint, SkylineContour
 from peakle.domain.coordinates import GeoPoint, LocalFrame, LocalPoint
 from peakle.localize.copdem import load_cop_around
-from peakle.localize.geopose import load_sample, read_pfm
+from peakle.localize.geopose import load_sample, read_pfm, resampled_oracle_skyline
+from peakle.localize.gtquality import alignment_audit, metric_skyline_errors_for_record
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image, dem_skyline, quality_tier, shift_align
 from peakle.localize.photo_support import edge_mask, support_report
 from peakle.localize.swissdem import in_switzerland, load_swiss_patch
@@ -57,12 +59,13 @@ SWISS_SKYLINE_RES_M = 5.0
 SWISS_SKYLINE_RADIUS_M = 12_000.0
 
 # GT = warm/green family; DEM = cool family — two parallel curves in sibling colors = the error
+PFM_SKY_COLOR = (255, 216, 74)
 _COLORS = {
     "gt": {"sky": (0, 230, 90), "occ": (255, 150, 30), "rib": (255, 235, 59), "cou": (232, 110, 220)},
     "dem": {"sky": (0, 200, 255), "occ": (255, 70, 70), "rib": (80, 170, 255), "cou": (170, 90, 255)},
 }
 _BUILD_LOCK = threading.Lock()
-LAYER_NAMES = ["photo", "gt_depth", "dem_depth", "edges"] + [
+LAYER_NAMES = ["photo", "gt_depth", "dem_depth", "edges", "pfm_sky"] + [
     f"{s}_{f}" for s in ("gt", "dem") for f in ("sky", "occ", "rib", "cou")
 ]
 
@@ -108,6 +111,13 @@ async def list_samples() -> list[dict[str, Any]]:
                     "reasons",
                     "sky_cons_px",
                     "pfm_cons_px",
+                    "sky_error_m",
+                    "sky_error_median_m",
+                    "sky_error_p90_m",
+                    "pfm_error_m",
+                    "pfm_error_median_m",
+                    "pfm_error_p90_m",
+                    "sky_range_median_m",
                     "obs_source",
                     "contour_cons_px",
                     "dyaw_deg",
@@ -135,6 +145,28 @@ async def list_samples() -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+@router.get("/gt/alignment-audit")
+async def gt_alignment_audit(
+    limit: int = Query(default=100, ge=1, le=5000),
+    include_clean: bool = Query(default=False),
+    metric: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Rank all GT catalogue views by map/photo outline alignment problems."""
+
+    index = _index()
+    report = alignment_audit(list(index.values()), limit=limit, include_clean=include_clean)
+    if metric:
+        for row in report["rows"]:
+            rec = index.get(row["name"])
+            if rec is None:
+                continue
+            try:
+                row["metrics"].update(await to_thread.run_sync(metric_skyline_errors_for_record, rec))
+            except Exception as exc:  # noqa: BLE001 - metric enrichment is diagnostic, not fatal
+                row["metrics"]["metric_error"] = str(exc)[:200]
+    return report
 
 
 def _latlon(name: str) -> tuple[float, float]:
@@ -269,6 +301,9 @@ async def open_gt_view(name: str, request: Request) -> dict[str, Any]:
     scene = request.app.state.scene
     async with request.app.state.scene_lock:
         view = await to_thread.run_sync(_open_gt_view, scene, name)
+        persisted = await to_thread.run_sync(request.app.state.solution_store.load, view)
+        if persisted:
+            view = scene.attach_solves(view.id, persisted)
     return view_payload(view)
 
 
@@ -320,11 +355,13 @@ def _build_layers(name: str) -> None:
         raise HTTPException(404, f"unknown sample {name}")
     out = LAYERS / name
     with _BUILD_LOCK:  # the viewer fires several layer requests at once — build once, serially
-        # sentinel: last layer always written (support.json may be skipped on OOM); a record
-        # rewritten by a rebuild after the layers were built invalidates the cache
-        sentinel = out / "dem_cou.png"
+        # All PNG layers must exist; a record rewritten by a rebuild invalidates the cache.
         rec_file = GTV2 / f"{name}.json"
-        if sentinel.exists() and (not rec_file.exists() or sentinel.stat().st_mtime >= rec_file.stat().st_mtime):
+        layer_files = [out / f"{layer}.png" for layer in LAYER_NAMES]
+        if all(
+            path.exists() and (not rec_file.exists() or path.stat().st_mtime >= rec_file.stat().st_mtime)
+            for path in layer_files
+        ):
             return
         _build_layers_locked(name, rec, out)
 
@@ -338,12 +375,16 @@ def _build_layers_locked(name: str, rec: dict, out) -> None:
     rgb.save(out / "photo.png", "PNG", optimize=True)
 
     z = np.load(GTV2 / f"{name}.npz")
+    pfm_sky = (
+        z["pfm_skyline"].astype(float) if "pfm_skyline" in z.files else resampled_oracle_skyline(s.depth_path, w, h)
+    )
     gt_sky = z["gt_skyline"].astype(float)
     dem_sky = z["dem_skyline"].astype(float)
 
     gt_depth = read_pfm(s.depth_path)
     gt_typed = extract_typed_outlines(gt_depth)
     (out / "gt_depth.png").write_bytes(_depth_png(gt_depth, w, h))
+    (out / "pfm_sky.png").write_bytes(_mask_png(_rows_mask(pfm_sky, w, h), PFM_SKY_COLOR, w, h))
     (out / "gt_sky.png").write_bytes(_mask_png(_rows_mask(gt_sky, w, h), _COLORS["gt"]["sky"], w, h))
     for fam, mask in (("occ", gt_typed.occlusion), ("rib", gt_typed.rib), ("cou", gt_typed.couloir)):
         (out / f"gt_{fam}.png").write_bytes(_mask_png(mask, _COLORS["gt"][fam], w, h))
@@ -381,6 +422,7 @@ def _build_layers_locked(name: str, rec: dict, out) -> None:
             return np.asarray(m) > 0
 
         masks = {
+            "pfm_sky": _rows_mask(pfm_sky, w, h),
             "gt_sky": _rows_mask(gt_sky, w, h),
             "gt_occ": full(gt_typed.occlusion),
             "gt_rib": full(gt_typed.rib),
@@ -537,7 +579,15 @@ async def save_adjust(name: str, body: dict[str, float]) -> dict[str, Any]:
             sky_cons_px=round(float(cons), 2),
             manual_adjust=True,
         )
-        quality, reasons = quality_tier(rec["sky_cons_px"], rec.get("contour_cons_px"), rec["dyaw_deg"], [])
+        quality, reasons = quality_tier(
+            rec["sky_cons_px"],
+            rec.get("contour_cons_px"),
+            rec["dyaw_deg"],
+            [],
+            obs_source=rec.get("obs_source"),
+            sky_support=rec.get("sky_support"),
+            pfm_cons=rec.get("pfm_cons_px"),
+        )
         rec.update(quality=quality, reasons=reasons)
         z["dem_skyline"] = (rows + dv_total).astype(np.float32)
         np.savez_compressed(npz_path, **z)
@@ -550,56 +600,6 @@ async def save_adjust(name: str, body: dict[str, float]) -> dict[str, Any]:
         return rec
 
     return await to_thread.run_sync(apply)
-
-
-# --- on-demand rebuild of a set of samples (peakle.localize.gtbuild.build_one in a worker) ---
-_REBUILD: dict[str, Any] = {"running": False, "queue": [], "done": [], "failed": [], "current": None}
-_REBUILD_LOCK = threading.Lock()
-_REBUILD_CAP = 50
-
-
-def _rebuild_worker(names: list[str]) -> None:
-    from peakle.localize.gtbuild import build_one
-
-    try:
-        for name in names:
-            _REBUILD["current"] = name
-            try:
-                build_one(name)
-                _REBUILD["done"].append(name)
-            except Exception as exc:  # noqa: BLE001 - one bad sample must not kill the batch
-                _REBUILD["failed"].append({"name": name, "error": str(exc)[:200]})
-    finally:
-        _REBUILD["current"] = None
-        _REBUILD["running"] = False
-
-
-@router.post("/gt/rebuild")
-async def start_rebuild(body: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild a set of GT records (pose polish + metrics + tier) in the background.
-
-    A manual-adjust sidecar, if present, seeds each sample's polish. Records are
-    rewritten one by one, so the live sample list shows fresh metrics as they land
-    and the layer PNG caches invalidate via record mtime."""
-
-    names = list(dict.fromkeys(body.get("names") or []))[:_REBUILD_CAP]
-    if not names:
-        raise HTTPException(400, "names is empty")
-    idx = _index()
-    unknown = [n for n in names if n not in idx]
-    if unknown:
-        raise HTTPException(404, f"unknown samples: {unknown[:5]}")
-    with _REBUILD_LOCK:
-        if _REBUILD["running"]:
-            raise HTTPException(409, "a rebuild is already running")
-        _REBUILD.update(running=True, queue=names, done=[], failed=[], current=None)
-    threading.Thread(target=_rebuild_worker, args=(names,), daemon=True).start()
-    return _REBUILD
-
-
-@router.get("/gt/rebuild")
-async def rebuild_status() -> dict[str, Any]:
-    return _REBUILD
 
 
 @router.get("/gt/samples/{name}/layers/{layer}.png")

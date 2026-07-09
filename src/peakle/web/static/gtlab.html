@@ -52,7 +52,7 @@ kbd { background:var(--line); border-radius:3px; padding:0 5px; font-size:11px; 
 <aside>
   <header>
     <h1>GT Lab — dataset debugger</h1>
-    <div class="sub">GT (warm colors) vs our DEM reconstruction (cool colors). <kbd>j</kbd>/<kbd>k</kbd> next/prev. Sorted worst-first.</div>
+    <div class="sub">GT observation/PFM (warm colors) vs our DEM reconstruction (cool colors). <kbd>j</kbd>/<kbd>k</kbd> next/prev. Sorted worst-first.</div>
   </header>
   <input id="search" placeholder="filter samples…">
   <ul id="samples"></ul>
@@ -79,13 +79,20 @@ const COLORS = {
   gt:  { sky:"#00e65a", occ:"#ff961e", rib:"#ffeb3b", cou:"#e86edc" },
   dem: { sky:"#00c8ff", occ:"#ff4646", rib:"#50aaff", cou:"#aa5aff" },
 };
+const PFM_COLOR = "#ffd84a";
 COLORS.gt.occ = "#ff961e";
-const DEFAULTS = new Set(["gt_sky", "gt_occ", "dem_sky", "dem_occ"]);
+const DEFAULTS = new Set(["gt_sky", "pfm_sky", "gt_occ", "dem_sky", "dem_occ"]);
 let samples = [], current = null;
 const stage = document.getElementById("stage"), photo = document.getElementById("photo");
 const layerImgs = {};
 
 function buildToggles() {
+  const gtHost = document.getElementById("g-gt");
+  const pfmLab = document.createElement("label");
+  pfmLab.className = "toggle";
+  pfmLab.innerHTML = `<input type="checkbox" data-layer="pfm_sky" checked>` +
+    `<span class="swatch" style="background:${PFM_COLOR}"></span>PFM/depth skyline`;
+  gtHost.appendChild(pfmLab);
   for (const src of ["gt", "dem"]) {
     const host = document.getElementById(`g-${src}`);
     for (const [fam, label] of FAMS) {
@@ -128,6 +135,7 @@ async function select(name) {
     const sup = meta.photo_support;
     const line = (src) => FAMS.map(([f]) => `${f} <b>${sup[`${src}_${f}`] ?? "–"}</b>`).join(" · ");
     document.getElementById("meta").insertAdjacentHTML("beforeend",
+      `<br>photo support — PFM sky <b>${sup.pfm_sky ?? "–"}</b>` +
       `<br>photo support — GT: ${line("gt")}<br>photo support — DEM: ${line("dem")}`);
   }).catch(() => {});
   document.querySelectorAll("#samples li").forEach((li) => li.classList.toggle("sel", li.dataset.name === name));

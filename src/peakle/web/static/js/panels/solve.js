@@ -6,6 +6,7 @@
 import { angleDeltaDeg, distanceMeters } from "../geometry.js";
 import { el, formatDistance, formatNumber, svgElement } from "../format.js";
 import { poseTargetKey, selectedPoseTarget, strategyLabel } from "../pose-candidates.js";
+import { api } from "../api.js";
 
 export function setupSolvePanel(store, root) {
   root.classList.add("solve-panel");
@@ -13,6 +14,12 @@ export function setupSolvePanel(store, root) {
   const runStatus = el("p", { class: "control-hint" });
   const strategySelect = el("select", { class: "solver-select" });
   const runButton = el("button", { type: "button", class: "primary", text: "Run solver" });
+  const runAllButton = el("button", {
+    type: "button",
+    class: "secondary",
+    text: "Run loaded views",
+    title: "Queue this solver for every loaded view",
+  });
   const positionPriorInput = el("input", { type: "checkbox", checked: true });
   const orientationPriorInput = el("input", { type: "checkbox", checked: true });
   const positionPriorSwitch = el("label", { class: "toggle solve-option-toggle" }, [
@@ -43,7 +50,7 @@ export function setupSolvePanel(store, root) {
     el("div", { class: "control-block" }, [
       el("span", { class: "control-eyebrow", text: "Run solver" }),
       target,
-      el("div", { class: "solve-actions" }, [strategySelect, runButton]),
+      el("div", { class: "solve-actions" }, [strategySelect, runButton, runAllButton]),
       el("div", { class: "solve-option" }, [positionPriorSwitch, orientationPriorSwitch]),
       runStatus,
     ]),
@@ -68,6 +75,8 @@ export function setupSolvePanel(store, root) {
   let positionPriorChoice = true;
   let orientationPriorChoice = true;
   let running = false;
+  let batchRunning = false;
+  let batchJobTimer = 0;
   let lastTargetKey = "";
 
   positionPriorInput.addEventListener("change", () => {
@@ -81,6 +90,7 @@ export function setupSolvePanel(store, root) {
     renderSolverControls();
   });
   runButton.addEventListener("click", runSelectedSolver);
+  runAllButton.addEventListener("click", runBatchSolver);
 
   function metric(label) {
     const value = el("dd", { text: "-" });
@@ -115,8 +125,11 @@ export function setupSolvePanel(store, root) {
     lastTargetKey = key;
     syncStrategySelect(targetInfo);
     syncPriorInputs(targetInfo);
-    strategySelect.disabled = running || !targetInfo || !strategySelect.options.length;
-    runButton.disabled = running || !targetInfo || !strategySelect.options.length;
+    const loadedViews = eligibleSolveViews();
+    strategySelect.disabled = running || batchRunning || !strategySelect.options.length;
+    runButton.disabled = running || batchRunning || !targetInfo || !strategySelect.options.length;
+    runAllButton.disabled = running || batchRunning || !loadedViews.length || !strategySelect.options.length;
+    runAllButton.textContent = loadedViews.length ? `Run ${loadedViews.length} loaded` : "Run loaded views";
     if (!targetInfo) {
       target.textContent = "Select a view first.";
     } else if (targetInfo.kind === "gt") {
@@ -135,6 +148,10 @@ export function setupSolvePanel(store, root) {
     orientationPriorInput.disabled = running || !targetInfo || priorFree || horizon;
     positionPriorInput.checked = priorFree ? false : horizon ? true : positionPriorChoice;
     orientationPriorInput.checked = priorFree || horizon ? false : orientationPriorChoice;
+  }
+
+  function eligibleSolveViews() {
+    return store.views.filter((view) => view.prior && view.true_extrinsics).map((view) => view.id);
   }
 
   async function runSelectedSolver() {
@@ -160,6 +177,52 @@ export function setupSolvePanel(store, root) {
       runStatus.textContent = error.message;
     } finally {
       running = false;
+      renderSolverControls();
+    }
+  }
+
+  async function runBatchSolver() {
+    const viewIds = eligibleSolveViews();
+    if (!viewIds.length || !strategySelect.value) {
+      return;
+    }
+    batchRunning = true;
+    renderSolverControls();
+    try {
+      const job = await store.runSolveJob(viewIds, strategySelect.value, {
+        position_prior: positionPriorInput.checked,
+        orientation_prior: orientationPriorInput.checked,
+      });
+      runStatus.textContent = `Queued ${viewIds.length} solve task${viewIds.length === 1 ? "" : "s"}.`;
+      clearTimeout(batchJobTimer);
+      pollSolveJob(job.id);
+    } catch (error) {
+      batchRunning = false;
+      runStatus.textContent = error.message;
+      renderSolverControls();
+    }
+  }
+
+  async function pollSolveJob(jobId) {
+    try {
+      const job = await api.getJob(jobId);
+      const finished = (job.done ?? 0) + (job.failed ?? 0);
+      const runningLabels = (job.running_tasks ?? []).map((task) => task.label).join(", ");
+      if (job.status === "queued" || job.status === "running") {
+        runStatus.textContent = `Solving ${finished}/${job.total} — ${runningLabels || job.status}`;
+        batchJobTimer = setTimeout(() => pollSolveJob(jobId), 1500);
+        return;
+      }
+      batchRunning = false;
+      await store.refreshSceneState();
+      store.emitSceneAndViews();
+      store.emit("selection");
+      runStatus.textContent =
+        job.failed > 0 ? `Batch solve finished with ${job.failed} failed task${job.failed === 1 ? "" : "s"}.` : "Batch solve finished.";
+      renderSolverControls();
+    } catch (error) {
+      batchRunning = false;
+      runStatus.textContent = error.message;
       renderSolverControls();
     }
   }

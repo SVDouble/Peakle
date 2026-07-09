@@ -53,6 +53,25 @@ with real coordinates while avoiding geodesy complexity in the MVP.
 When real DEMs are introduced, this module boundary is where `pyproj`, raster
 metadata, and true coordinate reference systems can enter.
 
+## Geometry Ownership
+
+Camera semantics are domain objects first, not panel-local utilities. Python's
+`peakle.domain.camera` and `peakle.domain.projection` are the source of truth for
+intrinsics, crop projection, per-column azimuths, elevation-to-row conversion,
+and pitch/vertical-shift conversion. Solver, GT audit, GT refinement, and
+seeding code should call those helpers instead of reimplementing formulas.
+
+The browser keeps a small mirror of camera and scene math because Three.js needs
+it for interactive rendering, hit tests, FOV overlays, and POV navigation. That
+browser code should stay presentation-oriented: scoring, skyline generation,
+pose comparison, GT auditing, queue execution, and persisted solver outputs
+belong behind Python APIs/jobs.
+
+Rust is a sensible future acceleration layer for numeric kernels such as
+ray-casting, rasterization, contour matching, or contour-database search. The
+lowest-risk path is a PyO3/WASM kernel behind the existing Python service
+contracts, not a rewrite of the web app or domain model.
+
 ## Document Map
 
 - [Project Structure](project-structure.md): proposed files, modules, data
@@ -63,6 +82,8 @@ metadata, and true coordinate reference systems can enter.
   artifacts, and validation points.
 - [Algorithms](algorithms.md): terrain generation, rendering, contour extraction,
   pose optimization, and annotation logic.
+- [High-Precision Reference Data](high-precision-reference-data.md): source
+  stack for auditing GT/photo/DEM contour discrepancies.
 - [Roadmap and Risks](roadmap-and-risks.md): milestones, test strategy, and
   known technical risks.
 

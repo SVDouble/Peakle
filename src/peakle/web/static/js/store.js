@@ -28,7 +28,7 @@ class Store {
     this.gtError = null;
     this.selectedGtName = null;
     // Per-layer visibility (keys = GT Lab layer names). Skylines on by default.
-    this.gtDisplay = { gt_sky: true, dem_sky: true };
+    this.gtDisplay = { gt_sky: true, pfm_sky: true, dem_sky: true };
     this.photoOpacity = 0.5; // GT photo overlaid on the 3D terrain in POV
     this._gtLoading = false;
     this._listeners = new Map();
@@ -405,6 +405,15 @@ class Store {
     this.emit("selection");
     this.emit("pose-selection");
     return solve;
+  }
+
+  async runSolveJob(viewIds, strategy, params) {
+    return api.createJob({
+      view_ids: viewIds,
+      strategy,
+      params: params ?? {},
+      max_workers: 2,
+    });
   }
 
   async selectSolve(viewId, solveId) {

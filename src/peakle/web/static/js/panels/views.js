@@ -7,6 +7,7 @@
 import { el, formatNumber } from "../format.js";
 import { fuzzySearchScore, hasFuzzyMatch } from "../fuzzy-search.js";
 import { angleDeltaDeg, geoToLocal } from "../geometry.js";
+import { api } from "../api.js";
 
 const PATCH_DEBOUNCE_MS = 250;
 const CORPUS_CAP = 400;
@@ -18,13 +19,19 @@ export function setupViewsPanel(store, root) {
   let patchTimer = null;
   let editorKey = undefined;
   let runStatus = null;
-  let rebuildTimer = null;
+  let solveJobTimer = null;
+  let solveJobId = null;
 
   const placeButton = el("button", { type: "button", class: "primary lib-action", text: "Place view" });
   placeButton.addEventListener("click", () => store.setPlacing(!store.placing));
   const gtLab = el("a", { class: "gt-lab-link", href: "/gt", target: "_blank", text: "GT Lab ↗" });
-  const rebuildBtn = el("button", { type: "button", class: "secondary lib-action", text: "Rebuild", title: "Re-derive metrics/poses for the filtered GT views" });
-  rebuildBtn.addEventListener("click", onRebuild);
+  const solveFilteredBtn = el("button", {
+    type: "button",
+    class: "secondary lib-action",
+    text: "Solve filtered",
+    title: "Queue pose and metric solving for the filtered GT catalogue views",
+  });
+  solveFilteredBtn.addEventListener("click", onSolveFiltered);
   const search = el("input", { class: "lib-search", placeholder: "Fuzzy search views or peaks…", type: "text" });
   const sortSelect = el("select", { class: "lib-sort", title: "Sort views" }, [
     el("option", { value: "default", text: "Worst GT first" }),
@@ -66,7 +73,7 @@ export function setupViewsPanel(store, root) {
   root.replaceChildren(
     el("div", { class: "library-head" }, [
       el("div", { class: "library-head-row" }, [el("span", { class: "control-eyebrow", text: "Views" }), gtLab]),
-      el("div", { class: "library-actions" }, [placeButton, rebuildBtn, photoImport]),
+      el("div", { class: "library-actions" }, [placeButton, solveFilteredBtn, photoImport]),
       el("div", { class: "library-filter-row" }, [search, sortSelect]),
     ]),
     scroll,
@@ -296,49 +303,51 @@ export function setupViewsPanel(store, root) {
       : `${views.length} view${views.length === 1 ? "" : "s"}`;
   }
 
-  // --- GT provider rebuild (re-derive metrics/pose for the filtered set) ---
+  // --- queued catalogue view solving ---------------------------------------
 
-  async function pollRebuild() {
+  async function pollSolveJob() {
+    if (!solveJobId) {
+      return;
+    }
     try {
-      const st = await (await fetch("/api/gt/rebuild")).json();
-      if (st.running) {
-        hint.textContent = `rebuilding ${st.done.length + st.failed.length}/${st.queue.length} — ${st.current ?? "…"}`;
-        rebuildTimer = setTimeout(pollRebuild, 3000);
+      const job = await api.getJob(solveJobId);
+      const finished = (job.done ?? 0) + (job.failed ?? 0);
+      const running = (job.running_tasks ?? []).map((task) => task.label).join(", ");
+      if (job.status === "queued" || job.status === "running") {
+        hint.textContent = `solving ${finished}/${job.total} — ${running || job.status}`;
+        solveJobTimer = setTimeout(pollSolveJob, 3000);
         return;
       }
-      rebuildBtn.disabled = false;
-      rebuildBtn.textContent = "Rebuild filtered";
+      solveFilteredBtn.disabled = false;
+      solveFilteredBtn.textContent = "Solve filtered";
+      solveJobId = null;
       store.gtSamples = null;
       await store.loadGtSamples();
+      hint.textContent =
+        job.failed > 0 ? `solve job finished with ${job.failed} failed task${job.failed === 1 ? "" : "s"}` : "solve job finished";
     } catch {
-      rebuildTimer = setTimeout(pollRebuild, 5000);
+      solveJobTimer = setTimeout(pollSolveJob, 5000);
     }
   }
 
-  async function onRebuild() {
+  async function onSolveFiltered() {
     const names = items().corpus.map((item) => item.sample.name).slice(0, 50);
     if (!names.length) {
       return;
     }
-    if (names.length > 1 && !window.confirm(`Rebuild ${names.length} GT views (~${Math.round(names.length * 0.6)} min)?`)) {
+    if (names.length > 1 && !window.confirm(`Solve ${names.length} GT catalogue views (~${Math.round(names.length * 0.6)} min)?`)) {
       return;
     }
-    rebuildBtn.disabled = true;
-    rebuildBtn.textContent = "Rebuilding…";
+    solveFilteredBtn.disabled = true;
+    solveFilteredBtn.textContent = "Solving…";
     try {
-      const res = await fetch("/api/gt/rebuild", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ names }),
-      });
-      if (!res.ok) {
-        throw new Error((await res.json()).detail ?? `rebuild failed: ${res.status}`);
-      }
-      clearTimeout(rebuildTimer);
-      pollRebuild();
+      const job = await api.createJob({ view_ids: names, max_workers: 2 });
+      solveJobId = job.id;
+      clearTimeout(solveJobTimer);
+      pollSolveJob();
     } catch (error) {
-      rebuildBtn.disabled = false;
-      rebuildBtn.textContent = "Rebuild filtered";
+      solveFilteredBtn.disabled = false;
+      solveFilteredBtn.textContent = "Solve filtered";
       hint.textContent = error.message;
     }
   }

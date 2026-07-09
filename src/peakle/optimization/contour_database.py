@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
+from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
 from peakle.domain.coordinates import LocalPoint
 from peakle.domain.pose import PosePrior
 from peakle.domain.terrain import TerrainMap
@@ -168,7 +168,7 @@ def _median_shift_px(observed: NDArray[np.float64], predicted: NDArray[np.float6
 
 
 def _pitch_from_vertical_shift(intrinsics: CameraIntrinsics, shift_px: float) -> float:
-    return math.degrees(math.atan(shift_px / intrinsics.focal_length_px))
+    return CameraModel.from_intrinsics(intrinsics).pitch_deg_from_vertical_shift_px(shift_px)
 
 
 def _distinct_seeds(seeds: list[ContourSeed], max_count: int) -> list[ContourSeed]:

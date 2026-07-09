@@ -90,3 +90,12 @@ class SolveRequest(BaseModel):
 
     strategy: StrategyName
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobCreateRequest(BaseModel):
+    """Request to enqueue background solving for loaded or catalogue views."""
+
+    view_ids: list[str] = Field(default_factory=list, max_length=2000)
+    strategy: StrategyName | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    max_workers: int = Field(default=2, ge=1, le=8)

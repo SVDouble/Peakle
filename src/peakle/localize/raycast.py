@@ -106,6 +106,26 @@ def horizon_elevation(
     return np.where(np.isfinite(el_max), el_max, np.nan)
 
 
+def horizon_elevation_and_distance(
+    terrain,
+    az_rad: np.ndarray,
+    cam_z: float,
+    step: float = 30.0,
+    d_max: float | None = None,
+    cam_e: float = 0.0,
+    cam_n: float = 0.0,
+    patch=None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Horizon elevation angle and the horizontal range of the responsible terrain sample."""
+
+    el, ds = _elevation_angle_grid(terrain, az_rad, cam_z, step, d_max, cam_e, cam_n, patch)
+    idx = np.argmax(el, axis=1)
+    el_max = el[np.arange(el.shape[0]), idx]
+    ranges = ds[idx]
+    ok = np.isfinite(el_max)
+    return np.where(ok, el_max, np.nan), np.where(ok, ranges, np.nan)
+
+
 def skyline_pinhole(
     terrain,
     intr: CameraIntrinsics,

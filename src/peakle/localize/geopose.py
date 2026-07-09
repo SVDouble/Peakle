@@ -111,9 +111,30 @@ def oracle_skyline(depth_pfm: str | Path) -> np.ndarray:
     """Per-column skyline row from the GT-rendered depth map (sky encoded as <= 0)."""
 
     depth = read_pfm(depth_pfm)
+    return depth_skyline(depth)
+
+
+def depth_skyline(depth: np.ndarray) -> np.ndarray:
+    """Per-column skyline row from a GeoPose depth image (sky encoded as <= 0)."""
+
     terr = depth > 0
     h, w = terr.shape
     rows = np.full(w, np.nan)
     has = terr.any(axis=0)
     rows[has] = np.argmax(terr[:, has], axis=0).astype(float)
     return rows
+
+
+def resampled_oracle_skyline(depth_pfm: str | Path, width: int, height: int) -> np.ndarray:
+    """GT depth skyline resampled into the working image size."""
+
+    depth = read_pfm(depth_pfm)
+    rows = depth_skyline(depth)
+    src_x = np.linspace(0.0, 1.0, len(rows))
+    finite = np.isfinite(rows)
+    if not finite.any():
+        return np.full(width, np.nan)
+    dst_x = np.linspace(0.0, 1.0, width)
+    valid = np.interp(dst_x, src_x, finite.astype(float)) > 0.5
+    scaled = np.interp(dst_x, src_x[finite], rows[finite]) * (height / depth.shape[0])
+    return np.where(valid, scaled, np.nan)

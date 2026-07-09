@@ -9,7 +9,6 @@ are recomputed at full resolution.
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import numpy as np
@@ -309,7 +308,7 @@ def _solve_horizon(
 
     position = prior.position
     width, height = intrinsics.width_px, intrinsics.height_px
-    hfov_deg = horizontal_fov_deg or math.degrees(2.0 * math.atan(width / (2.0 * intrinsics.focal_length_px)))
+    hfov_deg = horizontal_fov_deg or intrinsics.horizontal_fov_deg()
     obs = contour.to_profile()
     # cyltan crops carry large vertical offsets (up to ~48°); a pinhole camera does not
     pitch_bounds = (-50.0, 50.0) if projection == "cyltan" else (-30.0, 30.0)
@@ -403,8 +402,8 @@ def _horizon_orientation_start(
     from peakle.localize.solve import HorizonProfile, solve_orientation
 
     position = prior.position
-    width, height = intrinsics.width_px, intrinsics.height_px
-    hfov_deg = horizontal_fov_deg or math.degrees(2.0 * math.atan(width / (2.0 * intrinsics.focal_length_px)))
+    height = intrinsics.height_px
+    hfov_deg = horizontal_fov_deg or intrinsics.horizontal_fov_deg()
     pitch_bounds = (-50.0, 50.0) if projection == "cyltan" else (-30.0, 30.0)
     grid_step = float(min(terrain.x_m[1] - terrain.x_m[0], terrain.y_m[1] - terrain.y_m[0]))
     profile = HorizonProfile(

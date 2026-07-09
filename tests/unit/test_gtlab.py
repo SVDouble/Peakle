@@ -1,5 +1,6 @@
 """GT Lab API helpers."""
 
+import asyncio
 import math
 from types import SimpleNamespace
 
@@ -7,7 +8,45 @@ import numpy as np
 
 from peakle.domain.coordinates import LocalPoint
 from peakle.web.api import gtlab
-from peakle.web.api.gtlab import _rows_contour, _scene_rows, _visible_peak_tags
+from peakle.web.api.gtlab import LAYER_NAMES, _rows_contour, _scene_rows, _visible_peak_tags
+
+
+def test_pfm_skyline_layer_is_registered() -> None:
+    assert "pfm_sky" in LAYER_NAMES
+
+
+def test_alignment_audit_endpoint_uses_all_records(monkeypatch) -> None:
+    monkeypatch.setattr(
+        gtlab,
+        "_index",
+        lambda: {
+            "ok": {"name": "ok", "quality": "CLEAN", "sky_cons_px": 2.0, "pfm_cons_px": 2.0},
+            "bad": {"name": "bad", "quality": "SUSPECT", "sky_cons_px": 40.0, "pfm_cons_px": 5.0},
+        },
+    )
+
+    report = asyncio.run(gtlab.gt_alignment_audit(limit=10, include_clean=False))
+
+    assert report["total"] == 2
+    assert report["rows"][0]["name"] == "bad"
+
+
+def test_alignment_audit_endpoint_can_enrich_metric_errors(monkeypatch) -> None:
+    monkeypatch.setattr(
+        gtlab,
+        "_index",
+        lambda: {"bad": {"name": "bad", "quality": "SUSPECT", "sky_cons_px": 40.0, "pfm_cons_px": 5.0}},
+    )
+    monkeypatch.setattr(
+        gtlab,
+        "metric_skyline_errors_for_record",
+        lambda _rec: {"sky_error_m": 120.0, "sky_error_p90_m": 250.0, "sky_range_median_m": 8000.0},
+    )
+
+    report = asyncio.run(gtlab.gt_alignment_audit(limit=10, include_clean=False, metric=True))
+
+    assert report["rows"][0]["metrics"]["sky_error_m"] == 120.0
+    assert report["rows"][0]["metrics"]["sky_range_median_m"] == 8000.0
 
 
 def test_rows_contour_uses_finite_in_frame_rows() -> None:

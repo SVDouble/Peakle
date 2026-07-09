@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import math
-from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from peakle.domain.coordinates import LocalPoint
+from peakle.domain.projection import (
+    ImageProjectionName,
+    azimuths_deg,
+    focal_length_px,
+    pitch_deg_from_vertical_shift_px,
+    rows_from_elevation_rad,
+    vertical_fov_deg,
+)
 
-ProjectionKind = Literal["pinhole", "cyltan"]
+ProjectionKind = ImageProjectionName
 
 
 class CameraIntrinsics(BaseModel):
@@ -101,20 +108,34 @@ class CameraModel(BaseModel):
     def focal_length_px(self) -> float:
         """Returns the image-plane focal length used by this projection."""
 
-        hfov_rad = math.radians(self.horizontal_fov_deg)
-        if self.projection == "cyltan":
-            return self.width_px / hfov_rad
-        return self.width_px / (2.0 * math.tan(hfov_rad / 2.0))
+        return focal_length_px(self.width_px, self.horizontal_fov_deg, self.projection)
 
     def vertical_fov_deg(self) -> float:
         """Returns the perspective-camera vertical FOV equivalent for this view."""
 
-        return math.degrees(2.0 * math.atan(self.height_px / (2.0 * self.focal_length_px())))
+        return vertical_fov_deg(self.width_px, self.height_px, self.horizontal_fov_deg, self.projection)
 
     def pitch_deg_from_vertical_shift_px(self, shift_px: float) -> float:
         """Returns the pitch represented by a vertical image shift."""
 
-        return math.degrees(math.atan(shift_px / self.focal_length_px()))
+        return pitch_deg_from_vertical_shift_px(self.width_px, self.horizontal_fov_deg, self.projection, shift_px)
+
+    def azimuths_deg(self, yaw_deg: float):
+        """Returns the world azimuth sampled by each image column."""
+
+        return azimuths_deg(self.width_px, self.horizontal_fov_deg, yaw_deg, self.projection)
+
+    def rows_from_elevation_rad(self, elevation_rad, *, pitch_deg: float = 0.0):
+        """Projects terrain elevation angles to this view's image rows."""
+
+        return rows_from_elevation_rad(
+            elevation_rad,
+            self.width_px,
+            self.height_px,
+            self.horizontal_fov_deg,
+            self.projection,
+            pitch_deg=pitch_deg,
+        )
 
 
 class CameraExtrinsics(BaseModel):

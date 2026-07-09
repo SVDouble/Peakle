@@ -33,6 +33,7 @@ async def create_solve(view_id: str, body: SolveRequest, request: Request) -> di
     _require_view(scene, view_id)
     async with request.app.state.scene_lock:
         solve = await to_thread.run_sync(scene.run_solve, view_id, body.strategy, body.params)
+        request.app.state.solution_store.save(scene.views[view_id], solve)
     return solve_payload(solve)
 
 
@@ -63,4 +64,5 @@ async def delete_solve(view_id: str, solve_id: str, request: Request) -> Respons
     view = _require_view(scene, view_id)
     async with request.app.state.scene_lock:
         view.solves.pop(solve_id, None)
+        request.app.state.solution_store.remove(view, solve_id)
     return Response(status_code=204)

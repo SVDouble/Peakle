@@ -10,7 +10,8 @@ import { candidatePrimaryKey, comparisonText, defaultCompareKeys, poseCandidates
 
 // Per-family layer toggles. GT/DEM colors mirror gtlab.py _COLORS.
 const GT_POSE_LAYERS = [
-  ["gt_sky", "Skyline", "#00e65a"],
+  ["gt_sky", "Observed skyline", "#00e65a"],
+  ["pfm_sky", "PFM skyline", "#ffd84a"],
   ["gt_occ", "Occlusion", "#ff961e"],
   ["gt_rib", "Ribs / spurs", "#ffeb3b"],
   ["gt_cou", "Couloirs", "#e86edc"],

@@ -22,7 +22,7 @@ import {
 } from "../../geometry.js";
 import { el, fitContainBox, formatNumber, svgElement } from "../../format.js";
 import { GT_LAYER_NAMES } from "../camera-image.js";
-import { selectedPoseTarget } from "../pose-candidates.js";
+import { selectedPoseTarget } from "../../pose-candidates.js";
 import { buildSelectionLayer } from "./cameras.js";
 import { buildGtSpotsLayer } from "./gt-spots.js";
 import { addPeakLabels, createTerrainGroup } from "./terrain-mesh.js";

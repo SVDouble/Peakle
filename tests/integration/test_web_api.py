@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from io import BytesIO
 
 import pytest
@@ -14,13 +15,25 @@ from peakle.domain.contours import ImagePoint, SkylineContour
 from peakle.domain.coordinates import LocalPoint
 from peakle.scene.scene import Scene
 from peakle.scene.state import build_intrinsics
+from peakle.web.api import gtlab as gtlab_api
+from peakle.web.api import jobs as jobs_api
 from peakle.web.api import views as views_api
 from peakle.web.app import create_app
 
 
+def _wait_job(client: TestClient, job_id: str, timeout_s: float = 10.0) -> dict:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in {"completed", "failed", "cancelled"}:
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not finish")
+
+
 @pytest.fixture
-def client(scene: Scene) -> TestClient:
-    return TestClient(create_app(scene))
+def client(scene: Scene, tmp_path) -> TestClient:
+    return TestClient(create_app(scene, job_store_dir=tmp_path / "jobs", solution_store_dir=tmp_path / "solutions"))
 
 
 def test_scene_terrain_peaks_endpoints(client: TestClient) -> None:
@@ -74,6 +87,75 @@ def test_view_lifecycle_and_solve(client: TestClient) -> None:
     solve_id = solve["id"]
     assert client.get(f"/api/views/{view_id}/solves/{solve_id}").status_code == 200
     assert len(client.get(f"/api/views/{view_id}/solves").json()) == 1
+    persisted = client.app.state.solution_store.load(client.app.state.scene.views[view_id])
+    assert [row.id for row in persisted] == [solve_id]
+
+
+def test_solve_views_job_adds_solves(client: TestClient) -> None:
+    terrain = client.get("/api/terrain").json()
+    east = (terrain["x_min_m"] + terrain["x_max_m"]) / 2
+    north = terrain["y_min_m"] + 0.05 * (terrain["y_max_m"] - terrain["y_min_m"])
+    view = client.post(
+        "/api/views",
+        json={"east_m": east, "north_m": north, "yaw_deg": 0.0, "pitch_deg": 2.0, "eye_height_m": 150.0},
+    ).json()
+
+    created = client.post(
+        "/api/jobs",
+        json={
+            "view_ids": [view["id"]],
+            "strategy": "horizon",
+            "params": {"seed": 1},
+            "max_workers": 1,
+        },
+    )
+
+    assert created.status_code == 202
+    job = _wait_job(client, created.json()["id"])
+    assert job["status"] == "completed"
+    assert job["done"] == 1
+    solves = client.get(f"/api/views/{view['id']}/solves").json()
+    assert len(solves) == 1
+    assert solves[0]["strategy"] == "horizon"
+
+
+def test_solve_views_job_accepts_gt_catalog_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        gtlab_api,
+        "_index",
+        lambda: {"sample-a": {"name": "sample-a", "quality": "SUSPECT", "sky_cons_px": 30.0}},
+    )
+    monkeypatch.setattr(
+        jobs_api,
+        "_solve_catalogue_view",
+        lambda name: {"name": name, "quality": "CLEAN", "sky_cons_px": 2.0},
+    )
+
+    created = client.post("/api/jobs", json={"view_ids": ["sample-a"], "max_workers": 1})
+
+    assert created.status_code == 202
+    job = _wait_job(client, created.json()["id"])
+    assert job["status"] == "completed"
+    assert job["tasks"][0]["result"] == {
+        "view_id": "sample-a",
+        "pose": {"name": "sample-a", "quality": "CLEAN", "sky_cons_px": 2.0},
+    }
+
+
+def test_gt_alignment_audit_route(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        gtlab_api,
+        "_index",
+        lambda: {
+            "ok": {"name": "ok", "quality": "CLEAN", "sky_cons_px": 2.0, "pfm_cons_px": 2.0},
+            "bad": {"name": "bad", "quality": "SUSPECT", "sky_cons_px": 40.0, "pfm_cons_px": 5.0},
+        },
+    )
+
+    report = client.get("/api/gt/alignment-audit?limit=10").json()
+
+    assert report["total"] == 2
+    assert report["rows"][0]["name"] == "bad"
 
 
 def test_photo_upload_creates_photo_backed_view(
@@ -163,3 +245,7 @@ def test_config_rebuild_clears_views(client: TestClient) -> None:
 def test_unknown_view_returns_404(client: TestClient) -> None:
     assert client.get("/api/views/view-99").status_code == 404
     assert client.post("/api/views/view-99/solves", json={"strategy": "powell"}).status_code == 404
+
+
+def test_gt_rebuild_endpoint_is_not_registered(client: TestClient) -> None:
+    assert client.get("/api/gt/rebuild").status_code == 404

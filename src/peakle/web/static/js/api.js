@@ -48,6 +48,9 @@ export const api = {
   getTerrain: () => request("GET", "/api/terrain"),
   getPeaks: () => request("GET", "/api/peaks"),
   getAlgorithms: () => request("GET", "/api/algorithms"),
+  listJobs: (kind = undefined) => request("GET", `/api/jobs${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
+  getJob: (id) => request("GET", `/api/jobs/${encodeURIComponent(id)}`),
+  createJob: (body) => request("POST", "/api/jobs", body),
 
   listViews: () => request("GET", "/api/views"),
   getView: (id) => request("GET", `/api/views/${id}`),
@@ -71,6 +74,11 @@ export const api = {
   viewPhotoUrl: (id) => `/api/views/${id}/photo`,
 
   listGtSamples: () => request("GET", "/api/gt/samples"),
+  getGtAlignmentAudit: (limit = 100, includeClean = false, metric = false) =>
+    request(
+      "GET",
+      `/api/gt/alignment-audit?limit=${encodeURIComponent(limit)}&include_clean=${includeClean ? "true" : "false"}&metric=${metric ? "true" : "false"}`,
+    ),
   gtThumbUrl: (name) => `/api/gt/samples/${encodeURIComponent(name)}/thumb.jpg`,
   gtLayerUrl: (name, layer) => `/api/gt/samples/${encodeURIComponent(name)}/layers/${layer}.png`,
   openGtView: (name) => request("POST", `/api/gt/samples/${encodeURIComponent(name)}/open-view`),

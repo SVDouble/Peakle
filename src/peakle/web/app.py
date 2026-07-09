@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib import resources
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
@@ -13,9 +16,14 @@ from starlette.responses import RedirectResponse, Response
 
 from peakle.scene.scene import Scene
 from peakle.web.api import gtlab as gtlab_api
+from peakle.web.api import jobs as jobs_api
 from peakle.web.api import scene as scene_api
 from peakle.web.api import solves as solves_api
 from peakle.web.api import views as views_api
+from peakle.web.jobs import JobQueue
+from peakle.web.solutions import SolutionStore
+
+BASE = Path(__file__).resolve().parents[3]
 
 
 class _NoCacheStaticFiles(StaticFiles):
@@ -35,7 +43,7 @@ class _NoCacheStaticFiles(StaticFiles):
         return response
 
 
-def create_app(scene: Scene) -> FastAPI:
+def create_app(scene: Scene, job_store_dir: Path | None = None, solution_store_dir: Path | None = None) -> FastAPI:
     """Builds the workbench application around a mutable in-memory scene.
 
     Args:
@@ -45,12 +53,25 @@ def create_app(scene: Scene) -> FastAPI:
         A FastAPI app serving the static viewer and the JSON API.
     """
 
-    app = FastAPI(title="Peakle", version="0.1.0")
+    job_queue = JobQueue(job_store_dir or BASE / "local/derived/web_jobs")
+    solution_store = SolutionStore(solution_store_dir or BASE / "local/derived/web_solutions")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            job_queue.shutdown()
+
+    app = FastAPI(title="Peakle", version="0.1.0", lifespan=lifespan)
     app.state.scene = scene
     app.state.scene_lock = asyncio.Lock()
+    app.state.job_queue = job_queue
+    app.state.solution_store = solution_store
 
     app.include_router(scene_api.router, prefix="/api")
     app.include_router(gtlab_api.router, prefix="/api")
+    app.include_router(jobs_api.router, prefix="/api")
     app.include_router(views_api.router, prefix="/api")
     app.include_router(solves_api.router, prefix="/api")
 
