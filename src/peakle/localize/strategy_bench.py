@@ -35,7 +35,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -52,6 +51,7 @@ from peakle.domain.contours import ImagePoint, SkylineContour
 from peakle.domain.coordinates import GeoPoint, LocalFrame, LocalPoint
 from peakle.domain.pose import PosePrior
 from peakle.domain.terrain import TerrainMap
+from peakle.io.artifacts import write_once_bytes as _write_once
 from peakle.localize.compatibility import (
     COMPATIBILITY_POLICY,
     HEIGHT_COMPATIBILITY_POLICY,
@@ -1868,19 +1868,6 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
-
-
-def _write_once(path: Path, content: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(path, flags, 0o644)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
 
 
 def config_record(config: MatrixConfig) -> dict[str, Any]:

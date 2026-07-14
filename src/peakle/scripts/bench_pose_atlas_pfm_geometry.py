@@ -25,6 +25,10 @@ from typing import Any, cast
 from peakle.domain.camera import CameraExtrinsics
 from peakle.domain.coordinates import GeoPoint, LocalPoint
 from peakle.domain.pose import PosePrior
+from peakle.io.artifacts import fsync_directory as _fsync_directory
+from peakle.io.artifacts import write_once_bytes as _write_once
+from peakle.localize.atlas_dashboard import ATLAS_STUDY_SCHEMA
+from peakle.localize.atlas_dashboard import canonical_json_bytes as _json_bytes
 from peakle.localize.bench import find_sample_dirs
 from peakle.localize.geopose import read_pfm
 from peakle.localize.paths import BASE, COP_TILES_DIR
@@ -41,7 +45,6 @@ from peakle.localize.strategy_bench import (
     file_sha256,
     provision_estimator_terrain,
 )
-from peakle.scripts.bench_pose_atlas import ATLAS_STUDY_SCHEMA
 from peakle.terrain.copernicus import load_copernicus_terrain
 
 PFM_GEOMETRY_STUDY_SCHEMA = "peakle_pose_atlas_pfm_geometry_study_v1"
@@ -587,30 +590,6 @@ def _json_object(content: bytes, path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise SystemExit(f"expected a JSON object in {path}")
     return value
-
-
-def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\n").encode()
-
-
-def _write_once(path: Path, content: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _parser() -> argparse.ArgumentParser:

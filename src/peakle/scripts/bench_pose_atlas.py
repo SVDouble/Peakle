@@ -14,7 +14,6 @@ import argparse
 import hashlib
 import importlib.metadata
 import math
-import os
 import platform
 import statistics
 import subprocess
@@ -28,12 +27,15 @@ import numpy as np
 from PIL import Image
 
 from peakle.domain.camera import CameraExtrinsics
+from peakle.io.artifacts import write_once_bytes as _write_once
 from peakle.localize.atlas_dashboard import (
     ATLAS_DASHBOARD_FILENAME,
     ATLAS_DASHBOARD_SCHEMA,
     ATLAS_STUDY_SCHEMA,
     build_atlas_dashboard,
-    canonical_json_bytes,
+)
+from peakle.localize.atlas_dashboard import (
+    canonical_json_bytes as _json_bytes,
 )
 from peakle.localize.bench import find_sample_dirs
 from peakle.localize.extract import best_skyline_candidate, extract_candidates
@@ -601,22 +603,6 @@ def _environment_record() -> dict[str, Any]:
         "platform": platform.platform(),
         "packages": packages,
     }
-
-
-def _json_bytes(value: Any) -> bytes:
-    return canonical_json_bytes(value)
-
-
-def _write_once(path: Path, content: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
 
 
 def _parser() -> argparse.ArgumentParser:

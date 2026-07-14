@@ -21,6 +21,8 @@ from peakle.config import load_settings
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import EARTH_RADIUS_M, LocalPoint
 from peakle.domain.terrain import TerrainMap
+from peakle.io.artifacts import fsync_directory as _fsync_directory
+from peakle.io.artifacts import write_once_bytes as _write_once
 from peakle.localize.extract import best_skyline_candidate, extract_candidates
 from peakle.localize.paths import BASE
 from peakle.localize.synthetic_pipeline_bench import (
@@ -663,21 +665,6 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _write_once(path: Path, data: bytes) -> None:
-    with path.open("xb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _stable_seed(value: str) -> int:
