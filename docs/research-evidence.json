@@ -1,6 +1,6 @@
 {
   "schema": "peakle.research_evidence.v1",
-  "reviewed_at": "2026-07-14",
+  "reviewed_at": "2026-07-15",
   "canonical_strategy": "docs/research-and-development.md",
   "hash_policy": {
     "current_artifacts": "SHA-256 of the exact archived file bytes",
@@ -200,6 +200,35 @@
         "rgb_skyline_top1_exact_terrain": 0.2,
         "rgb_skyline_top1_coarse_terrain": 0.0,
         "decision": "Shared-renderer ceilings expose terrain and extraction sensitivity; they are not production localization."
+      }
+    },
+    {
+      "id": "annotation_sensitivity_diagnostic_v2_20260715",
+      "status": ["diagnostic_ceiling"],
+      "truth_classes": ["diagnostic_oracle"],
+      "sample_count": 4,
+      "case_count": 196,
+      "source_revision": "a202e4927c2502caa534bc73f191c8d9e6822018",
+      "source_worktree_clean": true,
+      "archive_locator": "local/output/20260715-annotation-sensitivity-diagnostic-v2",
+      "availability": "local_only",
+      "run_sha256": "32ac75f8802b8192154ca413cd3be8d9d3ce5399308836cfe875000751c89df7",
+      "estimator_sha256": null,
+      "evaluation_sha256": "a7153733e636a830f60b89d643fefab1c05102bf2a6689ac0afab2bd2ed44221",
+      "parents": [],
+      "truth_firewall": "truth_side_only_no_estimator_shared_renderer_inverse_crime",
+      "outcome": {
+        "reference_peak_exposures": 40,
+        "pre_layout_eligible_exposures": 24,
+        "displayed_label_exposures": 14,
+        "reference_horizontal_range_km": [4.06, 14.73],
+        "position_100m_lateral_median_view_p90_px": 13.02,
+        "position_200m_lateral_median_view_p90_px": 26.04,
+        "position_200m_along_max_median_view_p90_px": 7.59,
+        "yaw_1deg_max_median_view_p90_px": 11.9,
+        "fov_1deg_max_median_view_p90_px": 4.59,
+        "fixture_selection": "seed 13 selected from 1-24 by exact-pose eligible-label count only",
+        "decision": "Horizontal utility is direction- and distance-conditioned; this diagnostic cannot set a product pose target."
       }
     },
     {

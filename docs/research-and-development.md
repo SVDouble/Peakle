@@ -2,9 +2,9 @@
 
 **Status:** normative
 
-**Last reviewed:** 2026-07-14
+**Last reviewed:** 2026-07-15
 
-**Current phase:** consolidation and benchmark design
+**Current phase:** Phase 0C — reusable experiment contract and truth protocol
 
 This document is the sole normative source for Peakle's research goal, interpretation of accepted
 evidence, benchmark contracts, technical direction, and current roadmap. Its adjacent
@@ -24,9 +24,10 @@ represented in both places is not part of the project's accepted evidence.
 
 Peakle does **not yet solve metric mountain-view localization**. It has a credible known-position
 orientation solver, a dense three-case diagnostic lattice with measured proposal recall, and useful
-negative results. It does not have a real-data method that reliably improves a position prior, a
-validated country-scale no-prior method, a calibrated confidence score, or an end-to-end
-mountain-annotation benchmark.
+negative results. It now also has a controlled shared-renderer pose-to-annotation diagnostic, but no
+gold-real annotation benchmark. It does not have a real-data method that reliably improves a
+position prior, a validated country-scale no-prior method, a calibrated confidence score, or an
+end-to-end mountain-annotation benchmark.
 
 The project is not primarily blocked by optimizer budget. The local atlas already contains
 reference-near poses, but the skyline score ranks displaced basins above them. PFM-derived geometry
@@ -36,6 +37,12 @@ the published GeoPose reference, and the current same-family holdout can falsely
 Those are ranking, observability, truth, and validation problems—not evidence that another local
 optimizer or a larger beam will solve the task.
 
+The first annotation diagnostic also falsifies a single distance-only pose target. At 640 px, the
+same 200 m displacement produces roughly 7 px median-of-view p90 anchor error along the viewing
+direction and 26 px cross-view. For lateral motion, the median p90 is about 30 px for 4–5 km peaks,
+19 px for 5–10 km peaks, and 11 px beyond 10 km. This is an inverse-crime synthetic result, not a
+product tolerance, but it is enough to stop treating “100 m” or “200 m” as a universal outcome.
+
 Until the gates in this program are met:
 
 - stop adding end-to-end solver variants to the same three-photo benchmark;
@@ -43,8 +50,9 @@ Until the gates in this program are met:
   identity-seed integration test as localization;
 - do not promote a method because an overlay looks plausible;
 - keep every experimental estimator out of product ranking; and
-- make the next implementation milestone a net-deleting consolidation, followed by a controlled
-  annotation-sensitivity and exact-pose modality benchmark.
+- make the next research milestone independent observation truth and a perfect-observation surface,
+  followed by the exact-pose modality benchmark; and
+- add shared experiment infrastructure only when that second consumer removes duplication.
 
 ## Review decision: what changes now
 
@@ -80,8 +88,9 @@ The program is therefore changed as follows:
    or training data are correlated. The requirement is evidence not reused for fitting plus measured
    conditional value and risk/coverage—not an unsupported claim that heads are independent.
 
-These changes intentionally reduce the next experiment. The immediate implementation target is an
-annotation-sensitivity benchmark plus a small exact-pose modality screen, not another end-to-end
+These changes intentionally reduce the next experiment. The annotation-sensitivity diagnostic is
+complete. The immediate targets are the independent synthetic/gold-real protocol, a
+perfect-observation surface, and then a small exact-pose modality screen—not another end-to-end
 solver or a run of all 32 verifier candidates.
 
 ## Mission and task boundaries
@@ -141,6 +150,7 @@ mean:
 | RGB geometry verifier, `local/output/20260714-three-photo-photo-geometry-verifier-v1/results.json`, SHA `a55235964989131d00b515eceffb4b5b98341e30940f4e39d41c6a81a33c7f9b` | Truth-blind DexiNed, monocular depth, and skyline evidence over 1,323 candidates per photo | Top one is 0/3, median 359.7 m; it abstains 3/3. A diverse beam of 32 contains a target for 2/3, both at beam rank 12. | **Experimental negative.** Abstention is safer than a false claim, but the verifier is not a useful selector yet. |
 | MINIMA heldout validation, `local/output/20260714-heldout-candidate-validation-minima-img4948-geopose-bench/results.json`, SHA `ecfd52bc375305987aaeea8c0244209a2621e31706440cbab9b316479bbfe14d` | Three controlled perturbations of IMG4948 against prior-centred orthophoto renders; all cases ranking-ineligible | The gate abstains twice and returns one pose 215.0 m / 0.98° from the refined reference, for 0/3 successes. The matcher saw the complete query before the spatial holdout. | **Experimental / negative.** Plumbing works, but this same-family holdout cannot certify the ambiguous alternative pose. |
 | Synthetic pinhole stage ceiling, `local/output/20260714-synthetic-pinhole-stage-upper-bound-v2/results.json`, SHA `bf813d184d4b6c99be00ff6c0b75c3e8d4b7c5115478d932cd77638209f180a8` | Five observations, two priors, exact/coarse estimator terrain; shared custom renderer | Proposal recall is 20/20 by construction. Exact-mask skyline top-one falls from 8/10 to 3/10 after factor-two terrain coarsening; RGB skyline falls from 2/10 to 0/10. | **Diagnostic ceiling.** It isolates terrain/extraction sensitivity; it is not an independent end-to-end result. |
+| Annotation sensitivity diagnostic, `local/output/20260715-annotation-sensitivity-diagnostic-v2/results.json`, SHA `a7153733e636a830f60b89d643fefab1c05102bf2a6689ac0afab2bd2ed44221` | Four seed-13 synthetic pinhole views, 49 controlled perturbations per view; same terrain/renderer/labeler on both sides, no estimator | Exact pose has 24 physically eligible peak exposures and 14 displayed labels at 4.1–14.7 km. Median-of-view p90 anchor error is 13.0 px for 100 m lateral, 26.0 px for 200 m lateral, but 7.6 px for 200 m along-view; ±1° yaw is 11.9 px and ±1° FOV is 4.6 px at 640 px width. | **Diagnostic ceiling.** Pose utility is direction- and peak-distance-conditioned. Seed 13 was selected from 1–24 using exact-pose eligibility only; shared-renderer and fixture-selection bias prohibit a product claim. |
 | Six-photo GT↔DEM compatibility, `local/output/20260714-high-compute-six-photo-compatibility-v2-geopose-bench/results.json`, SHA `a2937e7ad1464dbfa59ad8cead798bda64be2d06e2a9cea57d30c977dee80488` | Reference PFM and metadata, evaluation-only | Produces two MAP_A, two MAP_B, and two MAP_C cases, but tiers change in nearby seeded runs around hard thresholds. | **Experimental dataset audit.** Useful as a continuous covariate, not yet as a calibrated eligibility gate. |
 | Legacy GT alignment audit, `local/output/20260709-155112-gt-alignment-audit/audit.json`, SHA `bc7ce33733e4893f832257fb1fa594869ef7d41500a9744651dd22239abc598f` | 364 refined-pose-era records, without a modern run manifest | 192 CLEAN, 172 SUSPECT, including 126 photo/PFM registration mismatches. | **Superseded diagnostic.** Supports caution about the corpus but cannot grade the reset benchmark. |
 | Legacy orientation studies: `local/output/20260707-045620-geopose-bench/results.json`, SHA `a7ac0c52572e1cf1bbabfa7cbb59f5e1bca5317d2af4c6c6648826fe4f123dd1`; and `local/output/20260705-211514-geopose-bench/results.json`, SHA `de57964571ff7af6f9f0e5255876f4bcd8abf6af300acf8302c308fcc232d58d` | Position and FOV are supplied; PFM is often reference-generated | 60-case run: PFM 95%, extracted 87%; 274-case run: PFM 93%, extracted 40%. | **Baseline.** Supports yaw/horizon capacity at a known position only. |
@@ -153,7 +163,9 @@ The result is a clear decomposition, not “nothing worked”:
 4. metric range, occlusion, and typed structure can resolve ambiguity when supplied correctly;
 5. current photo-derived proxies do not reproduce that oracle ranking; and
 6. current real truth is too ambiguous and too small to decide whether some 200 m alternatives are
-   algorithm failures or reference errors.
+   algorithm failures or reference errors; and
+7. annotation displacement depends strongly on translation direction and peak distance, so a
+   universal horizontal-error threshold cannot define product utility.
 
 ## Failure model
 
@@ -173,6 +185,12 @@ The current custom-pinhole benchmark shares terrain and rendering assumptions wi
 Exact masks, exact depth, and exact seed identity are useful unit ceilings, not evidence of
 robustness to a different renderer, DEM error, vegetation, snow, atmosphere, lens distortion, or
 projection mismatch.
+
+The annotation-sensitivity artifact is even more explicitly truth-side: it has no estimator and
+uses the same renderer, terrain, peak detector, and labeler for reference and perturbation. Its seed
+was selected for exact-pose eligible-label coverage. It measures the geometry of the current
+annotation implementation under controlled errors; it does not estimate population accuracy or
+validate that the detected synthetic summits match real mountain semantics.
 
 ### 3. The pipeline conflates distinct failure stages
 
@@ -481,6 +499,23 @@ camera-height errors. Report, by peak distance and direction:
 This produces a distance-conditioned pose budget. The existing 25/100/300 m curves remain research
 comparators, but the annotation-derived budget decides product usefulness.
 
+The first diagnostic run is frozen as
+`local/output/20260715-annotation-sensitivity-diagnostic-v2` (196 cases, clean revision
+`a202e49`). It deliberately separates physical pre-layout eligibility from displayed labels. Seed
+13 was selected from seeds 1–24 using exact-pose eligible-label count only, before comparing
+perturbation outcomes. The 24 eligible exposures span 4.1–14.7 km; there are no sub-4 km labels, so
+that range remains unmeasured. All image columns contain rendered terrain.
+
+For planning the next studies, declare a **provisional** screen of displayed identity F1 ≥ 0.90 and
+median-of-view p90 anchor displacement ≤ 12 px at 640 px width (1.875% of width, approximately 1°
+near the centre at 55° FOV). This threshold was declared after the pilot and is not a preregistered
+product tolerance. Under it, the conservative all-direction horizontal budget is 50 m: 100 m
+lateral is already 13.0 px, although 100 m oblique and 200 m along-view remain inside. The analogous
+orientation/FOV planning bounds are about ±1° each. Positive height offsets through +50 m remain
+inside, but negative 10/50 m cases put a 2.5 m-high camera below the terrain and are physical-validity
+checks, not a symmetric height budget. Gold-real annotation and independent synthetic results must
+replace these planning bounds.
+
 ### Gate 2 — information/observability ceiling
 
 Before any matcher, score perfect observations from an independent query renderer against estimator
@@ -589,10 +624,13 @@ branch per experiment.
    UI strategy catalog and default benchmark matrix without deleting explicit compatibility/replay
    entry points. Historical `global`/`contourdb` results remain “windowed legacy,” not country-scale
    localization.
-3. **Gate-1 metric primitive — complete.** The small typed annotation-sensitivity evaluator reuses
-   existing annotation/intrinsic models and reports visible identity plus anchor/angular/label
-   displacement. Next add the pose-perturbation case generator and frozen artifact transaction; its
-   truth-side types must not enter estimator code.
+3. **Gate-1 experiment slice — complete.** The typed evaluator, 49-case generator, multi-view
+   aggregate, thin command, and frozen transaction are in place. It reuses annotation/intrinsic and
+   renderer models, records the inverse-crime contract, and keeps truth-side types out of estimator
+   code. The slice is net +709 physical production lines against a declared 750-line cap; the CLI is
+   144 nonblank lines and adds no solver, UI method, dependency, or untyped persisted boundary. The
+   atomic-directory publisher also replaces seven duplicated production lines in the older
+   synthetic runner. No second experiment CLI may copy this machinery.
 4. Let Gate 3 drive the next extraction: one exact-pose screen should reuse the current matcher
    worker and render/lift contracts. Extract only duplicated experiment transaction/metrics needed
    by a second new study; do not create another standalone 1,000-line CLI.
@@ -626,8 +664,10 @@ branch per experiment.
   removal/review date. At review it is promoted behind a stable interface or deleted; the compact
   result remains in this ledger.
 - No benchmark result becomes a README headline until it passes a preregistered held-out gate.
-- Each consolidation slice must delete more duplicated production code than it adds and preserve
-  artifact bytes/validators. Splitting files without lower coupling or net deletion does not count.
+- Each infrastructure-only consolidation slice must delete more duplicated production code than it
+  adds and preserve artifact bytes/validators. A bounded experiment slice instead declares its cap,
+  consumer, and stop condition; splitting files without lower coupling or bounded new evidence does
+  not count.
 
 ## Roadmap and gates
 
@@ -649,19 +689,19 @@ removed, focused tests pass, and the first production slice is net −57 lines.
 **Exit gate:** accepted claims have immutable identities and one interpretation; the changed runners
 share low-level persistence without changing artifact bytes. Met.
 
-### Phase 0B — active-method and experiment boundary (current)
+### Phase 0B — active-method and experiment boundary (complete)
 
 The UI and default benchmark now advertise only the credible horizon/baseline surface while explicit
-legacy strategy calls remain available for replay. The pure Gate-1 annotation evaluator is in place;
-the pose-perturbation case generator, command, and frozen output remain. Preserve public
-compatibility until external use is checked. Define the new freeze/reload boundary only for this new
-experiment.
+legacy strategy calls remain available for replay. The Gate-1 annotation evaluator, perturbation
+generator, multi-view command, and clean frozen output are in place. Public compatibility is
+preserved. The experiment has an explicit diagnostic-oracle truth contract and a 750-line
+production cap (actual net +709).
 
 **Exit gate:** one command runs annotation sensitivity without estimator access to truth; default
-method lists distinguish stable, experimental, and historical methods; this slice is net deleting or
-has an explicit LOC budget paid by removed duplicate code.
+surfaces expose only the stable baseline while historical methods require explicit replay; the new
+experiment is typed, bounded, and frozen. Met.
 
-### Phase 0C — reusable new-experiment contract
+### Phase 0C — reusable new-experiment contract (current)
 
 Use the exact-pose screen as the second consumer. Extract only the shared evaluator/artifact pieces,
 validate/project canonical historical results through frozen adapters, and configure remote
@@ -721,16 +761,15 @@ coverage, and the UI never presents an uncalibrated pose as confirmed.
 
 ## Current decision queue
 
-1. Finish Phase 0B: audit active method surfaces and implement the bounded annotation-sensitivity
-   evaluator; do not add another solver family.
-2. Specify the independent synthetic forward renderer and gold-real v0 protocol, including verified
+1. Specify the independent synthetic forward renderer and gold-real v0 protocol, including verified
    peaks and the empirical GPS/compass/FOV prior distribution.
-3. Run perfect-observation surfaces, then the exact-pose render-modality screen.
-4. Reproduce LandscapeAR's released descriptor on its published protocol; keep the legacy runtime
+2. Run perfect-observation surfaces, then use the exact-pose render-modality screen as the second
+   consumer that triggers only genuinely shared experiment extraction.
+3. Reproduce LandscapeAR's released descriptor on its published protocol; keep the legacy runtime
    outside the core environment.
-5. Advance at most two pairs into restricted capture and use the measured, annotation-conditioned
+4. Advance at most two pairs into restricted capture and use the measured, annotation-conditioned
    boundary to decide whether the frozen 32-mode beam is worth the full render/PnP cost.
-6. Reproduce CrossLocate/Baatz only as task-C baselines once local capture is useful, or explicitly
+5. Reproduce CrossLocate/Baatz only as task-C baselines once local capture is useful, or explicitly
    label an earlier run as a standalone retrieval study.
 
 The question for every future proposal is: **which failed gate does this test, what observation
