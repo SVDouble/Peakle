@@ -71,6 +71,16 @@ def _valid_mask(rgb: np.ndarray) -> np.ndarray:
     return lab == main
 
 
+def valid_image_mask(rgb: np.ndarray) -> np.ndarray:
+    """Return the real crop content, excluding connected near-black padding.
+
+    This is the public photo-evidence counterpart of the internal skyline mask
+    helper.  Verifiers use it to keep warped-image padding out of dense cues.
+    """
+
+    return _valid_mask(rgb)
+
+
 def _skyline_from_sky_mask(sky: np.ndarray, valid: np.ndarray) -> np.ndarray:
     """First terrain row per column, using only sky connected to the top of the valid area."""
 

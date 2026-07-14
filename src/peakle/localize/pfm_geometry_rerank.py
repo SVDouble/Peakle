@@ -23,12 +23,14 @@ from scipy.ndimage import distance_transform_edt
 
 from peakle.domain.camera import CameraExtrinsics
 from peakle.domain.terrain import TerrainMap
-from peakle.localize.gtrefine import crop_az_deg, dem_depth_image
-from peakle.localize.skyline_atlas import (
-    ATLAS_ARCHIVE_SCHEMA,
-    POSITION_SUCCESS_M,
-    YAW_SUCCESS_DEG,
+from peakle.localize.atlas_geometry import (
+    RenderedCyltanCandidateDepth,
+    render_cyltan_candidate_depth,
+    terrain_diagonal_range_m,
+    validate_frozen_cyltan_atlas,
 )
+from peakle.localize.gtrefine import dem_depth_image
+from peakle.localize.skyline_atlas import POSITION_SUCCESS_M, YAW_SUCCESS_DEG
 from peakle.localize.swissdem import Patch
 from peakle.localize.typed_outlines import TypedOutlines, extract_typed_outlines
 
@@ -280,11 +282,8 @@ class PfmGeometryRerankEvaluation:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class _RenderedCandidate:
-    atlas_candidate: dict[str, Any]
-    candidate_ray_depth: NDArray[np.float64]
-    max_range_m: float
+# Private compatibility alias retained for existing callers and focused tests.
+_RenderedCandidate = RenderedCyltanCandidateDepth
 
 
 def build_pfm_geometry_rerank(
@@ -432,52 +431,9 @@ def evaluate_pfm_geometry_rerank(
 
 
 def _validated_atlas_record(atlas_archive: Mapping[str, Any]) -> dict[str, Any]:
-    atlas = dict(atlas_archive)
-    if atlas.get("schema") != ATLAS_ARCHIVE_SCHEMA:
-        raise ValueError(f"expected {ATLAS_ARCHIVE_SCHEMA} atlas archive")
-    if atlas.get("numeric_evaluation_reference_used") is not False:
-        raise ValueError("atlas archive is not estimator-only")
-    expected_sha = atlas.get("archive_sha256")
-    if not isinstance(expected_sha, str) or len(expected_sha) != 64:
-        raise ValueError("atlas archive SHA-256 is missing or malformed")
-    basis = dict(atlas)
-    basis.pop("archive_sha256", None)
-    accepted_hashes = {_canonical_sha256(basis)}
-    # Atlas v2 originally hashed the caller's FOV numeric type before storing it
-    # as a float.  Preserve validation for the rare integer-FOV archive while
-    # still rejecting any other content change.
-    query = basis.get("query_geometry")
-    if isinstance(query, dict):
-        fov = query.get("horizontal_fov_deg")
-        if isinstance(fov, float) and fov.is_integer():
-            integer_fov_basis = dict(basis)
-            integer_query = dict(query)
-            integer_query["horizontal_fov_deg"] = int(fov)
-            integer_fov_basis["query_geometry"] = integer_query
-            accepted_hashes.add(_canonical_sha256(integer_fov_basis))
-    if expected_sha not in accepted_hashes:
-        raise ValueError("atlas archive SHA-256 does not match its contents")
-    raw_candidates = atlas.get("candidates")
-    if not isinstance(raw_candidates, list) or not raw_candidates:
-        raise ValueError("atlas candidate pool must be a non-empty list")
-    candidates = [dict(candidate) for candidate in raw_candidates]
-    query = atlas.get("query_geometry")
-    if not isinstance(query, dict) or query.get("projection") != "cyltan":
-        raise ValueError("PFM geometry reranking requires a cyltan atlas query")
-    if atlas.get("candidate_pool") != "spatially_diverse_yaw_shortlist":
-        raise ValueError("atlas candidate-pool policy is unsupported")
-    if atlas.get("candidate_count") != len(candidates):
-        raise ValueError("atlas candidate count does not match its stored pool")
-    ids = [candidate.get("candidate_id") for candidate in candidates]
-    ranks = [candidate.get("estimator_rank") for candidate in candidates]
-    if len(set(ids)) != len(ids) or any(not isinstance(value, str) or not value for value in ids):
-        raise ValueError("atlas candidate IDs must be non-empty and unique")
-    if ranks != list(range(1, len(candidates) + 1)):
-        raise ValueError("atlas candidates must retain contiguous estimator ranks")
-    atlas["candidates"] = candidates
-    if atlas.get("selected_candidate_id") != candidates[0]["candidate_id"]:
-        raise ValueError("atlas selected candidate does not match estimator rank one")
-    return atlas
+    """Compatibility wrapper for the shared frozen-atlas validator."""
+
+    return validate_frozen_cyltan_atlas(atlas_archive)
 
 
 def _render_candidate(
@@ -489,56 +445,24 @@ def _render_candidate(
     fov: float,
     config: PfmGeometryRerankConfig,
 ) -> _RenderedCandidate:
-    pose = candidate.get("pose")
-    if not isinstance(pose, Mapping):
-        raise ValueError("atlas candidate pose is missing")
-    position = pose.get("position")
-    if not isinstance(position, Mapping):
-        raise ValueError("atlas candidate position is missing")
-    east = _finite_float(position.get("east_m"), "candidate east")
-    north = _finite_float(position.get("north_m"), "candidate north")
-    up = _finite_float(position.get("up_m"), "candidate up")
-    yaw = _finite_float(pose.get("yaw_deg"), "candidate yaw")
-    roll = _finite_float(pose.get("roll_deg"), "candidate roll nuisance")
-    shift = _finite_float(candidate.get("vertical_shift_px"), "candidate vertical shift")
-    azimuths = crop_az_deg(width, fov, yaw)
-    depth, _hit, elevation_pixels, _elevation_grid, distances, _rows = dem_depth_image(
+    """Compatibility wrapper using this module's injectable depth renderer."""
+
+    return render_cyltan_candidate_depth(
         terrain,
-        up,
-        azimuths,
+        native_patch,
+        candidate,
         width,
         height,
         fov,
-        shift,
-        east,
-        north,
-        roll,
-        sub=config.subsample,
-        patch=native_patch,
+        subsample=config.subsample,
+        depth_renderer=dem_depth_image,
     )
-    if distances.size == 0 or not np.all(np.isfinite(distances)):
-        raise ValueError("candidate render returned no finite distance samples")
-    cosine = np.cos(elevation_pixels)
-    ray_depth = np.divide(
-        depth,
-        cosine,
-        out=np.full_like(depth, np.nan, dtype=np.float64),
-        where=np.isfinite(depth) & np.isfinite(cosine) & (cosine > 1e-6),
-    )
-    return _RenderedCandidate(dict(candidate), ray_depth, float(distances[-1]))
 
 
 def _terrain_diagonal_range_m(terrain: TerrainMap) -> float:
-    """Return one stable comparison cap while render limits vary by camera position."""
+    """Compatibility wrapper for the shared stable comparison cap."""
 
-    x_m = np.asarray(terrain.x_m, dtype=np.float64)
-    y_m = np.asarray(terrain.y_m, dtype=np.float64)
-    if x_m.ndim != 1 or y_m.ndim != 1 or x_m.size < 2 or y_m.size < 2:
-        raise ValueError("terrain axes must contain at least two coordinates")
-    result = float(np.hypot(x_m[-1] - x_m[0], y_m[-1] - y_m[0]))
-    if not math.isfinite(result) or result <= 0.0:
-        raise ValueError("terrain comparison range must be positive and finite")
-    return result
+    return terrain_diagonal_range_m(terrain)
 
 
 def _resample_source_depth(
