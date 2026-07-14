@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
@@ -19,6 +20,7 @@ from peakle.localize.photo_geometry_verifier import (
     build_photo_geometry_verifier,
     evaluate_photo_geometry_verifier,
     extract_photo_geometry_evidence,
+    validate_frozen_photo_geometry_verifier,
 )
 from peakle.localize.skyline_atlas import ATLAS_ARCHIVE_SCHEMA
 from peakle.segmentation import Ridge, RidgeField
@@ -133,7 +135,7 @@ def _evidence() -> PhotoGeometryEvidence:
     ridge[:, 4] = 1.0
     depth = np.tile(np.linspace(0.0, 1.0, shape[1]), (shape[0], 1))
     valid = np.ones(shape, dtype=bool)
-    source_atlas_sha = _atlas("s" * 64)["archive_sha256"]
+    source_atlas_sha = _atlas("c" * 64)["archive_sha256"]
     return PhotoGeometryEvidence(
         image_width_px=16,
         image_height_px=16,
@@ -149,8 +151,8 @@ def _evidence() -> PhotoGeometryEvidence:
             "evidence_generated_at_reference_pose": False,
             "source_atlas_sha256": source_atlas_sha,
         },
-        observed_skyline_sha256="s" * 64,
-        photo_rgb_sha256="r" * 64,
+        observed_skyline_sha256="c" * 64,
+        photo_rgb_sha256="1" * 64,
         edge_response_sha256="e" * 64,
         relative_depth_sha256="d" * 64,
         comparison_relative_depth_sha256=module._array_sha256(
@@ -204,6 +206,31 @@ def _weak_evidence() -> PhotoGeometryEvidence:
         usable=False,
         rejection_reasons=("insufficient_internal_ridge_support", "insufficient_internal_ridge_span"),
     )
+
+
+def _frozen_verifier_record(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    monkeypatch.setattr(module, "render_cyltan_candidate_depth", lambda *args, **kwargs: _rendered(args[2]))
+    evidence = _evidence()
+    return build_photo_geometry_verifier(
+        _terrain(),
+        None,
+        evidence,
+        _atlas(evidence.observed_skyline_sha256),
+        config=_config(),
+    ).to_record()
+
+
+def _rehash_verifier_record(record: dict[str, Any]) -> None:
+    basis = dict(record)
+    basis.pop("archive_sha256", None)
+    record["archive_sha256"] = module._canonical_sha256(basis)
+
+
+def _set_record_path(record: dict[str, Any], path: tuple[str | int, ...], value: Any) -> None:
+    target: Any = record
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = value
 
 
 def test_extracts_photo_evidence_once_with_pinned_models(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,6 +292,75 @@ def test_extracts_photo_evidence_once_with_pinned_models(monkeypatch: pytest.Mon
     assert evidence.relative_depth_span_p90_p10 > 0.1
     assert evidence.usable is True
     assert evidence.to_record()["reference_depth_used"] is False
+
+
+def test_validates_and_detaches_frozen_photo_verifier_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _frozen_verifier_record(monkeypatch)
+
+    validated = validate_frozen_photo_geometry_verifier(record)
+
+    assert validated == record
+    record["candidates"][0]["atlas_candidate"]["pose"]["yaw_deg"] = 999.0
+    assert validated["candidates"][0]["atlas_candidate"]["pose"]["yaw_deg"] != 999.0
+
+    tampered = deepcopy(validated)
+    tampered["candidates"][0]["fusion_score"] = 0.99
+    with pytest.raises(ValueError, match="archive SHA-256"):
+        validate_frozen_photo_geometry_verifier(tampered)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        (("numeric_evaluation_reference_used",), True, "truth-boundary"),
+        (("evidence", "source_atlas_sha256"), "0" * 64, "different source atlas"),
+        (("evidence", "observation", "track"), "pfm_oracle", "photo_auto"),
+        (("candidates", 0, "reference_truth"), {"east_m": 1.0}, "photo verifier candidate fields"),
+        (("candidates", 0, "atlas_candidate", "candidate_id"), "unknown", "original atlas ID"),
+        (("candidates", 0, "beam_rank"), 2, "beam ranks"),
+        (("component_winners", "skyline"), "unknown", "component-winner"),
+        (("fold_winner_candidate_ids", 0), "unknown", "fold-winner"),
+        (("prior_position_competitor_id",), "unknown", "prior-position"),
+        (("decision", "rival_candidate_id"), "unknown", "rival reference"),
+        (("decision", "returned_candidate_id"), None, "selected.*inconsistent"),
+    ],
+)
+def test_rejects_rehashed_truth_rank_and_reference_mutations(
+    monkeypatch: pytest.MonkeyPatch,
+    path: tuple[str | int, ...],
+    value: Any,
+    match: str,
+) -> None:
+    record = _frozen_verifier_record(monkeypatch)
+    _set_record_path(record, path, value)
+    _rehash_verifier_record(record)
+
+    with pytest.raises(ValueError, match=match):
+        validate_frozen_photo_geometry_verifier(record)
+
+
+def test_rejects_rehashed_noncontiguous_original_ranks_and_beam_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _frozen_verifier_record(monkeypatch)
+    record["candidates"][0]["original_estimator_rank"] = 9
+    record["candidates"][0]["atlas_candidate"]["estimator_rank"] = 9
+    _rehash_verifier_record(record)
+    with pytest.raises(ValueError, match="complete contiguous atlas ranks"):
+        validate_frozen_photo_geometry_verifier(record)
+
+    record = _frozen_verifier_record(monkeypatch)
+    record["beam_candidate_ids"].reverse()
+    for candidate in record["candidates"]:
+        candidate_id = candidate["candidate_id"]
+        candidate["beam_rank"] = (
+            record["beam_candidate_ids"].index(candidate_id) + 1
+            if candidate_id in record["beam_candidate_ids"]
+            else None
+        )
+    _rehash_verifier_record(record)
+    with pytest.raises(ValueError, match="beam IDs, order, or size"):
+        validate_frozen_photo_geometry_verifier(record)
 
 
 def test_pfm_label_cannot_cross_the_photo_observation_boundary(monkeypatch: pytest.MonkeyPatch) -> None:

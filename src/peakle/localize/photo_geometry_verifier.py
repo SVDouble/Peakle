@@ -34,7 +34,7 @@ from peakle.localize.atlas_geometry import (
     validate_frozen_cyltan_atlas,
 )
 from peakle.localize.extract import valid_image_mask
-from peakle.localize.skyline_atlas import POSITION_SUCCESS_M, YAW_SUCCESS_DEG
+from peakle.localize.skyline_atlas import ATLAS_CANDIDATE_SCHEMA, POSITION_SUCCESS_M, YAW_SUCCESS_DEG
 from peakle.localize.swissdem import Patch
 from peakle.localize.typed_outlines import TypedOutlines, extract_typed_outlines
 from peakle.segmentation import RidgeField, extract_ridges
@@ -729,6 +729,188 @@ def build_photo_geometry_verifier(
     )
 
 
+def validate_frozen_photo_geometry_verifier(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and detach a serialized truth-blind verifier archive."""
+
+    archive = deepcopy(dict(record))
+    _require_record_keys(
+        archive,
+        {
+            "schema",
+            "experimental",
+            "production_eligible",
+            "photo_observable_evidence_only",
+            "source_depth_reference_used",
+            "numeric_evaluation_reference_used",
+            "config",
+            "source_atlas_sha256",
+            "query_geometry",
+            "native_patch_supplied",
+            "terrain_surface",
+            "evidence",
+            "candidate_pool",
+            "candidate_count",
+            "ranked_winner_candidate_id",
+            "component_winners",
+            "fold_winner_candidate_ids",
+            "prior_position_competitor_id",
+            "beam_policy",
+            "beam_candidate_ids",
+            "decision",
+            "archive_sha256",
+            "candidates",
+        },
+        "photo verifier archive",
+    )
+    if archive.get("schema") != PHOTO_VERIFIER_ARCHIVE_SCHEMA:
+        raise ValueError(f"expected {PHOTO_VERIFIER_ARCHIVE_SCHEMA} photo verifier archive")
+    expected_flags = {
+        "experimental": True,
+        "production_eligible": False,
+        "photo_observable_evidence_only": True,
+        "source_depth_reference_used": False,
+        "numeric_evaluation_reference_used": False,
+    }
+    if any(archive.get(name) is not value for name, value in expected_flags.items()):
+        raise ValueError("photo verifier archive truth-boundary flags are invalid")
+    expected_sha = _record_sha256(archive.get("archive_sha256"), "photo verifier archive")
+    hash_basis = dict(archive)
+    hash_basis.pop("archive_sha256")
+    if _canonical_sha256(hash_basis) != expected_sha:
+        raise ValueError("photo verifier archive SHA-256 does not match its contents")
+
+    source_atlas_sha = _record_sha256(archive.get("source_atlas_sha256"), "source atlas")
+    evidence = _record_mapping(archive.get("evidence"), "photo verifier evidence")
+    _require_record_keys(
+        evidence,
+        {
+            "source",
+            "reference_depth_used",
+            "numeric_reference_pose_used",
+            "shape",
+            "comparison_shape",
+            "extraction_config_sha256",
+            "source_atlas_sha256",
+            "observation",
+            "observed_skyline_sha256",
+            "photo_rgb_sha256",
+            "edge_response_sha256",
+            "relative_depth_sha256",
+            "comparison_relative_depth_sha256",
+            "valid_mask_sha256",
+            "terrain_mask_sha256",
+            "ridge_weights_sha256",
+            "models",
+            "quality",
+        },
+        "photo verifier evidence",
+    )
+    if (
+        evidence.get("source") != "photo_rgb_only"
+        or evidence.get("reference_depth_used") is not False
+        or evidence.get("numeric_reference_pose_used") is not False
+    ):
+        raise ValueError("photo verifier evidence is not photo-only")
+    if evidence.get("source_atlas_sha256") != source_atlas_sha:
+        raise ValueError("photo verifier evidence names a different source atlas")
+    observation = _record_mapping(evidence.get("observation"), "photo observation provenance")
+    if _validated_observation_provenance(observation) != observation:
+        raise ValueError("photo observation provenance is not canonical")
+    if observation.get("source_atlas_sha256") != source_atlas_sha:
+        raise ValueError("photo observation provenance names a different source atlas")
+    models = _record_mapping(evidence.get("models"), "photo evidence models")
+    _require_record_keys(models, {"edge", "depth"}, "photo evidence models")
+    for kind in ("edge", "depth"):
+        _validate_frozen_photo_model(models.get(kind), kind)
+
+    if archive.get("candidate_pool") != "complete_frozen_photo_atlas_pool":
+        raise ValueError("photo verifier candidate-pool policy is unsupported")
+    candidates = archive.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("photo verifier candidates must be a non-empty list")
+    if archive.get("candidate_count") != len(candidates):
+        raise ValueError("photo verifier candidate count does not match its pool")
+    ids: list[str] = []
+    original_ranks: list[int] = []
+    candidate_records: list[dict[str, Any]] = []
+    for verifier_rank, value in enumerate(candidates, start=1):
+        candidate = _validate_frozen_photo_candidate(value)
+        if candidate.get("schema") != PHOTO_VERIFIER_CANDIDATE_SCHEMA:
+            raise ValueError("photo verifier candidate schema is unsupported")
+        candidate_id = candidate.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise ValueError("photo verifier candidate ID must be non-empty")
+        original_rank = _positive_int(candidate.get("original_estimator_rank"), "original estimator rank")
+        if candidate.get("verifier_rank") != verifier_rank:
+            raise ValueError("photo verifier candidates must have contiguous verifier ranks in order")
+        atlas_candidate = _record_mapping(candidate.get("atlas_candidate"), "nested atlas candidate")
+        if atlas_candidate.get("schema") != ATLAS_CANDIDATE_SCHEMA:
+            raise ValueError("nested atlas candidate schema is unsupported")
+        if (
+            atlas_candidate.get("candidate_id") != candidate_id
+            or atlas_candidate.get("estimator_rank") != original_rank
+        ):
+            raise ValueError("photo verifier candidate does not preserve its original atlas ID and rank")
+        ids.append(candidate_id)
+        original_ranks.append(original_rank)
+        candidate_records.append(candidate)
+    if len(set(ids)) != len(ids):
+        raise ValueError("photo verifier candidate IDs must be unique")
+    if sorted(original_ranks) != list(range(1, len(candidates) + 1)):
+        raise ValueError("photo verifier candidates must preserve the complete contiguous atlas ranks")
+    known_ids = set(ids)
+    winner_id = ids[0]
+    if archive.get("ranked_winner_candidate_id") != winner_id:
+        raise ValueError("photo verifier ranked winner does not match verifier rank one")
+
+    config = _record_mapping(archive.get("config"), "photo verifier config")
+    beam_config = _record_mapping(config.get("beam"), "photo verifier beam config")
+    beam_size = _positive_int(beam_config.get("size"), "photo verifier beam size")
+    beam_ids = archive.get("beam_candidate_ids")
+    if (
+        archive.get("beam_policy") != "greedy_position_yaw_basin_nms"
+        or not isinstance(beam_ids, list)
+        or not beam_ids
+        or len(beam_ids) > beam_size
+        or len(set(beam_ids)) != len(beam_ids)
+        or any(candidate_id not in known_ids for candidate_id in beam_ids)
+        or beam_ids[0] != winner_id
+    ):
+        raise ValueError("photo verifier beam IDs, order, or size are invalid")
+    beam_rank_by_id = {candidate_id: rank for rank, candidate_id in enumerate(beam_ids, start=1)}
+    if any(
+        candidate.get("beam_rank") != beam_rank_by_id.get(candidate_id)
+        for candidate_id, candidate in zip(ids, candidate_records, strict=True)
+    ):
+        raise ValueError("photo verifier candidate beam ranks are inconsistent")
+
+    component_winners = _record_mapping(archive.get("component_winners"), "component winners")
+    _require_record_keys(
+        component_winners,
+        {"fusion", "skyline", "symmetric_outline", "ordinal_depth", "terrain_overlap"},
+        "component winners",
+    )
+    if component_winners.get("fusion") != winner_id or any(
+        candidate_id not in known_ids for candidate_id in component_winners.values()
+    ):
+        raise ValueError("photo verifier component-winner references are invalid")
+    decision_config = _record_mapping(config.get("decision"), "photo verifier decision config")
+    stability_folds = _positive_int(decision_config.get("stability_folds"), "stability folds")
+    if any(len(candidate["fold_fusion_scores"]) != stability_folds for candidate in candidate_records):
+        raise ValueError("photo verifier candidate fold-score count is inconsistent")
+    fold_winners = archive.get("fold_winner_candidate_ids")
+    if (
+        not isinstance(fold_winners, list)
+        or len(fold_winners) != stability_folds
+        or any(candidate_id not in known_ids for candidate_id in fold_winners)
+    ):
+        raise ValueError("photo verifier fold-winner references are invalid")
+    if archive.get("prior_position_competitor_id") not in known_ids:
+        raise ValueError("photo verifier prior-position competitor reference is invalid")
+    _validate_frozen_photo_decision(archive.get("decision"), winner_id, known_ids, stability_folds)
+    return archive
+
+
 def evaluate_photo_geometry_verifier(
     archive: PhotoGeometryVerifierArchive,
     truth: CameraExtrinsics,
@@ -1231,6 +1413,179 @@ def _effective_samples(weights: NDArray[np.float64]) -> float:
 def _horizontal_bin_coverage(mask: NDArray[np.bool_], bins: int) -> int:
     edges = np.linspace(0, mask.shape[1], bins + 1, dtype=int)
     return sum(bool(mask[:, edges[index] : edges[index + 1]].any()) for index in range(bins))
+
+
+def _validate_frozen_photo_candidate(value: Any) -> dict[str, Any]:
+    candidate = _record_mapping(value, "photo verifier candidate")
+    _require_record_keys(
+        candidate,
+        {
+            "schema",
+            "candidate_id",
+            "original_estimator_rank",
+            "verifier_rank",
+            "beam_rank",
+            "atlas_candidate",
+            "terms",
+            "fusion_score",
+            "fold_fusion_scores",
+        },
+        "photo verifier candidate",
+    )
+    fold_scores = candidate.get("fold_fusion_scores")
+    if not isinstance(fold_scores, list):
+        raise ValueError("photo verifier candidate fold scores must be a list")
+
+    terms = _record_mapping(candidate.get("terms"), "photo verifier candidate terms")
+    _require_record_keys(
+        terms,
+        {
+            "skyline_loss",
+            "symmetric_outline_loss",
+            "photo_to_dem_outline_loss",
+            "dem_to_photo_outline_loss",
+            "ordinal_depth_loss",
+            "terrain_overlap_loss",
+            "terrain_overlap_f1",
+            "common_depth_px",
+            "common_terrain_fraction",
+            "photo_terrain_px",
+            "candidate_terrain_px",
+            "ordinal_cells",
+            "candidate_outline_px",
+            "families",
+        },
+        "photo verifier candidate terms",
+    )
+    families = _record_mapping(terms.get("families"), "photo verifier candidate families")
+    _require_record_keys(families, {"occlusion", "rib", "couloir"}, "photo verifier candidate families")
+    for family in ("occlusion", "rib", "couloir"):
+        family_record = _record_mapping(families.get(family), f"photo verifier {family} family")
+        _require_record_keys(
+            family_record,
+            {"candidate_px", "dem_to_photo_loss"},
+            f"photo verifier {family} family",
+        )
+
+    atlas_candidate = _record_mapping(candidate.get("atlas_candidate"), "nested atlas candidate")
+    _require_record_keys(
+        atlas_candidate,
+        {
+            "schema",
+            "candidate_id",
+            "estimator_rank",
+            "grid",
+            "pose",
+            "vertical_shift_px",
+            "vertical_slope_px_per_column",
+            "estimator_score",
+            "ground_source",
+        },
+        "nested atlas candidate",
+    )
+    grid = _record_mapping(atlas_candidate.get("grid"), "nested atlas candidate grid")
+    _require_record_keys(grid, {"row", "column", "yaw_index"}, "nested atlas candidate grid")
+    pose = _record_mapping(atlas_candidate.get("pose"), "nested atlas candidate pose")
+    _require_record_keys(pose, {"position", "yaw_deg", "pitch_deg", "roll_deg"}, "nested atlas candidate pose")
+    position = _record_mapping(pose.get("position"), "nested atlas candidate position")
+    _require_record_keys(position, {"east_m", "north_m", "up_m"}, "nested atlas candidate position")
+    return candidate
+
+
+def _validate_frozen_photo_model(value: Any, kind: str) -> None:
+    model = _record_mapping(value, f"photo {kind} model provenance")
+    name = model.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"photo {kind} model name is missing")
+    _validated_model_provenance(model, name, kind)
+    _record_sha256(model.get("aggregate_sha256"), f"photo {kind} model")
+    base = {"name", "aggregate_sha256", "offline", "input"}
+    keys = set(model)
+    if keys == base:
+        return
+    if keys == base | {"synthetic_authoritative_channel"}:
+        if model.get("synthetic_authoritative_channel") is not True:
+            raise ValueError(f"photo {kind} synthetic model audit flag must be true")
+        return
+    if keys != base | {"source", "files"}:
+        raise ValueError(f"photo {kind} model provenance fields are unsupported")
+    if not isinstance(model.get("source"), Mapping):
+        raise ValueError(f"photo {kind} model source is missing")
+    files = model.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError(f"photo {kind} model file inventory is missing")
+
+
+def _validate_frozen_photo_decision(
+    value: Any,
+    winner_id: str,
+    known_ids: set[str],
+    stability_folds: int,
+) -> None:
+    decision = _record_mapping(value, "photo verifier decision")
+    _require_record_keys(
+        decision,
+        {
+            "status",
+            "returned_candidate_id",
+            "ranked_winner_candidate_id",
+            "rival_candidate_id",
+            "rival_margin",
+            "stable_folds",
+            "reasons",
+            "fallback",
+            "calibrated",
+        },
+        "photo verifier decision",
+    )
+    if decision.get("ranked_winner_candidate_id") != winner_id or decision.get("calibrated") is not False:
+        raise ValueError("photo verifier decision winner or calibration flag is invalid")
+    rival_id = decision.get("rival_candidate_id")
+    if rival_id is not None and (rival_id not in known_ids or rival_id == winner_id):
+        raise ValueError("photo verifier decision rival reference is invalid")
+    rival_margin = decision.get("rival_margin")
+    if rival_margin is not None:
+        _finite_float(rival_margin, "photo verifier rival margin")
+    stable_folds = decision.get("stable_folds")
+    if isinstance(stable_folds, bool) or not isinstance(stable_folds, int) or not 0 <= stable_folds <= stability_folds:
+        raise ValueError("photo verifier decision stable-fold count is invalid")
+    reasons = decision.get("reasons")
+    if not isinstance(reasons, list) or any(not isinstance(reason, str) or not reason for reason in reasons):
+        raise ValueError("photo verifier decision reasons are invalid")
+    status = decision.get("status")
+    if status == "selected":
+        if reasons or decision.get("returned_candidate_id") != winner_id or decision.get("fallback") is not None:
+            raise ValueError("selected photo verifier decision is inconsistent")
+    elif status == "abstained":
+        if (
+            not reasons
+            or decision.get("returned_candidate_id") is not None
+            or decision.get("fallback") != "retain_supplied_prior_outside_this_archive"
+        ):
+            raise ValueError("abstained photo verifier decision is inconsistent")
+    else:
+        raise ValueError("photo verifier decision status is unsupported")
+
+
+def _record_mapping(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a mapping")
+    return dict(value)
+
+
+def _require_record_keys(record: Mapping[str, Any], expected: set[str], name: str) -> None:
+    if set(record) != expected:
+        raise ValueError(f"{name} fields differ from {PHOTO_VERIFIER_ARCHIVE_SCHEMA}")
+
+
+def _record_sha256(value: Any, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} SHA-256 is missing or malformed")
+    return value
 
 
 def _validated_model_provenance(record: Mapping[str, Any], expected_name: str, kind: str) -> dict[str, Any]:
