@@ -6,6 +6,7 @@ import math
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -49,8 +50,10 @@ from peakle.localize.render_match_pnp import (
     MATCH_SELECTION_SCHEMA,
     QUERY_PADDING_MASK_METHOD,
     QUERY_PADDING_MASK_SCHEMA,
+    RENDER_SEED_BATCH_SCHEMA,
     RENDER_SEED_SCHEMA,
     CandidateValidationConfig,
+    IdentifiedRenderSeed,
     RenderMatchConfig,
     RenderSeed,
     _balanced_match_cap_indices,
@@ -64,6 +67,7 @@ from peakle.localize.render_match_pnp import (
     _validate_candidate_pose,
     render_fan_yaws,
     solve_render_match_pose,
+    solve_render_match_pose_batch,
 )
 from peakle.localize.swissdem import Patch
 from peakle.rendering.pinhole import camera_axes
@@ -1903,6 +1907,342 @@ def test_explicit_render_seed_places_fan_independently_of_pose_prior(scene: Scen
     assert seed_record["position"] == seed_position.model_dump(mode="json")
     assert result.diagnostics["pose_prior"]["position"] == prior.position.model_dump(mode="json")
     assert result.diagnostics["pose_prior"]["position_regularization_enabled"] is False
+
+
+def test_exact_heading_seed_batch_is_one_ordered_match_call_and_never_stops_early(
+    scene: Scene,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_by_east = {
+        100.0: "candidate-a",
+        200.0: "candidate-b",
+        300.0: "candidate-c",
+    }
+    marker_by_candidate = {candidate_id: index for index, candidate_id in enumerate(candidate_by_east.values(), 1)}
+    events: list[str] = []
+    batch_marker_orders: list[tuple[int, ...]] = []
+    pnp_calls: list[tuple[str, int, PosePrior, CameraExtrinsics]] = []
+    validation_calls: list[str] = []
+    fan_call_count = 0
+
+    def candidate_id(position: LocalPoint) -> str:
+        return candidate_by_east[position.east_m]
+
+    class RecordingRenderer(TerrainViewRenderer):
+        def render(self, terrain, intrinsics, extrinsics, **kwargs):
+            del terrain, kwargs
+            identifier = candidate_id(extrinsics.position)
+            stage = "initial" if intrinsics.width_px == 64 else "validation"
+            events.append(f"render-{stage}:{identifier}:{extrinsics.yaw_deg}")
+            height = intrinsics.height_px
+            width = intrinsics.width_px
+            marker = marker_by_candidate[identifier]
+            return TerrainRenderBundle(
+                rgb=np.full((height, width, 3), marker, dtype=np.uint8),
+                forward_depth_m=np.full((height, width), 1_000.0),
+                world_xyz_m=np.zeros((height, width, 3)),
+                world_normals=np.zeros((height, width, 3)),
+                terrain_mask=np.ones((height, width), dtype=np.bool_),
+                appearance_mask=np.ones((height, width), dtype=np.bool_),
+                skyline_profile=np.zeros(width),
+                intrinsics=intrinsics,
+                extrinsics=extrinsics,
+                modality="hillshade",
+                provenance={"candidate_id": identifier, "stage": stage},
+            )
+
+    render_x = np.tile(np.linspace(5.0, 58.0, 8), 4)
+    render_y = np.repeat(np.linspace(5.0, 58.0, 4), 8)
+    query_x = np.tile(np.linspace(5.0, 74.0, 8), 4)
+    query_y = np.repeat(np.linspace(5.0, 54.0, 4), 8)
+
+    class OneBatchMatcher:
+        def identity(self):
+            return {"id": "one-batch-test"}
+
+        def match_many(self, _query, renders):
+            markers = tuple(int(render[0, 0, 0]) for render in renders)
+            batch_marker_orders.append(markers)
+            events.append("match-many:" + ",".join(map(str, markers)))
+            # The production batch must isolate its frozen query/render inputs
+            # even from an ill-behaved in-process matcher.
+            _query.fill(0)
+            for render in renders:
+                render.fill(0)
+            return [
+                MatchSet(
+                    query_xy_px=np.column_stack((query_x, query_y)),
+                    render_xy_px=np.column_stack((render_x, render_y)),
+                    confidence=np.ones(len(render_x)),
+                )
+                for _render in renders
+            ]
+
+        def match(self, query_rgb, render_rgb):
+            del query_rgb, render_rgb
+            raise AssertionError("the exact-heading batch must not use scalar matching")
+
+    prior_pose = _placed_pose(scene)
+    prior = PosePrior(
+        position=prior_pose.position,
+        yaw_deg=prior_pose.yaw_deg,
+        pitch_deg=prior_pose.pitch_deg,
+        horizontal_sigma_m=80.0,
+        vertical_sigma_m=40.0,
+        yaw_sigma_deg=12.0,
+        pitch_sigma_deg=7.0,
+    )
+    hypotheses = (
+        IdentifiedRenderSeed(
+            "candidate-a",
+            RenderSeed(LocalPoint(east_m=100.0, north_m=-500.0, up_m=1_500.0), 10.0, -2.0),
+        ),
+        IdentifiedRenderSeed(
+            "candidate-b",
+            RenderSeed(LocalPoint(east_m=200.0, north_m=-600.0, up_m=1_600.0), 181.0, 3.0),
+        ),
+        IdentifiedRenderSeed(
+            "candidate-c",
+            RenderSeed(LocalPoint(east_m=300.0, north_m=-700.0, up_m=1_700.0), -40.0, 1.0),
+        ),
+    )
+    real_match_image_fan = render_match_module.match_image_fan
+
+    def recording_match_image_fan(matcher, query, renders):
+        nonlocal fan_call_count
+        fan_call_count += 1
+        return real_match_image_fan(matcher, query, renders)
+
+    def solved_fit_pose_ransac(*args, **kwargs):
+        initial = args[4]
+        fit_prior = kwargs["prior"]
+        fit_config = kwargs["config"]
+        assert isinstance(initial, CameraExtrinsics)
+        assert isinstance(fit_prior, PosePrior)
+        assert isinstance(fit_config, PoseRansacConfig)
+        identifier = candidate_id(initial.position)
+        events.append(f"pnp:{identifier}")
+        pnp_calls.append((identifier, fit_config.seed, fit_prior, initial))
+        count = len(args[0])
+        return PoseRansacResult(
+            status="solved",
+            extrinsics=initial,
+            inlier_mask=np.ones(count, dtype=np.bool_),
+            reprojection_error_px=np.zeros(count),
+            diagnostics={
+                "inliers": count,
+                "inlier_ratio": 1.0,
+                "median_reprojection_error_px": 0.0,
+            },
+        )
+
+    def recording_candidate_validation(source, *_args, **_kwargs):
+        identifier = candidate_id(source.render.extrinsics.position)
+        events.append(f"validate:{identifier}")
+        validation_calls.append(identifier)
+        passed = identifier != "candidate-a"
+        return {
+            "schema": CANDIDATE_VALIDATION_SCHEMA,
+            "enabled": True,
+            "passed": passed,
+            "failures": [] if passed else ["deliberate_first_candidate_rejection"],
+            "uses_reference_truth": False,
+        }
+
+    monkeypatch.setattr(render_match_module, "match_image_fan", recording_match_image_fan)
+    monkeypatch.setattr(render_match_module, "fit_pose_ransac", solved_fit_pose_ransac)
+    monkeypatch.setattr(render_match_module, "_validate_candidate_pose", recording_candidate_validation)
+    camera = CameraModel(width_px=80, height_px=60, horizontal_fov_deg=60.0)
+    config = RenderMatchConfig(
+        render_width_px=64,
+        render_height_px=64,
+        orientation_prior_half_span_deg=0.0,
+        refinement_passes=0,
+    )
+    query = np.full((60, 80, 3), 128, dtype=np.uint8)
+
+    first = solve_render_match_pose_batch(
+        scene.terrain,
+        query,
+        camera,
+        prior,
+        OneBatchMatcher(),
+        hypotheses,
+        use_position_prior=True,
+        use_orientation_prior=False,
+        config=config,
+        seed=99,
+        renderer=RecordingRenderer(),
+    )
+
+    assert first.ordered_candidate_ids == ("candidate-a", "candidate-b", "candidate-c")
+    assert [item.result.status for item in first.results] == ["abstained", "solved", "solved"]
+    assert batch_marker_orders == [(1, 2, 3)]
+    assert fan_call_count == 1
+    assert events[:4] == [
+        "render-initial:candidate-a:10.0",
+        "render-initial:candidate-b:-179.0",
+        "render-initial:candidate-c:-40.0",
+        "match-many:1,2,3",
+    ]
+    assert [item[0] for item in pnp_calls] == ["candidate-a", "candidate-b", "candidate-c"]
+    assert validation_calls == ["candidate-a", "candidate-b", "candidate-c"]
+    stable_fit_prior = pnp_calls[0][2]
+    assert stable_fit_prior is not prior
+    assert stable_fit_prior.model_dump(mode="json") == prior.model_dump(mode="json")
+    assert all(fit_prior is stable_fit_prior for _, _, fit_prior, _ in pnp_calls)
+    assert [initial.position for _, _, _, initial in pnp_calls] == [
+        hypothesis.render_seed.position for hypothesis in hypotheses
+    ]
+    assert all(initial.position != fit_prior.position for _, _, fit_prior, initial in pnp_calls)
+    assert [initial.pitch_deg for _, _, _, initial in pnp_calls] == pytest.approx([-2.0, 3.0, 1.0])
+    assert np.all(query == 128)
+    assert first.provenance["schema"] == RENDER_SEED_BATCH_SCHEMA
+    assert first.provenance["matching"] == {
+        "match_image_fan_invocations": 1,
+        "matcher_match_many_invocations": 1,
+        "render_count_in_single_invocation": 3,
+        "all_seed_renders_completed_before_invocation": True,
+        "scalar_fallback_allowed": False,
+        "matcher_received_detached_mutable_rgb_copies": True,
+    }
+    assert first.provenance["shared_pose_prior"]["position"] == prior.position.model_dump(mode="json")
+    assert first.provenance["exact_heading"]["yaw_fan_enabled"] is False
+    first_pnp_seeds = {identifier: rng_seed for identifier, rng_seed, _, _ in pnp_calls}
+    first_candidate_seeds = {item.candidate_id: item.rng_seed for item in first.results}
+
+    events.clear()
+    pnp_calls.clear()
+    validation_calls.clear()
+    reordered = solve_render_match_pose_batch(
+        scene.terrain,
+        query,
+        camera,
+        prior,
+        OneBatchMatcher(),
+        (hypotheses[2], hypotheses[0], hypotheses[1]),
+        use_position_prior=True,
+        use_orientation_prior=False,
+        config=config,
+        seed=99,
+        renderer=RecordingRenderer(),
+    )
+
+    assert reordered.ordered_candidate_ids == ("candidate-c", "candidate-a", "candidate-b")
+    assert batch_marker_orders[-1] == (3, 1, 2)
+    assert fan_call_count == 2
+    assert {identifier: rng_seed for identifier, rng_seed, _, _ in pnp_calls} == first_pnp_seeds
+    assert {item.candidate_id: item.rng_seed for item in reordered.results} == first_candidate_seeds
+    assert {item.candidate_id: item for item in reordered.results} == {
+        item.candidate_id: item for item in first.results
+    }
+    reordered_stable_prior = pnp_calls[0][2]
+    assert reordered_stable_prior is not prior
+    assert all(fit_prior is reordered_stable_prior for _, _, fit_prior, _ in pnp_calls)
+    assert np.all(query == 128)
+
+
+def test_exact_heading_seed_batch_rejects_invalid_identity_fans_refinement_and_scalar_matchers(
+    scene: Scene,
+) -> None:
+    pose = _placed_pose(scene)
+    prior = PosePrior(
+        position=pose.position,
+        yaw_deg=pose.yaw_deg,
+        pitch_deg=pose.pitch_deg,
+        horizontal_sigma_m=50.0,
+        vertical_sigma_m=30.0,
+        yaw_sigma_deg=10.0,
+        pitch_sigma_deg=5.0,
+    )
+    seed = RenderSeed(position=pose.position, yaw_deg=pose.yaw_deg, pitch_deg=pose.pitch_deg)
+    valid = IdentifiedRenderSeed("candidate", seed)
+    query = np.full((60, 80, 3), 128, dtype=np.uint8)
+    camera = CameraModel(width_px=80, height_px=60, horizontal_fov_deg=60.0)
+
+    class NeverBatchMatcher:
+        def identity(self):
+            return {"id": "must-not-run"}
+
+        def match_many(self, _query, _renders):
+            raise AssertionError("invalid batches must fail before matching")
+
+        def match(self, query_rgb, render_rgb):
+            del query_rgb, render_rgb
+            raise AssertionError("invalid batches must fail before matching")
+
+    base_config = RenderMatchConfig(
+        render_width_px=64,
+        render_height_px=64,
+        orientation_prior_half_span_deg=0.0,
+        refinement_passes=0,
+    )
+    invalid_batches: tuple[tuple[IdentifiedRenderSeed, ...], ...] = (
+        (),
+        (IdentifiedRenderSeed("", seed),),
+        (IdentifiedRenderSeed(" candidate", seed),),
+        (valid, IdentifiedRenderSeed("candidate", seed)),
+        (cast(IdentifiedRenderSeed, object()),),
+    )
+    for invalid in invalid_batches:
+        with pytest.raises(ValueError):
+            solve_render_match_pose_batch(
+                scene.terrain,
+                query,
+                camera,
+                prior,
+                NeverBatchMatcher(),
+                invalid,
+                use_position_prior=True,
+                use_orientation_prior=True,
+                config=base_config,
+            )
+
+    with pytest.raises(ValueError, match="refinement_passes=0"):
+        solve_render_match_pose_batch(
+            scene.terrain,
+            query,
+            camera,
+            prior,
+            NeverBatchMatcher(),
+            (valid,),
+            use_position_prior=True,
+            use_orientation_prior=True,
+            config=replace(base_config, refinement_passes=1),
+        )
+    with pytest.raises(ValueError, match="cannot render a yaw fan"):
+        solve_render_match_pose_batch(
+            scene.terrain,
+            query,
+            camera,
+            prior,
+            NeverBatchMatcher(),
+            (valid,),
+            use_position_prior=True,
+            use_orientation_prior=True,
+            config=replace(base_config, orientation_prior_half_span_deg=30.0),
+        )
+
+    class ScalarOnlyMatcher:
+        def identity(self):
+            return {"id": "scalar-only"}
+
+        def match(self, query_rgb, render_rgb):
+            del query_rgb, render_rgb
+            raise AssertionError("scalar fallback must never run")
+
+    with pytest.raises(ValueError, match="callable match_many"):
+        solve_render_match_pose_batch(
+            scene.terrain,
+            query,
+            camera,
+            prior,
+            ScalarOnlyMatcher(),
+            (valid,),
+            use_position_prior=True,
+            use_orientation_prior=True,
+            config=base_config,
+        )
 
 
 def test_render_seed_initializes_pnp_but_prior_still_anchors_regularization_and_clearance(

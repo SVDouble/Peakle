@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -52,6 +53,8 @@ _QUERY_PADDING_FRINGE_MAX_CHANNEL = 24
 _QUERY_PADDING_MIN_COMPONENT_PIXELS = 16
 _QUERY_PADDING_MIN_COMPONENT_FRACTION = 0.0005
 RENDER_SEED_SCHEMA = "peakle_render_match_seed_v1"
+RENDER_SEED_BATCH_SCHEMA = "peakle_render_match_seed_batch_v1"
+RENDER_SEED_BATCH_METHOD = "ordered_exact_heading_single_match_batch_round_zero_v1"
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,60 @@ class RenderSeed:
             "render_pitch_source": "render_config.render_pitch_deg",
             "uses_reference_truth": False,
         }
+
+
+@dataclass(frozen=True)
+class IdentifiedRenderSeed:
+    """One stable candidate identity paired with its truth-blind render seed."""
+
+    candidate_id: str
+    render_seed: RenderSeed
+
+    def validate(self) -> None:
+        if not isinstance(self.candidate_id, str):
+            raise ValueError("render-seed candidate ID must be a string")
+        if not self.candidate_id or self.candidate_id != self.candidate_id.strip():
+            raise ValueError("render-seed candidate ID must be non-empty without surrounding whitespace")
+        if len(self.candidate_id) > 256 or "\0" in self.candidate_id:
+            raise ValueError("render-seed candidate ID must be at most 256 characters and contain no NUL")
+        if not isinstance(self.render_seed, RenderSeed):
+            raise ValueError("identified render-seed hypothesis must contain a RenderSeed")
+        self.render_seed.validate()
+
+    def frozen_copy(self) -> IdentifiedRenderSeed:
+        """Detach nested mutable model state while preserving the caller's order."""
+
+        self.validate()
+        return IdentifiedRenderSeed(
+            candidate_id=self.candidate_id,
+            render_seed=RenderSeed(
+                position=self.render_seed.position.model_copy(deep=True),
+                yaw_deg=self.render_seed.yaw_deg,
+                pitch_deg=self.render_seed.pitch_deg,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RenderMatchSeedResult:
+    """Round-zero pose result associated with exactly one identified seed."""
+
+    candidate_id: str
+    render_seed: RenderSeed
+    rng_seed: int
+    result: RenderMatchPoseResult
+
+
+@dataclass(frozen=True)
+class RenderMatchBatchResult:
+    """Frozen per-seed results and provenance for one matcher batch."""
+
+    results: tuple[RenderMatchSeedResult, ...]
+    provenance: dict[str, Any]
+
+    @property
+    def ordered_candidate_ids(self) -> tuple[str, ...]:
+        return tuple(item.candidate_id for item in self.results)
 
 
 @dataclass(frozen=True)
@@ -448,6 +505,403 @@ def solve_render_match_pose(
         candidates=(estimate,),
         diagnostics=final_diagnostics,
     )
+
+
+def solve_render_match_pose_batch(
+    terrain: TerrainMap,
+    query_rgb: NDArray[np.uint8],
+    query_camera: CameraModel,
+    prior: PosePrior,
+    matcher: DenseMatcher,
+    render_seeds: Sequence[IdentifiedRenderSeed],
+    *,
+    use_position_prior: bool,
+    use_orientation_prior: bool,
+    appearance: AppearanceRaster | None = None,
+    native_elevation_patch: HeightfieldLike | None = None,
+    config: RenderMatchConfig | None = None,
+    seed: int = 0,
+    renderer: TerrainViewRenderer | None = None,
+) -> RenderMatchBatchResult:
+    """Solve an ordered seed beam with one exact-heading matcher invocation.
+
+    This is deliberately a round-zero primitive: every identified seed is
+    rendered once at its exact heading before matching, refinement is disabled,
+    and no seed can stop evaluation of later seeds. The same supplied
+    deep-copied ``PosePrior`` snapshot is passed unchanged to every PnP fit; it
+    never becomes a render seed and the caller-owned prior is never exposed to
+    downstream dependencies.
+    """
+
+    settings = config or RenderMatchConfig(orientation_prior_half_span_deg=0.0, refinement_passes=0)
+    settings.validate()
+    if settings.refinement_passes != 0:
+        raise ValueError("round-zero render-seed batches require refinement_passes=0")
+    if settings.orientation_prior_half_span_deg != 0.0:
+        raise ValueError("round-zero render-seed batches require exact headings and cannot render a yaw fan")
+    frozen_seeds = _freeze_render_seed_hypotheses(render_seeds)
+    if not callable(getattr(matcher, "match_many", None)):
+        raise ValueError("round-zero render-seed batches require a matcher with callable match_many")
+    query = np.asarray(query_rgb)
+    if query.shape != (query_camera.height_px, query_camera.width_px, 3):
+        raise ValueError(
+            "query RGB shape and query camera disagree: "
+            f"{query.shape} versus {(query_camera.height_px, query_camera.width_px, 3)}"
+        )
+    if query.dtype != np.uint8:
+        query = np.clip(np.rint(query), 0.0, 255.0).astype(np.uint8)
+    query = np.ascontiguousarray(query).copy()
+    query.flags.writeable = False
+    query_sha256 = hashlib.sha256(memoryview(np.ascontiguousarray(query)).cast("B")).hexdigest()
+    holdout_fold = _query_holdout_fold(query_sha256, settings.candidate_validation)
+    query_padding = _query_warp_padding_mask(query)
+    prior_record = prior.model_dump(mode="json")
+    stable_prior = prior.model_copy(deep=True)
+    stable_prior_record = stable_prior.model_dump(mode="json")
+    if stable_prior_record != prior_record:
+        raise RuntimeError("deep-copying the supplied PosePrior changed its value")
+    view_renderer = renderer or TerrainViewRenderer()
+    render_fov = _render_fov(query_camera, settings)
+    render_intrinsics = CameraIntrinsics.from_horizontal_fov(
+        settings.render_width_px,
+        settings.render_height_px,
+        render_fov,
+    )
+
+    # Freeze the complete seed-render input before the learned matcher or any
+    # candidate-specific fitting runs. This prevents solved/failed early seeds
+    # from changing which later hypotheses reach matching.
+    bundles: list[TerrainRenderBundle] = []
+    for hypothesis in frozen_seeds:
+        render_pose = CameraExtrinsics(
+            position=hypothesis.render_seed.position,
+            yaw_deg=round(_wrap180(hypothesis.render_seed.yaw_deg), 10),
+            pitch_deg=settings.render_pitch_deg,
+            roll_deg=0.0,
+        )
+        bundles.append(
+            view_renderer.render(
+                terrain,
+                render_intrinsics,
+                render_pose,
+                modality=settings.modality,
+                appearance=appearance,
+                terrain_stride=settings.terrain_stride,
+                native_elevation_patch=native_elevation_patch,
+                native_patch_stride=settings.native_patch_stride,
+            )
+        )
+    matcher_query = query.copy()
+    matcher_renders = [np.array(bundle.rgb, dtype=np.uint8, order="C", copy=True) for bundle in bundles]
+    match_sets = match_image_fan(matcher, matcher_query, matcher_renders)
+
+    attempts: list[_FrameAttempt] = []
+    seed_results: list[RenderMatchSeedResult] = []
+    candidate_rng_seeds: dict[str, int] = {}
+    for hypothesis, bundle, matches in zip(frozen_seeds, bundles, match_sets, strict=True):
+        candidate_rng_seed = _derived_seed(seed, "render-seed-candidate-id", hypothesis.candidate_id)
+        candidate_rng_seeds[hypothesis.candidate_id] = candidate_rng_seed
+        attempt = _match_and_fit_frame(
+            0,
+            bundle,
+            matches,
+            query_camera,
+            stable_prior,
+            terrain,
+            use_position_prior,
+            use_orientation_prior,
+            settings,
+            candidate_rng_seed,
+            query_padding=query_padding,
+            native_elevation_patch=native_elevation_patch,
+            holdout_fold=holdout_fold,
+            query_sha256=query_sha256,
+            render_seed=hypothesis.render_seed,
+            render_seed_source="identified_batch_argument",
+        )
+        attempts.append(attempt)
+        if stable_prior.model_dump(mode="json") != stable_prior_record:
+            raise RuntimeError("a batched PnP dependency mutated the shared PosePrior snapshot")
+        if prior.model_dump(mode="json") != prior_record:
+            raise RuntimeError("a batched render/PnP dependency mutated the caller-owned PosePrior")
+        result = _finalize_round_zero_seed_attempt(
+            terrain=terrain,
+            query=query,
+            query_camera=query_camera,
+            prior=stable_prior,
+            matcher=matcher,
+            hypothesis=hypothesis,
+            attempt=attempt,
+            candidate_rng_seed=candidate_rng_seed,
+            use_position_prior=use_position_prior,
+            use_orientation_prior=use_orientation_prior,
+            appearance=appearance,
+            native_elevation_patch=native_elevation_patch,
+            settings=settings,
+            render_fov=render_fov,
+            query_padding=query_padding,
+            holdout_fold=holdout_fold,
+            renderer=view_renderer,
+        )
+        seed_results.append(
+            RenderMatchSeedResult(
+                candidate_id=hypothesis.candidate_id,
+                render_seed=hypothesis.render_seed,
+                rng_seed=candidate_rng_seed,
+                result=result,
+            )
+        )
+
+    if stable_prior.model_dump(mode="json") != stable_prior_record:
+        raise RuntimeError("a batched render/PnP dependency mutated the shared PosePrior snapshot")
+    if prior.model_dump(mode="json") != prior_record:
+        raise RuntimeError("a batched render/PnP dependency mutated the caller-owned PosePrior")
+    provenance: dict[str, Any] = {
+        "schema": RENDER_SEED_BATCH_SCHEMA,
+        "method": RENDER_SEED_BATCH_METHOD,
+        "round": 0,
+        "uses_reference_truth": False,
+        "input_order_frozen": True,
+        "ordered_candidate_ids": [hypothesis.candidate_id for hypothesis in frozen_seeds],
+        "candidate_count": len(frozen_seeds),
+        "initial_render_count": len(bundles),
+        "exact_heading": {
+            "enabled": True,
+            "renders_per_seed": 1,
+            "yaw_fan_enabled": False,
+            "refinement_passes": 0,
+        },
+        "matching": {
+            "match_image_fan_invocations": 1,
+            "matcher_match_many_invocations": 1,
+            "render_count_in_single_invocation": len(bundles),
+            "all_seed_renders_completed_before_invocation": True,
+            "scalar_fallback_allowed": False,
+            "matcher_received_detached_mutable_rgb_copies": True,
+        },
+        "rng": {
+            "root_seed": seed,
+            "method": "sha256(root_seed, render-seed-candidate-id, candidate_id)_uint32_v1",
+            "candidate_root_seeds": candidate_rng_seeds,
+            "independent_of_input_order": True,
+        },
+        "query": {
+            "shape": list(query.shape),
+            "sha256": query_sha256,
+            "camera": query_camera.model_dump(mode="json"),
+            "warp_padding_mask": query_padding.record,
+        },
+        "matcher": matcher.identity(),
+        "render_config": _render_config_record(settings, render_fov),
+        "shared_pose_prior": {
+            **prior_record,
+            "same_object_passed_to_every_seed": True,
+            "deep_copied_from_caller_argument": True,
+            "caller_argument_unchanged": True,
+            "unchanged_across_seed_solves": True,
+            "position_regularization_enabled": use_position_prior,
+            "orientation_regularization_enabled": use_orientation_prior,
+        },
+        "ordered_seeds": [
+            {
+                "candidate_id": hypothesis.candidate_id,
+                "render_seed": hypothesis.render_seed.to_record(source="identified_batch_argument"),
+                "rendered_yaw_deg": bundle.extrinsics.yaw_deg,
+                "candidate_rng_seed": candidate_rng_seeds[hypothesis.candidate_id],
+            }
+            for hypothesis, bundle in zip(frozen_seeds, bundles, strict=True)
+        ],
+        "ordered_results": [
+            {
+                "candidate_id": item.candidate_id,
+                "status": item.result.status,
+                "abstain_reason": item.result.diagnostics.get("abstain_reason"),
+            }
+            for item in seed_results
+        ],
+        "estimator_inputs": {
+            "query_rgb": True,
+            "terrain": True,
+            "pose_prior": True,
+            "identified_render_seeds": True,
+            "source_depth_pfm": False,
+            "reference_pose": False,
+            "gt_v2_refined_pose": False,
+            "photo_skyline": False,
+        },
+    }
+    matcher_batch = _common_matcher_batch(attempts)
+    if matcher_batch is not None:
+        provenance["matcher_batch"] = matcher_batch
+    return RenderMatchBatchResult(results=tuple(seed_results), provenance=provenance)
+
+
+def _finalize_round_zero_seed_attempt(
+    *,
+    terrain: TerrainMap,
+    query: NDArray[np.uint8],
+    query_camera: CameraModel,
+    prior: PosePrior,
+    matcher: DenseMatcher,
+    hypothesis: IdentifiedRenderSeed,
+    attempt: _FrameAttempt,
+    candidate_rng_seed: int,
+    use_position_prior: bool,
+    use_orientation_prior: bool,
+    appearance: AppearanceRaster | None,
+    native_elevation_patch: HeightfieldLike | None,
+    settings: RenderMatchConfig,
+    render_fov: float,
+    query_padding: _QueryPaddingMask,
+    holdout_fold: int,
+    renderer: TerrainViewRenderer,
+) -> RenderMatchPoseResult:
+    """Finish one already-matched seed without affecting later batch items."""
+
+    base_diagnostics = _base_diagnostics(
+        settings,
+        matcher,
+        candidate_rng_seed,
+        query,
+        query_camera,
+        render_fov,
+        (attempt.render.extrinsics.yaw_deg,),
+        [attempt],
+        query_padding,
+        prior,
+        hypothesis.render_seed,
+        "identified_batch_argument",
+        use_position_prior,
+        use_orientation_prior,
+    )
+    # A worker-wide record belongs once in the enclosing batch provenance, not
+    # once per result. Scalar matchers have no such record.
+    base_diagnostics.pop("matcher_batch", None)
+    base_diagnostics.update(
+        {
+            "batch": {
+                "schema": RENDER_SEED_BATCH_SCHEMA,
+                "method": RENDER_SEED_BATCH_METHOD,
+                "candidate_id": hypothesis.candidate_id,
+                "candidate_rng_seed": candidate_rng_seed,
+                "input_order_record_location": "batch_result.provenance.ordered_candidate_ids",
+                "matcher_batch_record_location_if_present": "batch_result.provenance.matcher_batch",
+            },
+            "round_zero_exact_heading": True,
+        }
+    )
+    pnp_result = attempt.pnp_result
+    if pnp_result is None or not pnp_result.solved or pnp_result.extrinsics is None:
+        return RenderMatchPoseResult(
+            status="abstained",
+            extrinsics=None,
+            candidates=(),
+            diagnostics={
+                **base_diagnostics,
+                "candidate_validation": {
+                    "schema": CANDIDATE_VALIDATION_SCHEMA,
+                    "enabled": settings.candidate_validation.enabled,
+                    "passed": False,
+                    "status": "not_run_no_solved_pnp_candidate",
+                    "failures": ["no_solved_pnp_candidate_to_validate"],
+                    "uses_reference_truth": False,
+                },
+                "abstain_reason": "exact_heading_render_did_not_produce_an_accepted_pnp_consensus",
+            },
+        )
+
+    estimate = pnp_result.extrinsics
+    if settings.candidate_validation.enabled:
+        candidate_render_pose = _candidate_render_extrinsics(query_camera, estimate)
+        validation_multiplier = settings.candidate_validation.render_resolution_multiplier
+        candidate_validation_intrinsics = CameraIntrinsics.from_horizontal_fov(
+            settings.render_width_px * validation_multiplier,
+            settings.render_height_px * validation_multiplier,
+            render_fov,
+        )
+        candidate_render = renderer.render(
+            terrain,
+            candidate_validation_intrinsics,
+            candidate_render_pose,
+            modality=settings.modality,
+            appearance=appearance,
+            terrain_stride=settings.terrain_stride,
+            native_elevation_patch=native_elevation_patch,
+            native_patch_stride=settings.native_patch_stride,
+        )
+        candidate_validation = _validate_candidate_pose(
+            attempt,
+            candidate_render,
+            query_camera,
+            estimate,
+            settings,
+            holdout_fold=holdout_fold,
+        )
+    else:
+        candidate_validation = {
+            "schema": CANDIDATE_VALIDATION_SCHEMA,
+            "enabled": False,
+            "passed": True,
+            "failures": [],
+            "uses_reference_truth": False,
+            "withheld_from_geometric_pose_fit": False,
+            "withheld_from_geometric_frame_ranking": False,
+            "matcher_used_full_query_image": True,
+            "worker_candidate_selection_precedes_holdout": None,
+            "note": (
+                "explicit ablation: no lifted correspondences were withheld; the ordinary spatial cap "
+                "still limits pose-fitting input"
+            ),
+        }
+    final_diagnostics = {
+        **base_diagnostics,
+        "selected_frame_index": 0,
+        "selected_frame_yaw_deg": attempt.render.extrinsics.yaw_deg,
+        "final_fit_frame_index": 0,
+        "refinement": None,
+        "final_pnp": pnp_result.diagnostics,
+        "candidate_validation": candidate_validation,
+    }
+    if not candidate_validation["passed"]:
+        return RenderMatchPoseResult(
+            status="abstained",
+            extrinsics=None,
+            candidates=(),
+            diagnostics={
+                **final_diagnostics,
+                "abstain_reason": "candidate_pose_holdout_validation_failed",
+                "rejected_candidate_pose": estimate.model_dump(mode="json"),
+                "runner_up_retry_attempted": False,
+            },
+        )
+    return RenderMatchPoseResult(
+        status="solved",
+        extrinsics=estimate,
+        candidates=(estimate,),
+        diagnostics=final_diagnostics,
+    )
+
+
+def _freeze_render_seed_hypotheses(
+    render_seeds: Sequence[IdentifiedRenderSeed],
+) -> tuple[IdentifiedRenderSeed, ...]:
+    try:
+        supplied = tuple(render_seeds)
+    except TypeError as exc:
+        raise ValueError("render-seed batch must be an ordered collection") from exc
+    if not supplied:
+        raise ValueError("render-seed batch must contain at least one hypothesis")
+    frozen: list[IdentifiedRenderSeed] = []
+    candidate_ids: set[str] = set()
+    for hypothesis in supplied:
+        if not isinstance(hypothesis, IdentifiedRenderSeed):
+            raise ValueError("render-seed batch entries must be IdentifiedRenderSeed values")
+        copied = hypothesis.frozen_copy()
+        if copied.candidate_id in candidate_ids:
+            raise ValueError(f"render-seed candidate IDs must be unique: {copied.candidate_id!r}")
+        candidate_ids.add(copied.candidate_id)
+        frozen.append(copied)
+    return tuple(frozen)
 
 
 def render_fan_yaws(
@@ -886,7 +1340,9 @@ def _match_and_fit_frame(
         initial = CameraExtrinsics(
             position=active_render_seed.position,
             yaw_deg=render.extrinsics.yaw_deg,
-            pitch_deg=active_render_seed.pitch_deg if use_orientation_prior else 0.0,
+            # The seed initializes the nonlinear fit independently of whether
+            # statistical orientation regularization is enabled.
+            pitch_deg=active_render_seed.pitch_deg,
             roll_deg=0.0,
         )
         clearance_policy = settings.pnp.clearance_constraint_policy
