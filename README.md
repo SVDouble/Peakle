@@ -143,11 +143,17 @@ python -m peakle.scripts.bench_pose_matrix \
 The initial one-image GLO-30 control is negative: MINIMA peaks at 72/800 inliers (9%), RoMa stays
 below 4%, and both abstain. A corrected high-resolution Swiss control now exercises the full
 orthophoto + swissALTI path. On the sole currently eligible `MAP_B/HEIGHT_A` image, three standard
-MINIMA perturbations and the paired RoMa run all recover yaw within 1.02° and form strong consensus,
-but miss the published refined reference by 203.6–236.5 m. They land 31.6–35.8 m from the retained
-original noisy GPS, which is interesting evidence of a reference/appearance ambiguity—not a reason
-to change the success target. The method therefore remains experimental and ranking-excluded.
-Numbers, exclusions, and the independent-validation follow-up are recorded in
+pre-gate MINIMA perturbations and the paired RoMa run all recover yaw within 1.02° and form strong
+consensus, but miss the published refined reference by 203.6–236.5 m. They land 31.6–35.8 m from the
+retained original noisy GPS, which is interesting evidence of a reference/appearance ambiguity—not
+a reason to change the success target.
+
+A frozen replay with the default spatial geometric holdout abstains on two wrong MINIMA candidates
+(235.5 m and 202.0 m from the refined reference), but still accepts a third candidate that is 215.0 m
+wrong. The matcher sees the complete query before the holdout, so this is not independent evidence
+and the false accept shows that it cannot certify a systematic same-family alternate solution. The
+method therefore remains experimental and ranking-excluded; independent silhouette/ridge evidence
+is the next required validation layer. Numbers, exclusions, and the replay diagnostics are recorded in
 [the pose-localization strategy](docs/development/pose-localization-strategy.md).
 
 ## Data

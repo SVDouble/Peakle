@@ -191,7 +191,7 @@ photo-edge support. Its estimator patch is a 5501×5501 2 m source grid with abo
 coverage; stride 8 produces an approximately 16 m render mesh. The z14 SWISSIMAGE input was
 pre-provisioned and hashed before the offline runs.
 
-The strict result is negative:
+The pre-gate result is negative:
 
 | matcher/run | refined horizontal | yaw | consensus | original-GPS diagnostic |
 |---|---:|---:|---:|---:|
@@ -212,6 +212,27 @@ solving with `used_by_estimator=false`, `used_for_success_grading=false`, and
 `used_for_ranking=false`. Agreement with that noisy GPS cannot convert these failures into successes
 or justify relabelling the reference. It does show that the failure is systematic enough to require
 an independent physical check, rather than another reprojection threshold tuned on this image.
+
+The frozen default candidate gate was then replayed with the same sample, seed `20260713`, and three
+MINIMA perturbations. The run is
+`20260714-heldout-candidate-validation-minima-img4948-geopose-bench`; its `results.json` SHA-256 is
+`ecfd52bc375305987aaeea8c0244209a2621e31706440cbab9b316479bbfe14d`. Candidate-to-reference errors
+below were computed only after validation and were not gate inputs:
+
+| replicate | gate outcome | candidate horizontal / yaw | query reprojection | testable lower bound | visibility lower bound | joint lower bound | gate failure |
+|---|---|---:|---:|---:|---:|---:|---|
+| 0 | abstained | 235.5 m / 0.91° | 268/400 | 0.770 | 0.707 | 0.450 | visibility ordering |
+| 1 | abstained | 202.0 m / 1.00° | 126/400 | 0.332 | 0.620 | 0.165 | testability, visibility, joint support/distribution |
+| 2 | returned; benchmark failure | 215.0 m / 0.98° | 145/400 | 0.743 | 0.843 | 0.265 | none |
+
+The required nominal lower bounds are 0.50 for testability, 0.80 for conditional visibility
+consistency, and 0.20 for joint support. They are one-sided 95% Clopper-Pearson bounds, exact only
+under an independent Bernoulli model; dense learned matches are spatially correlated, so these
+bounds are heuristic and not calibrated coverage guarantees. Replicate 2 passed every frozen gate
+with 121/400 joint held-out matches but remained 215.0 m from the sole refined reference. Thresholds
+were not changed after observing the replay. Two safe abstentions therefore do not establish an
+improved localization rate: this control contains a surviving false accept in the same systematic
+wrong-position basin.
 
 A reproducible focused run (replace the output path for every run) is:
 
@@ -246,10 +267,11 @@ RoMa control. Benchmarks never fetch missing orthophoto tiles or model files.
 
 The first part of the recommendation is now implemented: every default run holds out spatial cells,
 re-renders the selected candidate, and checks held-out reprojection plus terrain visibility/occlusion
-ordering before returning a pose. This closes the same-correspondence fit/grade loop, but it cannot
-prove that a systematically biased cross-modal match family is geographically correct. The corrected
-Swiss controls above predate this gate and must be replayed before making any claim about its empirical
-rejection rate.
+ordering before returning a pose. This closes the same-correspondence geometric fit/grade loop. It is
+still only a spatial geometric holdout: the learned matcher sees the complete query and worker
+correspondence selection happens before the fold is withheld. The frozen Swiss replay above rejects
+two candidates but accepts a third wrong one, demonstrating that the gate cannot prove a
+systematically biased cross-modal match family is geographically correct.
 
 Do not relax the 100 m target or accept consensus alone. The next independent layer should compare
 the candidate render against evidence not supplied to PnP: silhouette/ridge alignment, photo edge
