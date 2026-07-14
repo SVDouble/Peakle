@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sys
@@ -10,9 +11,15 @@ import numpy as np
 import pytest
 from skimage import data
 
-from peakle.domain.camera import CameraExtrinsics, CameraModel
+from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
 from peakle.domain.coordinates import LocalPoint
 from peakle.domain.pose import PosePrior
+from peakle.localize.candidate_validation import (
+    candidate_zbuffer_visibility as _candidate_zbuffer_visibility,
+)
+from peakle.localize.candidate_validation import (
+    exact_binomial_lower_bound as _exact_binomial_lower_bound,
+)
 from peakle.localize.correspondence import (
     CORRESPONDENCE_CACHE_ENTRY_SCHEMA,
     WORKER_RENDER_ID_POLICY,
@@ -35,15 +42,22 @@ from peakle.localize.pnp import (
     required_ransac_trials,
 )
 from peakle.localize.render_match_pnp import (
+    CANDIDATE_VALIDATION_SCHEMA,
     MATCH_SELECTION_METHOD,
     MATCH_SELECTION_SCHEMA,
     QUERY_PADDING_MASK_METHOD,
     QUERY_PADDING_MASK_SCHEMA,
+    CandidateValidationConfig,
     RenderMatchConfig,
     _balanced_match_cap_indices,
+    _candidate_render_extrinsics,
+    _FrameAttempt,
     _match_and_fit_frame,
     _match_selection_record,
+    _query_holdout_fold,
+    _query_spatial_holdout_mask,
     _query_warp_padding_mask,
+    _validate_candidate_pose,
     solve_render_match_pose,
 )
 from peakle.localize.swissdem import Patch
@@ -236,6 +250,249 @@ def test_metric_render_depth_round_trips_to_integer_pixel_centres(scene: Scene) 
     assert bundle.provenance["native_high_resolution_patch_used"] is False
     assert len(bundle.provenance["render_content_sha256"]) == 64
     assert bundle.forward_depth_m.flags.writeable is False
+
+
+def test_spatial_holdout_is_deterministic_disjoint_and_interleaved() -> None:
+    camera = CameraModel(width_px=800, height_px=600, horizontal_fov_deg=60.0, projection="pinhole")
+    config = CandidateValidationConfig()
+    query_xy = np.asarray(
+        [
+            [
+                (column + 0.5) * camera.width_px / config.query_grid_columns,
+                (row + 0.5) * camera.height_px / config.query_grid_rows,
+            ]
+            for row in range(config.query_grid_rows)
+            for column in range(config.query_grid_columns)
+        ],
+        dtype=np.float64,
+    )
+
+    masks = [
+        _query_spatial_holdout_mask(query_xy, camera, config, holdout_fold) for holdout_fold in range(config.folds)
+    ]
+
+    np.testing.assert_array_equal(np.sum(masks, axis=0), np.ones(len(query_xy), dtype=np.int64))
+    assert [int(mask.sum()) for mask in masks] == [12, 12, 12, 12]
+    for mask in masks:
+        selected = query_xy[mask]
+        assert np.ptp(selected[:, 0]) > camera.width_px * 0.5
+        assert np.ptp(selected[:, 1]) > camera.height_px * 0.5
+
+
+def test_candidate_validation_rejects_non_finite_depth_tolerance() -> None:
+    with pytest.raises(ValueError, match="maximum candidate-render depth tolerance"):
+        CandidateValidationConfig(maximum_depth_tolerance_m=float("nan")).validate()
+
+
+def test_candidate_zbuffer_uses_inverse_depth_and_rejects_depth_order_conflicts(scene: Scene) -> None:
+    pose = _placed_pose(scene)
+    validation_intrinsics = CameraIntrinsics.from_horizontal_fov(
+        scene.intrinsics.width_px * 2,
+        scene.intrinsics.height_px * 2,
+        CameraModel.from_intrinsics(scene.intrinsics).horizontal_fov_deg,
+    )
+    bundle = TerrainViewRenderer().render(
+        scene.terrain,
+        validation_intrinsics,
+        pose,
+        modality="normal",
+        terrain_stride=1,
+    )
+    depth = bundle.forward_depth_m
+    chosen: tuple[int, int, np.ndarray] | None = None
+    for row in range(1, depth.shape[0] - 1):
+        for column in range(1, depth.shape[1] - 1):
+            support = depth[row - 1 : row + 2, column - 1 : column + 2]
+            if not np.all(np.isfinite(support)) or np.any(support <= 0.0):
+                continue
+            span = float(np.ptp(support))
+            maximum_span = min(250.0, 0.08 * float(np.median(support)))
+            if 5.0 < span <= maximum_span:
+                chosen = row, column, support
+                break
+        if chosen is not None:
+            break
+    assert chosen is not None
+    row, column, support = chosen
+    u_px = column + 0.25
+    v_px = row + 0.25
+    inverse_support = 1.0 / depth[row : row + 2, column : column + 2]
+    sampled_inverse = (
+        0.75 * 0.75 * inverse_support[0, 0]
+        + 0.25 * 0.75 * inverse_support[0, 1]
+        + 0.75 * 0.25 * inverse_support[1, 0]
+        + 0.25 * 0.25 * inverse_support[1, 1]
+    )
+    visible_depth = 1.0 / float(sampled_inverse)
+    right, down, forward = camera_axes(pose)
+    x_ratio = (u_px - bundle.intrinsics.principal_x_px) / bundle.intrinsics.focal_length_px
+    y_ratio = (v_px - bundle.intrinsics.principal_y_px) / bundle.intrinsics.focal_length_px
+    ray_per_forward_m = forward + x_ratio * right + y_ratio * down
+    position = np.asarray(pose.position.as_tuple(), dtype=np.float64)
+    visible_world = position + visible_depth * ray_per_forward_m
+    displacement = 50.0
+    world = np.stack(
+        (
+            visible_world,
+            visible_world + displacement * ray_per_forward_m,
+            visible_world - displacement * ray_per_forward_m,
+        )
+    )
+
+    classified = _candidate_zbuffer_visibility(
+        bundle,
+        world,
+        max_absolute_depth_span_m=250.0,
+        max_relative_depth_span=0.08,
+        minimum_depth_tolerance_m=1.0,
+        maximum_depth_tolerance_m=3.0,
+        relative_depth_tolerance=1e-4,
+    )
+
+    np.testing.assert_array_equal(classified.testable, [True, True, True])
+    np.testing.assert_array_equal(classified.consistent, [True, False, False])
+    np.testing.assert_array_equal(classified.occluded, [False, True, False])
+    np.testing.assert_array_equal(classified.in_front, [False, False, True])
+    assert classified.signed_depth_residual_m[0] == pytest.approx(0.0, abs=1e-8)
+
+
+def test_candidate_gate_keeps_cyltan_query_and_auxiliary_pinhole_depth_separate(scene: Scene) -> None:
+    candidate = _placed_pose(scene)
+    bundle = TerrainViewRenderer().render(
+        scene.terrain,
+        scene.intrinsics,
+        candidate,
+        modality="normal",
+        terrain_stride=1,
+    )
+    source_intrinsics = CameraIntrinsics.from_horizontal_fov(
+        scene.intrinsics.width_px // 2,
+        scene.intrinsics.height_px // 2,
+        CameraModel.from_intrinsics(scene.intrinsics).horizontal_fov_deg,
+    )
+    source_bundle = TerrainViewRenderer().render(
+        scene.terrain,
+        source_intrinsics,
+        candidate,
+        modality="normal",
+        terrain_stride=1,
+    )
+    query_camera = CameraModel(
+        width_px=scene.intrinsics.width_px,
+        height_px=scene.intrinsics.height_px,
+        horizontal_fov_deg=CameraModel.from_intrinsics(scene.intrinsics).horizontal_fov_deg,
+        projection="cyltan",
+    )
+    rows_columns = np.argwhere(bundle.terrain_mask)
+    rows_columns = rows_columns[:: max(1, len(rows_columns) // 500)]
+    world = bundle.world_xyz_m[rows_columns[:, 0], rows_columns[:, 1]]
+    query_xy, query_valid = project_world_points(world, query_camera, candidate)
+    query_inside = (
+        query_valid
+        & (query_xy[:, 0] >= 0.0)
+        & (query_xy[:, 0] <= query_camera.width_px - 1.0)
+        & (query_xy[:, 1] >= 0.0)
+        & (query_xy[:, 1] <= query_camera.height_px - 1.0)
+    )
+    world = world[query_inside]
+    query_xy = query_xy[query_inside]
+    assert len(world) >= 100
+    empty_matches = MatchSet(
+        query_xy_px=np.empty((0, 2)),
+        render_xy_px=np.empty((0, 2)),
+        confidence=np.empty(0),
+    )
+    source = _FrameAttempt(
+        index=2,
+        render=source_bundle,
+        match_set=empty_matches,
+        lifted_world=np.empty((0, 3)),
+        query_xy=np.empty((0, 2)),
+        confidence=np.empty(0),
+        holdout_world=world,
+        holdout_query_xy=query_xy,
+        holdout_confidence=np.ones(len(world)),
+        pnp_result=None,
+        record={},
+    )
+    settings = RenderMatchConfig(refinement_passes=0)
+    auxiliary_pose = _candidate_render_extrinsics(query_camera, candidate)
+    assert auxiliary_pose.pitch_deg == candidate.pitch_deg
+    assert auxiliary_pose.roll_deg == 0.0
+
+    accepted = _validate_candidate_pose(
+        source,
+        bundle,
+        query_camera,
+        candidate,
+        settings,
+        holdout_fold=1,
+    )
+    wrong_intrinsics = CameraIntrinsics.from_horizontal_fov(
+        bundle.intrinsics.width_px,
+        bundle.intrinsics.height_px,
+        bundle.intrinsics.horizontal_fov_deg() + 1.0,
+    )
+    with pytest.raises(RuntimeError, match="changed the auxiliary camera intrinsics"):
+        _validate_candidate_pose(
+            source,
+            replace(bundle, intrinsics=wrong_intrinsics),
+            query_camera,
+            candidate,
+            settings,
+            holdout_fold=1,
+        )
+    wrong_extrinsics = candidate.model_copy(update={"yaw_deg": candidate.yaw_deg + 1.0})
+    with pytest.raises(RuntimeError, match="does not use the selected candidate pose"):
+        _validate_candidate_pose(
+            source,
+            replace(bundle, extrinsics=wrong_extrinsics),
+            query_camera,
+            candidate,
+            settings,
+            holdout_fold=1,
+        )
+    corrupted = replace(source, holdout_query_xy=query_xy + np.asarray([0.0, 20.0]))
+    rejected = _validate_candidate_pose(
+        corrupted,
+        bundle,
+        query_camera,
+        candidate,
+        settings,
+        holdout_fold=1,
+    )
+
+    assert accepted["schema"] == CANDIDATE_VALIDATION_SCHEMA
+    assert accepted["passed"] is True, accepted
+    assert accepted["uses_reference_truth"] is False
+    assert accepted["withheld_from_geometric_pose_fit"] is True
+    assert accepted["withheld_from_geometric_frame_ranking"] is True
+    assert accepted["matcher_used_full_query_image"] is True
+    assert accepted["worker_candidate_selection_precedes_holdout"] is True
+    assert accepted["projection_separation"] == {
+        "query_reprojection": "cyltan",
+        "visibility_render": "auxiliary_pinhole",
+        "depth_comparison": (
+            "heldout world-point forward depth and z-buffer depth are both computed in the same "
+            "auxiliary pinhole camera"
+        ),
+        "cross_projection_depth_comparison": False,
+        "outside_auxiliary_render_coverage": "untestable",
+    }
+    assert accepted["counts"]["query_reprojection_inliers"] == len(world)
+    assert accepted["counts"]["candidate_render_testable"] + accepted["counts"]["outside_auxiliary_frustum"] + accepted[
+        "counts"
+    ]["missing_or_sky_depth_support"] + accepted["counts"]["discontinuous_depth_support"] == len(world)
+    assert accepted["counts"]["joint_support"] > len(world) * 0.5
+    assert accepted["render_contract"]["resolution_multiplier"] == 2
+    assert accepted["render_contract"]["surface_identity_matches"] is True
+    assert accepted["render_contract"]["candidate_intrinsics_match"] is True
+    assert accepted["render_contract"]["candidate_extrinsics_match"] is True
+    assert accepted["joint_world_geometry_gate"]["passed"] is True
+    assert "independent Bernoulli" in accepted["gates"]["binomial_model_note"]
+    assert rejected["passed"] is False
+    assert "heldout_joint_consensus_below_acceptance_gate" in rejected["failures"]
+    assert _exact_binomial_lower_bound(0, 100, 0.95) == 0.0
 
 
 def test_native_elevation_patch_is_decimated_and_composited_over_regional_terrain(scene: Scene) -> None:
@@ -597,6 +854,7 @@ def test_invalid_render_matches_cannot_consume_the_post_lift_budget(
         max_matches_per_frame=50,
         min_lifted_matches_per_frame=30,
         refinement_passes=0,
+        candidate_validation=CandidateValidationConfig(enabled=False),
     )
 
     attempt = _match_and_fit_frame(
@@ -674,6 +932,7 @@ def test_query_padding_matches_are_rejected_before_render_lifting_and_spatial_ca
         max_matches_per_frame=50,
         min_lifted_matches_per_frame=30,
         refinement_passes=0,
+        candidate_validation=CandidateValidationConfig(enabled=False),
     )
 
     attempt = _match_and_fit_frame(
@@ -697,6 +956,9 @@ def test_query_padding_matches_are_rejected_before_render_lifting_and_spatial_ca
         "after_query_padding_rejection": 12,
         "after_render_lifting": 12,
         "after_spatial_cap": 12,
+        "training_after_spatial_cap": 12,
+        "holdout_after_spatial_cap": 0,
+        "total_after_independent_caps": 12,
     }
     padding_record = attempt.record["query_padding_filter"]
     assert padding_record["schema"] == QUERY_PADDING_MASK_SCHEMA
@@ -1670,19 +1932,26 @@ def test_render_match_pipeline_improves_a_perturbed_position_with_injected_match
             return bundle
 
     class GeometryMatcher:
-        def identity(self):
-            return {"id": "test_geometry_correspondences", "ranking_eligible": False}
+        def __init__(self, *, corrupt_holdout: bool = False) -> None:
+            self.corrupt_holdout = corrupt_holdout
 
-        def match(self, _query, render):
-            bundle = shared.bundles[id(render)]
+        def identity(self):
+            return {
+                "id": "test_geometry_correspondences",
+                "ranking_eligible": False,
+                "corrupt_holdout": self.corrupt_holdout,
+            }
+
+        def match(self, query_rgb, render_rgb):
+            bundle = shared.bundles[id(render_rgb)]
             rows, columns = np.nonzero(bundle.terrain_mask)
             selected = (
-                (columns % 12 == 0)
-                & (rows % 10 == 0)
+                (columns % 8 == 0)
+                & (rows % 6 == 0)
                 & (columns > 4)
-                & (columns < render.shape[1] - 5)
+                & (columns < render_rgb.shape[1] - 5)
                 & (rows > 4)
-                & (rows < render.shape[0] - 5)
+                & (rows < render_rgb.shape[0] - 5)
             )
             rows = rows[selected]
             columns = columns[selected]
@@ -1694,9 +1963,33 @@ def test_render_match_pipeline_improves_a_perturbed_position_with_injected_match
                 & (query_xy[:, 1] > 3)
                 & (query_xy[:, 1] < camera.height_px - 4)
             )
+            retained_query_xy = query_xy[inside].copy()
+            if self.corrupt_holdout:
+                validation_config = CandidateValidationConfig()
+                query_sha256 = hashlib.sha256(memoryview(np.ascontiguousarray(query_rgb)).cast("B")).hexdigest()
+                heldout_fold = _query_holdout_fold(query_sha256, validation_config)
+                heldout = _query_spatial_holdout_mask(
+                    retained_query_xy,
+                    camera,
+                    validation_config,
+                    heldout_fold,
+                )
+                cell_width = camera.width_px / validation_config.query_grid_columns
+                cell_left = np.floor(retained_query_xy[:, 0] / cell_width) * cell_width
+                shift_right = retained_query_xy[:, 0] - cell_left < cell_width - 6.5
+                retained_query_xy[heldout, 0] += np.where(shift_right[heldout], 6.0, -6.0)
+                np.testing.assert_array_equal(
+                    _query_spatial_holdout_mask(
+                        retained_query_xy,
+                        camera,
+                        validation_config,
+                        heldout_fold,
+                    ),
+                    heldout,
+                )
             render_xy = np.column_stack((columns[inside], rows[inside])).astype(float)
             return MatchSet(
-                query_xy_px=query_xy[inside],
+                query_xy_px=retained_query_xy,
                 render_xy_px=render_xy,
                 confidence=np.ones(int(inside.sum())),
                 provenance=self.identity(),
@@ -1722,6 +2015,7 @@ def test_render_match_pipeline_improves_a_perturbed_position_with_injected_match
         terrain_stride=2,
         orientation_prior_half_span_deg=30.0,
         refinement_passes=0,
+        candidate_validation=CandidateValidationConfig(enabled=False),
         pnp=PoseRansacConfig(
             iterations=25,
             sample_size=6,
@@ -1761,3 +2055,50 @@ def test_render_match_pipeline_improves_a_perturbed_position_with_injected_match
     assert prior_error > 140.0
     assert solved_error < 0.01
     assert result.diagnostics["estimator_inputs"]["source_depth_pfm"] is False
+
+    gated_prior = prior.model_copy(update={"position": truth.position})
+    gated_result = solve_render_match_pose(
+        scene.terrain,
+        np.full((camera.height_px, camera.width_px, 3), 128, dtype=np.uint8),
+        camera,
+        gated_prior,
+        GeometryMatcher(),
+        use_position_prior=True,
+        use_orientation_prior=True,
+        config=replace(config, candidate_validation=CandidateValidationConfig()),
+        renderer=RecordingRenderer(),
+        seed=8,
+    )
+
+    assert gated_result.solved, gated_result.diagnostics.get("candidate_validation")
+    gate = gated_result.diagnostics["candidate_validation"]
+    assert gate["passed"] is True
+    assert gate["withheld_from_geometric_pose_fit"] is True
+    assert gate["withheld_from_geometric_frame_ranking"] is True
+    assert gate["matcher_used_full_query_image"] is True
+    assert gate["worker_candidate_selection_precedes_holdout"] is True
+    assert gate["runner_up_retry_attempted"] is False
+
+    rejected_result = solve_render_match_pose(
+        scene.terrain,
+        np.full((camera.height_px, camera.width_px, 3), 128, dtype=np.uint8),
+        camera,
+        gated_prior,
+        GeometryMatcher(corrupt_holdout=True),
+        use_position_prior=True,
+        use_orientation_prior=True,
+        config=replace(config, candidate_validation=CandidateValidationConfig()),
+        renderer=RecordingRenderer(),
+        seed=8,
+    )
+
+    assert rejected_result.status == "abstained"
+    assert rejected_result.extrinsics is None
+    assert rejected_result.candidates == ()
+    assert rejected_result.diagnostics["final_pnp"]["candidate_pose"] is not None
+    assert rejected_result.diagnostics["abstain_reason"] == "candidate_pose_holdout_validation_failed"
+    assert rejected_result.diagnostics["runner_up_retry_attempted"] is False
+    rejected_gate = rejected_result.diagnostics["candidate_validation"]
+    assert rejected_gate["withheld_from_geometric_frame_ranking"] is True
+    assert rejected_gate["matcher_used_full_query_image"] is True
+    assert "heldout_joint_consensus_below_acceptance_gate" in rejected_gate["failures"]

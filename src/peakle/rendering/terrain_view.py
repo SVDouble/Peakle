@@ -25,6 +25,8 @@ from peakle.rendering.pinhole import camera_axes
 from peakle.rendering.rasterizer import HeightfieldGrid, HeightfieldLike, SyntheticRenderer
 
 RenderModality = Literal["hillshade", "normal", "relative_depth", "orthophoto"]
+PIXEL_LIFTING_SCHEMA = "terrain_render_pixel_lifting_v1"
+PIXEL_LIFTING_DEPTH_METHOD = "bilinear_finite_positive_inverse_depth_then_invert_v1"
 
 
 @dataclass(frozen=True)
@@ -220,7 +222,7 @@ class TerrainViewRenderer:
         )
         native_patch_used = bool(np.any(native_overlay_mask))
         provenance = {
-            "schema": "terrain_render_bundle_v3",
+            "schema": "terrain_render_bundle_v4",
             "render_content_sha256": render_content_sha256,
             "render_surface_identity_sha256": surface_identity_sha256,
             "projection": "pinhole",
@@ -235,6 +237,12 @@ class TerrainViewRenderer:
             "intrinsics": intrinsics.model_dump(mode="json"),
             "extrinsics": extrinsics.model_dump(mode="json"),
             "depth_semantics": "positive camera-forward distance in metres; NaN for sky",
+            "subpixel_lifting": {
+                "schema": PIXEL_LIFTING_SCHEMA,
+                "depth_interpolation": PIXEL_LIFTING_DEPTH_METHOD,
+                "world_point": "exact keypoint ray at interpolated camera-forward depth",
+                "invalid_support": "any non-finite or non-positive bilinear depth support is rejected",
+            },
             "world_frame": "terrain local east,north,absolute-elevation metres",
             "pixel_coordinate_convention": "integer pixel centres",
             "appearance": appearance_provenance,
@@ -425,7 +433,7 @@ def lift_render_pixels(
     max_relative_depth_span: float = 0.08,
     discontinuity_radius_px: int = 1,
 ) -> LiftedRenderPoints:
-    """Lift matched render pixels while rejecting sky and depth boundaries."""
+    """Lift matched pixels using the rasterizer's inverse-depth interpolation."""
 
     xy = np.asarray(render_xy_px, dtype=np.float64)
     if xy.ndim != 2 or xy.shape[1] != 2:
@@ -453,13 +461,24 @@ def lift_render_pixels(
     valid &= inside
     safe_x = np.where(finite_xy, xy[:, 0], 0.0)
     safe_y = np.where(finite_xy, xy[:, 1], 0.0)
-    sampled_depth[:] = map_coordinates(
-        render.forward_depth_m,
+    # The rasterizer linearly interpolates inverse depth across each projected
+    # triangle. Sampling stored forward depth directly would describe a
+    # different curved surface between pixel centres. Preserve NaN/sky support
+    # by converting only finite positive samples, interpolate inverse depth,
+    # and invert once at the exact subpixel keypoint.
+    depth = np.asarray(render.forward_depth_m, dtype=np.float64)
+    finite_positive_depth = np.isfinite(depth) & (depth > 0.0)
+    inverse_depth = np.full_like(depth, np.nan)
+    inverse_depth[finite_positive_depth] = 1.0 / depth[finite_positive_depth]
+    sampled_inverse_depth = map_coordinates(
+        inverse_depth,
         [safe_y, safe_x],
         order=1,
         mode="constant",
         cval=np.nan,
     )
+    inverse_depth_valid = np.isfinite(sampled_inverse_depth) & (sampled_inverse_depth > 0.0)
+    sampled_depth[inverse_depth_valid] = 1.0 / sampled_inverse_depth[inverse_depth_valid]
     # Interpolating the precomputed XYZ image is not projectively equivalent to
     # lifting a subpixel coordinate at its interpolated forward depth. Build the
     # point from the exact keypoint ray so it reprojects to render_xy_px.

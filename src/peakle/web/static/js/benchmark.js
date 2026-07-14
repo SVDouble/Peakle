@@ -95,6 +95,15 @@ function originalMetadataAmbiguity(item) {
   return `non-ranking original Δ · ${num(delta.horizontal_position_m, 0, " m")} horiz · ${signed(delta.vertical_m, 0, " m")} vert · ${signed(delta.fov_deg, 1, "°")} FOV`;
 }
 
+function candidateValidationSummary(item) {
+  const validation = item.candidate_validation;
+  if (!validation) return null;
+  if (validation.enabled === false) return "candidate holdout disabled · ablation";
+  if (validation.passed === true) return "candidate holdout passed";
+  const failures = Array.isArray(validation.failures) ? validation.failures.join(", ") : "gate failed";
+  return `candidate holdout rejected · ${failures}`;
+}
+
 async function json(url, signal) {
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
@@ -146,6 +155,7 @@ function renderProvenance() {
   if (run.implementation_sha256) pills.push(["Implementation", run.implementation_sha256.slice(0, 12)]);
   if (run.git_sha) pills.push(["Git", `${run.git_sha.slice(0, 9)}${run.dirty_code ? "+dirty" : ""}`]);
   if (run.git_diff_sha256) pills.push(["Diff", run.git_diff_sha256.slice(0, 12)]);
+  if (run.candidate_validation) pills.push(["Candidate gate", run.candidate_validation.enabled === false ? "disabled ablation" : "held-out + visibility"]);
   provenance.replaceChildren(...pills.map(([label, value]) => node("span", { class: "pill" }, [
     node("span", { text: `${label} ` }), node("strong", { text: String(value) }),
   ])));
@@ -389,6 +399,7 @@ function renderMatrixCases(rows) {
     const outcomeClass = item.success === true ? "success" : item.status === "skipped" ? "muted" : "failure";
     const exclusions = item.ranking_eligible ? "ranking eligible" : (item.ranking_exclusions ?? []).join(" · ") || item.skip_reason || "excluded";
     const ambiguity = originalMetadataAmbiguity(item);
+    const candidateValidation = candidateValidationSummary(item);
     return node("tr", {}, [
       node("td", {}, [
         node("a", { class: "sample-link", href: `/gt?sample=${encodeURIComponent(item.name)}`, text: item.name }),
@@ -397,7 +408,11 @@ function renderMatrixCases(rows) {
       ]),
       node("td", {}, [node("span", { class: "method", text: ALGORITHMS[item.algorithm] ?? item.algorithm }), node("span", { class: "sub", text: exclusions })]),
       node("td", {}, [node("span", { text: EVIDENCE[item.evidence_track] ?? item.evidence_track }), node("span", { class: "sub", text: PRIORS[item.prior_regime] ?? item.prior_regime })]),
-      node("td", {}, [node("span", { class: `outcome ${outcomeClass}`, text: outcome }), node("span", { class: "sub", text: item.outcome ?? item.skip_reason ?? "" })]),
+      node("td", {}, [
+        node("span", { class: `outcome ${outcomeClass}`, text: outcome }),
+        node("span", { class: "sub", text: item.outcome ?? item.skip_reason ?? "" }),
+        ...(candidateValidation ? [node("span", { class: "sub", text: candidateValidation })] : []),
+      ]),
       node("td", {}, [node("span", { class: "number", text: `${num(errors.horizontal_position_m, 1, " m")} · ${num(errors.yaw_deg, 1, "°")}` }), node("span", { class: "sub", text: "position · yaw" })]),
       node("td", {}, [node("span", { class: `number ${(delta.horizontal_position_m ?? 0) <= 0 ? "success" : "failure"}`, text: `${signed(delta.horizontal_position_m, 1, " m")} · ${signed(delta.yaw_deg, 1, "°")}` }), node("span", { class: "sub", text: "negative is improvement" })]),
       node("td", {}, [node("span", { class: "number", text: `${compatibility.tier ?? "—"} · ${num(compatibility.p90_deg, 2, "°")}` }), node("span", { class: "sub", text: `${height.tier ?? "no height gate"} · ${signed(height.raw_camera_clearance_m, 1, " m")}` })]),

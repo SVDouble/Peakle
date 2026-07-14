@@ -14,6 +14,22 @@ from scipy.ndimage import binary_dilation, label
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
 from peakle.domain.pose import PosePrior
 from peakle.domain.terrain import TerrainMap
+from peakle.localize.candidate_validation import (
+    CANDIDATE_VALIDATION_SCHEMA,
+    HOLDOUT_PARTITION_METHOD,
+    HOLDOUT_PARTITION_SCHEMA,
+    CandidateValidationConfig,
+    validate_candidate_pose,
+)
+from peakle.localize.candidate_validation import (
+    candidate_render_extrinsics as _candidate_render_extrinsics,
+)
+from peakle.localize.candidate_validation import (
+    query_holdout_fold as _query_holdout_fold,
+)
+from peakle.localize.candidate_validation import (
+    query_spatial_holdout_mask as _query_spatial_holdout_mask,
+)
 from peakle.localize.correspondence import DenseMatcher, MatchSet, match_image_fan
 from peakle.localize.pnp import PoseRansacConfig, PoseRansacResult, fit_pose_ransac
 from peakle.rendering.orthophoto import AppearanceRaster
@@ -64,6 +80,7 @@ class RenderMatchConfig:
     min_lifted_matches_per_frame: int = 12
     max_relative_depth_span: float = 0.08
     refinement_passes: int = 1
+    candidate_validation: CandidateValidationConfig = field(default_factory=CandidateValidationConfig)
     pnp: PoseRansacConfig = field(default_factory=PoseRansacConfig)
 
     def validate(self) -> None:
@@ -83,6 +100,7 @@ class RenderMatchConfig:
             raise ValueError("match selection cell size must be in [2, 256] pixels")
         if self.refinement_passes not in {0, 1}:
             raise ValueError("the initial render-PnP implementation supports zero or one refinement pass")
+        self.candidate_validation.validate()
         self.pnp.validate()
 
 
@@ -108,6 +126,9 @@ class _FrameAttempt:
     lifted_world: NDArray[np.float64]
     query_xy: NDArray[np.float64]
     confidence: NDArray[np.float64]
+    holdout_world: NDArray[np.float64]
+    holdout_query_xy: NDArray[np.float64]
+    holdout_confidence: NDArray[np.float64]
     pnp_result: PoseRansacResult | None
     record: dict[str, Any]
 
@@ -139,6 +160,8 @@ def solve_render_match_pose(
         )
     if query.dtype != np.uint8:
         query = np.clip(np.rint(query), 0.0, 255.0).astype(np.uint8)
+    query_sha256 = hashlib.sha256(memoryview(np.ascontiguousarray(query)).cast("B")).hexdigest()
+    holdout_fold = _query_holdout_fold(query_sha256, settings.candidate_validation)
     query_padding = _query_warp_padding_mask(query)
     if not use_position_prior:
         return _abstained_result(
@@ -194,6 +217,8 @@ def solve_render_match_pose(
             seed,
             query_padding=query_padding,
             native_elevation_patch=native_elevation_patch,
+            holdout_fold=holdout_fold,
+            query_sha256=query_sha256,
         )
         attempts.append(attempt)
 
@@ -221,6 +246,7 @@ def solve_render_match_pose(
         )
     solved_attempts.sort(key=_frame_rank, reverse=True)
     best = solved_attempts[0]
+    validation_source = best
     if best.pnp_result is None or best.pnp_result.extrinsics is None:
         raise RuntimeError("solved frame lost its PnP estimate")
     estimate = best.pnp_result.extrinsics
@@ -272,6 +298,8 @@ def solve_render_match_pose(
             seed,
             query_padding=query_padding,
             native_elevation_patch=native_elevation_patch,
+            holdout_fold=holdout_fold,
+            query_sha256=query_sha256,
         )
         refinement_record = refined.record
         refinement_batch = _common_matcher_batch([refined])
@@ -281,23 +309,79 @@ def solve_render_match_pose(
             estimate = refined.pnp_result.extrinsics
             best = refined
 
-    candidates = tuple(
-        attempt.pnp_result.extrinsics
-        for attempt in solved_attempts[:10]
-        if attempt.pnp_result is not None and attempt.pnp_result.extrinsics is not None
-    )
+    candidate_validation: dict[str, Any]
+    if settings.candidate_validation.enabled:
+        candidate_render_pose = _candidate_render_extrinsics(query_camera, estimate)
+        validation_multiplier = settings.candidate_validation.render_resolution_multiplier
+        candidate_validation_intrinsics = CameraIntrinsics.from_horizontal_fov(
+            settings.render_width_px * validation_multiplier,
+            settings.render_height_px * validation_multiplier,
+            render_fov,
+        )
+        candidate_render = view_renderer.render(
+            terrain,
+            candidate_validation_intrinsics,
+            candidate_render_pose,
+            modality=settings.modality,
+            appearance=appearance,
+            terrain_stride=settings.terrain_stride,
+            native_elevation_patch=native_elevation_patch,
+            native_patch_stride=settings.native_patch_stride,
+        )
+        candidate_validation = _validate_candidate_pose(
+            validation_source,
+            candidate_render,
+            query_camera,
+            estimate,
+            settings,
+            holdout_fold=holdout_fold,
+        )
+    else:
+        candidate_validation = {
+            "schema": CANDIDATE_VALIDATION_SCHEMA,
+            "enabled": False,
+            "passed": True,
+            "failures": [],
+            "uses_reference_truth": False,
+            "withheld_from_geometric_pose_fit": False,
+            "withheld_from_geometric_frame_ranking": False,
+            "matcher_used_full_query_image": True,
+            "worker_candidate_selection_precedes_holdout": None,
+            "note": (
+                "explicit ablation: no lifted correspondences were withheld; the ordinary spatial cap "
+                "still limits pose-fitting input"
+            ),
+        }
+
     final_pnp = best.pnp_result
+    final_diagnostics = {
+        **base_diagnostics,
+        "selected_frame_index": validation_source.index,
+        "selected_frame_yaw_deg": validation_source.render.extrinsics.yaw_deg,
+        "final_fit_frame_index": best.index,
+        "refinement": refinement_record,
+        "final_pnp": final_pnp.diagnostics if final_pnp is not None else None,
+        "candidate_validation": candidate_validation,
+    }
+    if not candidate_validation["passed"]:
+        return RenderMatchPoseResult(
+            status="abstained",
+            extrinsics=None,
+            candidates=(),
+            diagnostics={
+                **final_diagnostics,
+                "abstain_reason": "candidate_pose_holdout_validation_failed",
+                "rejected_candidate_pose": estimate.model_dump(mode="json"),
+                "runner_up_retry_attempted": False,
+            },
+        )
     return RenderMatchPoseResult(
         status="solved",
         extrinsics=estimate,
-        candidates=candidates,
-        diagnostics={
-            **base_diagnostics,
-            "selected_frame_index": best.index,
-            "selected_frame_yaw_deg": best.render.extrinsics.yaw_deg,
-            "refinement": refinement_record,
-            "final_pnp": final_pnp.diagnostics if final_pnp is not None else None,
-        },
+        # Only the selected pose is exposed. Training-ranked runner-ups are
+        # never validated, including when the gate is disabled for ablation.
+        candidates=(estimate,),
+        diagnostics=final_diagnostics,
     )
 
 
@@ -601,6 +685,19 @@ def _match_distribution(
     }
 
 
+def _subset_match_set(matches: MatchSet, selected: NDArray[np.bool_]) -> MatchSet:
+    mask = np.asarray(selected, dtype=np.bool_)
+    if mask.shape != (matches.count,):
+        raise ValueError("match subset mask has the wrong shape")
+    return MatchSet(
+        query_xy_px=matches.query_xy_px[mask],
+        render_xy_px=matches.render_xy_px[mask],
+        confidence=matches.confidence[mask],
+        diagnostics=matches.diagnostics,
+        provenance=matches.provenance,
+    )
+
+
 def _match_and_fit_frame(
     index: int,
     render: TerrainRenderBundle,
@@ -615,6 +712,8 @@ def _match_and_fit_frame(
     *,
     query_padding: _QueryPaddingMask | None = None,
     native_elevation_patch: HeightfieldLike | None = None,
+    holdout_fold: int = 0,
+    query_sha256: str | None = None,
 ) -> _FrameAttempt:
     matches = match_set.chosen()
     if query_padding is None:
@@ -639,26 +738,74 @@ def _match_and_fit_frame(
         render_xy_px=padding_valid_matches.render_xy_px[lifted.valid],
         confidence=padding_valid_matches.confidence[lifted.valid],
     )
-    order = _balanced_match_cap_indices(
+    validation_config = settings.candidate_validation
+    raw_holdout = _query_spatial_holdout_mask(
+        matches.query_xy_px,
+        query_camera,
+        validation_config,
+        holdout_fold,
+    )
+    padding_holdout = _query_spatial_holdout_mask(
+        padding_valid_matches.query_xy_px,
+        query_camera,
+        validation_config,
+        holdout_fold,
+    )
+    lift_holdout = _query_spatial_holdout_mask(
         lift_valid_matches.query_xy_px,
-        lift_valid_matches.render_xy_px,
-        lift_valid_matches.confidence,
+        query_camera,
+        validation_config,
+        holdout_fold,
+    )
+    raw_training_matches = _subset_match_set(matches, ~raw_holdout)
+    raw_holdout_matches = _subset_match_set(matches, raw_holdout)
+    padding_training_matches = _subset_match_set(padding_valid_matches, ~padding_holdout)
+    padding_holdout_matches = _subset_match_set(padding_valid_matches, padding_holdout)
+    lift_training_matches = _subset_match_set(lift_valid_matches, ~lift_holdout)
+    lift_holdout_matches = _subset_match_set(lift_valid_matches, lift_holdout)
+    training_order = _balanced_match_cap_indices(
+        lift_training_matches.query_xy_px,
+        lift_training_matches.render_xy_px,
+        lift_training_matches.confidence,
         max_matches=settings.max_matches_per_frame,
         cell_px=settings.match_selection_cell_px,
     )
-    selection_record = _match_selection_record(
-        lift_valid_matches,
-        order,
+    holdout_order = _balanced_match_cap_indices(
+        lift_holdout_matches.query_xy_px,
+        lift_holdout_matches.render_xy_px,
+        lift_holdout_matches.confidence,
+        max_matches=validation_config.max_holdout_matches_per_frame,
+        cell_px=settings.match_selection_cell_px,
+    )
+    training_selection_record = _match_selection_record(
+        lift_training_matches,
+        training_order,
         query_camera=query_camera,
         render_shape=render.rgb.shape,
         max_matches=settings.max_matches_per_frame,
         cell_px=settings.match_selection_cell_px,
-        raw_matches=matches,
-        pre_lift_matches=padding_valid_matches,
+        raw_matches=raw_training_matches,
+        pre_lift_matches=padding_training_matches,
     )
-    query_xy = lift_valid_matches.query_xy_px[order]
-    confidence = lift_valid_matches.confidence[order]
-    world = lifted.world_xyz_m[lifted.valid][order]
+    holdout_selection_record = _match_selection_record(
+        lift_holdout_matches,
+        holdout_order,
+        query_camera=query_camera,
+        render_shape=render.rgb.shape,
+        max_matches=validation_config.max_holdout_matches_per_frame,
+        cell_px=settings.match_selection_cell_px,
+        raw_matches=raw_holdout_matches,
+        pre_lift_matches=padding_holdout_matches,
+    )
+    lift_world = lifted.world_xyz_m[lifted.valid]
+    training_world_all = lift_world[~lift_holdout]
+    holdout_world_all = lift_world[lift_holdout]
+    query_xy = lift_training_matches.query_xy_px[training_order]
+    confidence = lift_training_matches.confidence[training_order]
+    world = training_world_all[training_order]
+    holdout_query_xy = lift_holdout_matches.query_xy_px[holdout_order]
+    holdout_confidence = lift_holdout_matches.confidence[holdout_order]
+    holdout_world = holdout_world_all[holdout_order]
     pnp_result: PoseRansacResult | None = None
     if len(world) >= settings.min_lifted_matches_per_frame:
         initial = CameraExtrinsics(
@@ -709,12 +856,15 @@ def _match_and_fit_frame(
         "query_padding_valid_matches_before_lifting": padding_valid_matches.count,
         "query_padding_rejected_matches": int(rejected_by_query_padding.sum()),
         "lift_valid_matches_before_cap": lift_valid_matches.count,
-        "matches_after_cap": int(len(order)),
+        "matches_after_cap": int(len(training_order)),
         "match_stage_counts": {
             "worker_selected": matches.count,
             "after_query_padding_rejection": padding_valid_matches.count,
             "after_render_lifting": lift_valid_matches.count,
-            "after_spatial_cap": int(len(order)),
+            "after_spatial_cap": int(len(training_order)),
+            "training_after_spatial_cap": int(len(training_order)),
+            "holdout_after_spatial_cap": int(len(holdout_order)),
+            "total_after_independent_caps": int(len(training_order) + len(holdout_order)),
         },
         "query_padding_filter": {
             **query_padding.record,
@@ -722,8 +872,36 @@ def _match_and_fit_frame(
             "rejected_matches": int(rejected_by_query_padding.sum()),
             "matches_after_filter": padding_valid_matches.count,
         },
-        "match_selection": selection_record,
+        "match_selection": training_selection_record,
+        "holdout_match_selection": holdout_selection_record,
+        "holdout_partition": {
+            "schema": HOLDOUT_PARTITION_SCHEMA,
+            "method": HOLDOUT_PARTITION_METHOD,
+            "enabled": validation_config.enabled,
+            "query_content_sha256": query_sha256,
+            "grid": {
+                "columns": validation_config.query_grid_columns,
+                "rows": validation_config.query_grid_rows,
+            },
+            "folds": validation_config.folds,
+            "heldout_fold": holdout_fold if validation_config.enabled else None,
+            "training_folds": (
+                [fold for fold in range(validation_config.folds) if fold != holdout_fold]
+                if validation_config.enabled
+                else list(range(validation_config.folds))
+            ),
+            "partition_stage": (
+                "after matcher worker selection, query-padding rejection, and render lifting; "
+                "before independent local spatial caps"
+            ),
+            "withheld_from_geometric_pose_fit": validation_config.enabled,
+            "withheld_from_geometric_frame_ranking": validation_config.enabled,
+            "matcher_used_full_query_image": True,
+            "worker_candidate_selection_precedes_holdout": True,
+            "uses_reference_truth": False,
+        },
         "lifted_matches": int(len(world)),
+        "heldout_lifted_matches": int(len(holdout_world)),
         "lifting": lifted.rejection_counts,
         "matcher_diagnostics": matches.diagnostics,
         "render": render.provenance,
@@ -737,8 +915,36 @@ def _match_and_fit_frame(
         lifted_world=world,
         query_xy=query_xy,
         confidence=confidence,
+        holdout_world=holdout_world,
+        holdout_query_xy=holdout_query_xy,
+        holdout_confidence=holdout_confidence,
         pnp_result=pnp_result,
         record=record,
+    )
+
+
+def _validate_candidate_pose(
+    source: _FrameAttempt,
+    candidate_render: TerrainRenderBundle,
+    query_camera: CameraModel,
+    candidate: CameraExtrinsics,
+    settings: RenderMatchConfig,
+    *,
+    holdout_fold: int,
+) -> dict[str, Any]:
+    """Gate one training-selected candidate on never-fit geometric evidence."""
+
+    return validate_candidate_pose(
+        source_render=source.render,
+        source_frame_index=source.index,
+        holdout_world=source.holdout_world,
+        holdout_query_xy=source.holdout_query_xy,
+        candidate_render=candidate_render,
+        query_camera=query_camera,
+        candidate=candidate,
+        pnp=settings.pnp,
+        config=settings.candidate_validation,
+        holdout_fold=holdout_fold,
     )
 
 
@@ -764,7 +970,7 @@ def _base_diagnostics(
     query_padding: _QueryPaddingMask,
 ) -> dict[str, Any]:
     diagnostics = {
-        "kind": "render_match_lift_pnp_v1",
+        "kind": "render_match_lift_pnp_v2",
         "matcher": matcher.identity(),
         "query": {
             "shape": list(query.shape),
@@ -820,7 +1026,7 @@ def _abstained_result(
         status="abstained",
         extrinsics=None,
         diagnostics={
-            "kind": "render_match_lift_pnp_v1",
+            "kind": "render_match_lift_pnp_v2",
             "abstain_reason": reason,
             "matcher": matcher.identity(),
             "render_config": _render_config_record(settings, _render_fov(query_camera, settings)),
@@ -859,6 +1065,7 @@ def _render_config_record(config: RenderMatchConfig, actual_fov: float) -> dict[
         "min_lifted_matches_per_frame": config.min_lifted_matches_per_frame,
         "max_relative_depth_span": config.max_relative_depth_span,
         "refinement_passes": config.refinement_passes,
+        "candidate_validation": dict(config.candidate_validation.__dict__),
         "pnp": dict(config.pnp.__dict__),
     }
 

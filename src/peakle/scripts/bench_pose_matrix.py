@@ -32,6 +32,7 @@ from peakle.localize.correspondence import (
     CORRESPONDENCE_CACHE_KEY_SCHEMA,
 )
 from peakle.localize.paths import BASE
+from peakle.localize.render_match_pnp import CandidateValidationConfig
 from peakle.localize.strategy_bench import (
     ALGORITHMS,
     EVIDENCE_TRACKS,
@@ -72,6 +73,7 @@ def main() -> None:
         render_yaw_step_deg=args.render_yaw_step,
         render_refinement_passes=args.render_refinement_passes,
         native_patch_stride=args.native_patch_stride,
+        render_candidate_validation=CandidateValidationConfig(enabled=not args.disable_candidate_validation),
         matcher_command=tuple(shlex.split(args.matcher_command)) if args.matcher_command else (),
         matcher_id=args.matcher_id,
         matcher_manifest_path=args.matcher_manifest,
@@ -192,6 +194,14 @@ def _parser() -> argparse.ArgumentParser:
         help="fine elevation mesh decimation (2 m swissALTI3D -> 16 m at the default stride)",
     )
     parser.add_argument(
+        "--disable-candidate-validation",
+        action="store_true",
+        help=(
+            "ablation only: allow the selected PnP pose without the default held-out spatial "
+            "reprojection and candidate-render visibility checks"
+        ),
+    )
+    parser.add_argument(
         "--matcher-command",
         help="quoted worker command; Peakle appends '--request /absolute/request.json'",
     )
@@ -262,6 +272,7 @@ def _run_metadata(
         BASE / "src/peakle/localize/correspondence.py",
         BASE / "src/peakle/scripts/roma_match_worker.py",
         BASE / "src/peakle/localize/pnp.py",
+        BASE / "src/peakle/localize/candidate_validation.py",
         BASE / "src/peakle/localize/render_match_pnp.py",
         BASE / "src/peakle/localize/swissdem.py",
         BASE / "src/peakle/rendering/orthophoto.py",
@@ -340,6 +351,7 @@ def _run_metadata(
             "yaw_step_deg": config.render_yaw_step_deg,
             "refinement_passes": config.render_refinement_passes,
             "native_patch_stride": config.native_patch_stride,
+            "candidate_validation": config_record(config)["render_candidate_validation"],
             "orthophoto": {
                 "cache": config.orthophoto_cache_dir,
                 "zoom": config.orthophoto_zoom,

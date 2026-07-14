@@ -676,7 +676,7 @@ def fit_pose_ransac(
         np.asarray(estimate.position.as_tuple(), dtype=np.float64),
         unique_tolerance_m=settings.world_unique_tolerance_m,
     )
-    world_degeneracy_gate = _world_degeneracy_gate(inlier_world_geometry, settings)
+    world_degeneracy_gate = evaluate_world_degeneracy(inlier_world_geometry, settings)
     original_inliers[retained_indices] = inliers
     original_errors[retained_indices] = errors
     final_ground_sample = (
@@ -857,10 +857,12 @@ def world_consensus_geometry(
     }
 
 
-def _world_degeneracy_gate(
+def evaluate_world_degeneracy(
     geometry: dict[str, Any],
     config: PoseRansacConfig,
 ) -> dict[str, Any]:
+    """Apply the shared truth-free geometry gates to a 3D consensus record."""
+
     required_unique_points = max(config.sample_size, config.min_unique_world_inliers)
     thresholds = {
         "minimum_unique_point_count": required_unique_points,

@@ -80,14 +80,54 @@ The implemented high-upside branch follows LandscapeAR:
    query/render pair;
 3. reject border-connected near-black padding introduced by the cylindrical/tangent query warp;
 4. reject matches that lift to sky, missing appearance, or a render-depth discontinuity;
-5. apply a deterministic joint query/render spatial cap, retaining at most 800 balanced matches;
-6. solve with projection-aware nonlinear PnP/RANSAC through the exact query camera model; and
-7. optionally re-render once around an accepted estimate and repeat matching/refinement.
+5. deterministically reserve one content-derived fold of an interleaved 8×6 query grid and keep
+   those lifted correspondences out of geometric PnP and geometric frame ranking;
+6. independently apply the joint query/render spatial cap to the training and held-out sets,
+   retaining at most 800 and 400 balanced matches respectively;
+7. solve with projection-aware nonlinear PnP/RANSAC through the exact query camera model;
+8. optionally re-render once around an accepted estimate and repeat matching/refinement while
+   excluding the same held-out fold; and
+9. render exactly the selected candidate pose independently, then require the held-out points to pass
+   reprojection and explicit z-buffer testability/visibility-consistency gates.
 
-The `5,000 → padding filter → render lift → balanced 800` ordering is deliberate. The
+The `5,000 → padding filter → render lift → spatial holdout → independent balanced caps` ordering is deliberate. The
 matcher cache stores the worker-selected candidates, not the later geometry-dependent subset, so
 padding, lifting, cap, RANSAC, and acceptance changes can be replayed without another model pass.
-Selection and every rejection count are persisted per render frame.
+Selection and every rejection count are persisted per render frame. Candidate validation uses four
+fixed interleaved folds; the query content digest chooses the held-out fold deterministically. The
+subpixel lift follows the rasterizer's perspective-correct convention: interpolate finite positive
+inverse depth, invert once at the keypoint, and construct the world point on that exact camera ray.
+It never bilinearly interpolates the stored forward-depth image.
+
+Visibility uses a fresh 2× auxiliary pinhole render of the same hashed terrain surface. For a
+`cyltan` query, its candidate crop-shift angle only centres vertical frustum coverage and is not
+presented as calibrated physical pitch; query reprojection still uses the exact `cyltan` model. Each
+held-out terrain point needs an all-finite 3×3 depth neighbourhood whose span is at most the smaller
+of 250 m and 8% of median depth. This deliberately removes only gross discontinuities: a steep smooth
+mountain face can also have a large image-space span, so exact triangle/ray visibility remains a
+future improvement. The actual ordering check is much tighter, comparing inverse-depth-interpolated
+z-buffer depth with the point depth using
+`max(1 m, min(3 m, 0.0001 × expected depth))`; large local spans never widen that tolerance.
+
+The default 8×6 grid, four folds, 400-match holdout cap, 5 px reprojection threshold, 50%
+candidate-render testability floor, 80% conditional visibility-consistency floor, and minimum 14
+conditional trials are recorded in the artifact. The implementation also records nominal one-sided
+95% Clopper–Pearson lower-bound gates. Those bounds are exact only for independent Bernoulli trials;
+dense learned matches are spatially correlated, so they are heuristic checks rather than calibrated
+coverage guarantees. The raw counts and spatial-distribution gates remain authoritative diagnostics.
+Joint held-out support must also pass the PnP geometry gates for unique 3D points, horizontal/3D
+baseline, non-collinearity, and camera angular span; a spatially spread but degenerate world locus is
+not accepted.
+The held-out matches come from the same source-render matcher family, making this a truth-free
+geometric cross-check—not independent image evidence or a second matcher vote. Matcher inference
+still sees the full query image, and the worker's learned correspondence ranking/cap happens before
+the geometric holdout split; the holdout therefore closes the PnP fit/grade loop but is not withheld
+from feature extraction or correspondence generation. A failed gate returns the explicit
+`candidate_pose_holdout_validation_failed` abstention and never retries a runner-up.
+
+The gate is enabled by default. `--disable-candidate-validation` is retained only for declared
+ablation or backward controls; the opt-out and the complete fixed configuration are serialized in
+`run.json` and the per-case diagnostics.
 
 LandscapeAR used twelve 30° render directions and this exact lift→PnP structure:
 [LandscapeAR, ECCV 2020](https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123740290.pdf).
@@ -202,14 +242,20 @@ python -m peakle.scripts.bench_pose_matrix \
 Use `--matcher-id roma_outdoor --matcher-manifest local/models/roma/manifest.json` for the paired
 RoMa control. Benchmarks never fetch missing orthophoto tiles or model files.
 
-#### Recommended next experiment
+#### Candidate validation and recommended next experiment
 
-Do not relax the 100 m target or accept consensus alone. Re-render each candidate pose independently
-and validate visibility, terrain occlusion ordering, silhouette/ridge alignment, and held-out spatial
-regions that were not used to fit PnP. Require agreement across independent evidence families and
-abstain when clearance/nuisance parameters are boundary-limited. An unchanged-position competitor
-and a Schur-projected horizontal uncertainty estimate remain useful observability gates, but they
-cannot catch a set of systematically biased matches that genuinely prefers the wrong translation.
+The first part of the recommendation is now implemented: every default run holds out spatial cells,
+re-renders the selected candidate, and checks held-out reprojection plus terrain visibility/occlusion
+ordering before returning a pose. This closes the same-correspondence fit/grade loop, but it cannot
+prove that a systematically biased cross-modal match family is geographically correct. The corrected
+Swiss controls above predate this gate and must be replayed before making any claim about its empirical
+rejection rate.
+
+Do not relax the 100 m target or accept consensus alone. The next independent layer should compare
+the candidate render against evidence not supplied to PnP: silhouette/ridge alignment, photo edge
+support, and nuisance/clearance boundary checks. An unchanged-position competitor and a
+Schur-projected horizontal uncertainty estimate remain useful observability gates, but they cannot
+catch a set of systematically biased matches that genuinely prefers the wrong translation.
 
 For the no-position-prior track, build the geographic 360° DEM-horizon index first, retrieve top-K
 location/yaw cells, and only then invoke the same fine orthophoto render → learned match → PnP stage.

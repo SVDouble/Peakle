@@ -33,6 +33,10 @@ def _discover_runs() -> list[dict[str, Any]]:
         metadata: dict[str, Any] = stored_metadata if stored_metadata is not None else {}
         matrix_value = metadata.get("matrix")
         matrix_metadata: dict[str, Any] = matrix_value if isinstance(matrix_value, dict) else {}
+        render_matching_value = metadata.get("render_matching")
+        render_matching: dict[str, Any] = render_matching_value if isinstance(render_matching_value, dict) else {}
+        candidate_validation_value = render_matching.get("candidate_validation")
+        candidate_validation = candidate_validation_value if isinstance(candidate_validation_value, dict) else None
         algorithms = sorted({str(case.get("algorithm")) for case in matrix_cases if case.get("algorithm")})
         if not algorithms:
             configured = matrix_metadata.get("algorithms") if isinstance(matrix_metadata, dict) else None
@@ -82,6 +86,7 @@ def _discover_runs() -> list[dict[str, Any]]:
             "git_diff_sha256": code_metadata.get("git_diff_sha256"),
             "implementation_sha256": implementation.get("aggregate_sha256"),
             "dirty_code": code_metadata.get("dirty"),
+            "candidate_validation": _json_safe(candidate_validation),
             "_path": result_path,
             "_metadata": metadata,
         }
@@ -389,6 +394,9 @@ def _filter_legacy_rows(rows: list[dict[str, Any]], subset: str) -> list[dict[st
 def _matrix_case(case: dict[str, Any], compatibility: dict[str, Any]) -> dict[str, Any]:
     errors = case.get("errors") if isinstance(case.get("errors"), dict) else None
     baseline = case.get("baseline") if isinstance(case.get("baseline"), dict) else None
+    result = case.get("result") if isinstance(case.get("result"), dict) else None
+    diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
+    candidate_validation = diagnostics.get("candidate_validation") if isinstance(diagnostics, dict) else None
     baseline_errors = (
         baseline.get("errors") if isinstance(baseline, dict) and isinstance(baseline.get("errors"), dict) else None
     )
@@ -425,6 +433,7 @@ def _matrix_case(case: dict[str, Any], compatibility: dict[str, Any]) -> dict[st
             "photo_edge_supported": _case_photo_edge_supported(case),
             "evidence": case.get("evidence"),
             "original_metadata_diagnostic": case.get("original_metadata_diagnostic"),
+            "candidate_validation": candidate_validation,
         }
     )
 

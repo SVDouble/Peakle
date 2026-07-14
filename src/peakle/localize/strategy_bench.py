@@ -38,7 +38,7 @@ import math
 import os
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from statistics import median
 from typing import Any, Literal
@@ -71,7 +71,12 @@ from peakle.localize.outline_score import rows_to_mask
 from peakle.localize.paths import BASE, COP_TILES_DIR, STD_WIDTH, SWISS_DIR
 from peakle.localize.photo_support import edge_mask, family_support
 from peakle.localize.pnp import PoseRansacConfig
-from peakle.localize.render_match_pnp import RenderMatchConfig, RenderMatchPoseResult, solve_render_match_pose
+from peakle.localize.render_match_pnp import (
+    CandidateValidationConfig,
+    RenderMatchConfig,
+    RenderMatchPoseResult,
+    solve_render_match_pose,
+)
 from peakle.localize.solve import HorizonProfile
 from peakle.localize.swissdem import Patch, in_switzerland, load_swiss_patch
 from peakle.optimization.solve import PoseSolveResult, solve_pose
@@ -203,6 +208,7 @@ class MatrixConfig:
     render_yaw_step_deg: float = 30.0
     render_refinement_passes: int = 1
     native_patch_stride: int = 8
+    render_candidate_validation: CandidateValidationConfig = field(default_factory=CandidateValidationConfig)
     matcher_command: tuple[str, ...] = ()
     matcher_id: str = "external_matcher"
     matcher_manifest_path: str | None = None
@@ -250,6 +256,7 @@ class MatrixConfig:
             raise ValueError("render_refinement_passes must be zero or one")
         if self.native_patch_stride < 1:
             raise ValueError("native_patch_stride must be positive")
+        self.render_candidate_validation.validate()
         if self.render_matcher == "worker" and not self.matcher_command:
             raise ValueError("worker render matcher requires matcher_command")
         if self.render_matcher == "worker" and self.matcher_manifest_path is None:
@@ -1017,6 +1024,7 @@ def _render_match_resources(terrain: TerrainMap, config: MatrixConfig) -> Render
         terrain_stride=config.terrain_stride,
         native_patch_stride=config.native_patch_stride,
         refinement_passes=config.render_refinement_passes,
+        candidate_validation=config.render_candidate_validation,
         pnp=replace(PoseRansacConfig(), seed=config.root_seed),
     )
     return RenderMatchResources(

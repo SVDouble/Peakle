@@ -108,11 +108,16 @@ python -m peakle.scripts.acceptance                # end-to-end acceptance check
 The learned path is deliberately offline and reproducible. Its model manifest pins the source
 checkout, inference settings, DINOv2 and matcher checkpoint hashes. `--matcher-cache` enables an
 optional content-addressed cache of the worker's 5,000 candidates per image pair; a warm replay
-reuses those exact candidates and reruns padding rejection, terrain lifting, the balanced 800-match
-cap, and PnP/acceptance. `--native-patch-stride` controls fine-terrain mesh decimation: a 2 m source
+reuses those exact candidates and reruns padding rejection, inverse-depth terrain lifting, spatial
+holdout, independent balanced caps, and PnP/acceptance. `--native-patch-stride` controls fine-terrain mesh decimation: a 2 m source
 at the default stride 8 is an approximately 16 m render mesh, not a claim of 2 m rendering.
 swissALTI provisioning follows every STAC v1 page, selects one deterministic newest 2 m edition per
 coordinate, and rejects any bilinear elevation sample whose four source cells are not finite.
+Candidate-pose validation is enabled by default: a content-derived fold of an interleaved 8×6
+query grid is withheld from PnP, then checked for reprojection and z-buffer visibility against a
+fresh 2× render of the same terrain surface at the selected pose. `--disable-candidate-validation` exists only for explicit
+ablation/backward controls; its disabled state and all fixed gate settings are persisted in the
+artifact configuration.
 
 ```bash
 python -m peakle.scripts.bench_pose_matrix \

@@ -12,7 +12,7 @@ from peakle.domain.coordinates import GeoPoint, LocalPoint
 from peakle.domain.pose import PosePrior
 from peakle.domain.terrain import TerrainMap, TerrainSpec
 from peakle.localize.geopose import GeoPoseOriginalMetadata, GeoPoseSample
-from peakle.localize.render_match_pnp import RenderMatchConfig, RenderMatchPoseResult
+from peakle.localize.render_match_pnp import CandidateValidationConfig, RenderMatchConfig, RenderMatchPoseResult
 from peakle.localize.strategy_bench import (
     ALGORITHMS,
     EvidenceTrack,
@@ -193,6 +193,42 @@ def test_matcher_cache_is_explicit_worker_only_and_persisted_by_cli() -> None:
     assert provenance["configured_path"] == "local/cache/correspondences"
     assert provenance["resolved_path"] == str((BASE / "local/cache/correspondences").resolve())
     assert provenance["mode"] == "read_through_atomic_content_addressed"
+
+
+def test_candidate_validation_is_enabled_serialized_and_cli_opt_out_reaches_render_config() -> None:
+    from peakle.localize import strategy_bench as module
+    from peakle.scripts.bench_pose_matrix import _parser
+
+    default = MatrixConfig(render_matcher="sift", terrain_grid=128)
+    record = config_record(default)["render_candidate_validation"]
+    assert record == {
+        "enabled": True,
+        "query_grid_columns": 8,
+        "query_grid_rows": 6,
+        "folds": 4,
+        "max_holdout_matches_per_frame": 400,
+        "confidence_level": 0.95,
+        "minimum_testable_fraction": 0.5,
+        "minimum_visibility_consistency_fraction": 0.8,
+        "render_resolution_multiplier": 2,
+        "maximum_local_absolute_depth_span_m": 250.0,
+        "maximum_local_relative_depth_span": 0.08,
+        "minimum_depth_tolerance_m": 1.0,
+        "maximum_depth_tolerance_m": 3.0,
+        "relative_depth_tolerance": 1e-4,
+        "minimum_conditional_visibility_trials": 14,
+    }
+    assert _parser().parse_args([]).disable_candidate_validation is False
+
+    args = _parser().parse_args(["--disable-candidate-validation"])
+    configured = MatrixConfig(
+        render_matcher="sift",
+        terrain_grid=128,
+        render_candidate_validation=CandidateValidationConfig(enabled=not args.disable_candidate_validation),
+    )
+    resources = module._render_match_resources(_terrain(), configured)
+
+    assert resources.config.candidate_validation.enabled is False
 
 
 def test_rgb_only_evidence_does_not_invoke_skyline_extraction(monkeypatch: pytest.MonkeyPatch) -> None:

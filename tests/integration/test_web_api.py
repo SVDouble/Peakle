@@ -260,6 +260,16 @@ def test_pose_benchmark_dashboard_surfaces_strategy_matrix(
             "errors": {"horizontal_position_m": 40.0, "yaw_deg": 2.0, "pitch_deg": None},
             "success": {"value": True},
             "baseline": {"errors": baseline_errors, "success": {"value": False}},
+            "result": {
+                "diagnostics": {
+                    "candidate_validation": {
+                        "schema": "peakle_candidate_pose_holdout_validation_v1",
+                        "enabled": True,
+                        "passed": True,
+                        "failures": [],
+                    }
+                }
+            },
         },
     ]
     payload = {
@@ -290,6 +300,14 @@ def test_pose_benchmark_dashboard_surfaces_strategy_matrix(
                     "evidence_tracks": ["pfm_oracle"],
                     "prior_regimes": ["perturbed_metadata"],
                 },
+                "render_matching": {
+                    "candidate_validation": {
+                        "enabled": True,
+                        "query_grid_columns": 8,
+                        "query_grid_rows": 6,
+                        "folds": 4,
+                    }
+                },
             }
         )
     )
@@ -299,6 +317,7 @@ def test_pose_benchmark_dashboard_surfaces_strategy_matrix(
     assert runs[0]["kind"] == "strategy_matrix"
     assert runs[0]["algorithm_count"] == 2
     assert runs[0]["recommended"] is True
+    assert runs[0]["candidate_validation"]["enabled"] is True
     summary = client.get(f"/api/bench/runs/{runs[0]['id']}/summary").json()
     assert summary["mode"] == "matrix"
     assert summary["default_subset"] == "primary_height_a"
@@ -313,6 +332,7 @@ def test_pose_benchmark_dashboard_surfaces_strategy_matrix(
     assert ambiguity["used_by_estimator"] is False
     assert ambiguity["used_for_ranking"] is False
     assert ambiguity["refined_minus_original"]["horizontal_position_m"] == 412.0
+    assert result["rows"][0]["candidate_validation"]["passed"] is True
 
 
 def test_matrix_default_prefers_primary_over_excluded_map_diagnostic() -> None:
