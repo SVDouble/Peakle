@@ -1,5 +1,9 @@
 # Ridge / skyline outline extraction — methods survey
 
+> **Historical methods survey (non-normative).** This note preserves extraction research options;
+> it does not set the current implementation sequence. See the
+> [research and development program](../research-and-development.md).
+
 For matching a photo to a DEM, peakle needs to annotate the photo's outlines:
 the **skyline** (sky/terrain boundary) and, more valuably, the **internal
 ridgelines** (mountain-on-mountain occlusion edges at different depths). This

@@ -1,5 +1,9 @@
 # Synthetic localization benchmark
 
+> **Historical study record (non-normative, frozen 2026-07-14).** This document preserves the
+> shared-renderer stage-ceiling design and results. Current status, accepted claims, and sequencing
+> live only in the [research and development program](../research-and-development.md).
+
 Peakle's synthetic demo is useful for checking the older pinhole optimizer, but it is not an
 end-to-end test of the production localization path. The demo renders a terrain mask, extracts its
 exact boundary, and calls `PoseOptimizer`. GeoPose localization instead uses a cylindrical/tangent

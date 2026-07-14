@@ -1,5 +1,9 @@
 # Pose localization strategy after the refined-pose reset
 
+> **Historical study record (non-normative, frozen 2026-07-14).** This document preserves the
+> refined-pose reset and render-match/PnP experiment details. Current status, accepted claims, and
+> sequencing live only in the [research and development program](../research-and-development.md).
+
 The product goal is not to draw a plausible DEM overlay. It is to recover a camera pose that
 improves a real prior—or localizes without one—and to abstain when the image/terrain evidence does
 not support that result.
@@ -169,7 +173,8 @@ an explicit abstention with the best candidate and diagnostics, not a pose disgu
 #### Current GLO-30 control
 
 On the frozen one-image GLO-30 control, MINIMA's strongest frame reaches 72 inliers out of the
-balanced 800 (9%); RoMa remains below 4%. Both correctly abstain below the 20% acceptance floor. The
+balanced 800 (9%); the latest paired audited RoMa control reaches 34/800 (4.25%). Both correctly
+abstain below the 20% acceptance floor. The
 query contains 7.07% detected cylindrical-warp padding and substantial non-terrain occlusion, while
 no cached swissALTI3D patch covers the sample and the GLO-30 elevation mesh is effectively about
 180 m at the configured stride. The cached z14 orthophoto is appearance only and makes no claim of

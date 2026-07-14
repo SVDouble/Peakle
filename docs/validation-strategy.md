@@ -1,5 +1,9 @@
 # Validation strategy: making pose results trustworthy
 
+> **Methodology and incident history, not a current roadmap.** The durable safeguards below still
+> apply. Current eligibility, accepted evidence, metrics, and sequencing live only in the
+> [research and development program](research-and-development.md).
+
 *2026-07-04.  Motivating incident: repeated cycles of "the overlay looks aligned" / "chamfer is
 low, everything works" followed by the user checking and finding 0/5 skylines correct.  This
 document fixes the methodology so a result can be called good only when a measurement says so.*

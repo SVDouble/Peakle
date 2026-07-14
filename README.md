@@ -3,8 +3,9 @@
 Peakle is a workbench for recovering a camera pose from a mountain view by matching image
 evidence against a real-world elevation model (DEM). The target is position, orientation, and
 camera calibration with or without a prior. The honest current baseline is narrower: the ray-cast
-horizon solver can recover effective crop yaw at a supplied position, while full-pose and
+horizon solver can recover effective crop yaw at a supplied position, while position-recovery and
 regional/no-prior methods remain experimental and currently fail the frozen real-data matrix.
+Physical pitch/roll are not yet scoreable on the current cylindrical-crop benchmark.
 
 Terminology in the app:
 
@@ -63,16 +64,15 @@ of the recommended-strategy ranking.
    skyline candidates. The hermetic default is colour; optional models are never downloaded
    implicitly by a benchmark.
 2. **Horizon solve** — for a known position the 360° horizon `el(az)` is
-   ray-cast once (`peakle.localize.solve.HorizonProfile`); every (yaw, pitch, fov)
-   hypothesis is a resampling scored by a capped skyline chamfer with top-K basin
-   polish.
+   ray-cast once (`peakle.localize.solve.HorizonProfile`); every yaw, effective vertical-crop,
+   and FOV hypothesis is a resampling scored by a capped skyline chamfer with top-K basin polish.
 3. **Arbitration** — among skyline hypotheses within a tight chamfer slack, the
    winner is the one whose typed DEM outlines best *explain* the photo's edges —
    this is what rejects a lake edge masquerading as the skyline.
-4. **Full-pose experiments** — CMA-ES, Powell, Nelder–Mead, differential evolution,
-   contour-database, and regional-grid searches share a projection-aware objective. Real MAP_A
-   tests currently show position drift and a reduced/full-resolution mismatch, so these methods
-   are not validated or recommended.
+4. **Position/yaw experiments** — CMA-ES, Powell, Nelder–Mead, differential evolution,
+   contour-database, and regional-grid searches share a projection-aware objective. Physical
+   pitch/roll are not graded on the current cylindrical crops. Real tests show position drift and a
+   reduced/full-resolution mismatch, so these methods are not validated or recommended.
 5. **Render-match PnP** — an experimental branch renders an orthophoto-textured yaw fan, runs a
    pinned offline MINIMA or RoMa matcher, lifts valid render pixels to terrain coordinates, and
    fits the query pose with projection-aware RANSAC. It abstains on weak or degenerate consensus.
@@ -88,10 +88,12 @@ Solver evaluation uses the published MANUAL GeoPose pose (the refined `info.txt`
 explicit controlled-prior tracks. The later `info.txt` fields retain the original noisy Flickr
 GPS/elevation/FOV only as a labelled, non-ranking diagnostic; they never enter a solver, prior,
 success grade, or leaderboard.
-Before a case can grade a solver, `gt_dem_compat_v1` measures whether the source PFM/depth and the
-best locally available terrain stack agree at the **unmodified** metadata pose. It fixes only the
-unknown global vertical crop offset; it never optimizes yaw/position and never reads a photo
-skyline or solver result. A separate `raw_camera_clearance_v1` gate detects altitude/datum
+`gt_dem_compat_v1` measures whether source PFM/depth and the best locally available terrain stack
+agree at the **unmodified** metadata pose. It fixes only the unknown global vertical crop offset; it
+never optimizes yaw/position and never reads a photo skyline or solver result. Some legacy matrix
+cells use hard compatibility tiers for eligibility, but those seed-sensitive thresholds are not
+calibrated and no longer define accepted research claims; the current program treats compatibility
+as a continuous dataset diagnostic. `raw_camera_clearance_v1` separately records altitude/datum
 incompatibility that vertical crop alignment could hide. GT views solve from `photo_auto` by
 default; PFM remains an explicit diagnostic oracle and is never a silent fallback.
 
@@ -107,91 +109,24 @@ python -m peakle.scripts.bench_synthetic_pipeline --help    # custom-pinhole sta
 python -m peakle.scripts.acceptance                # end-to-end acceptance checks
 ```
 
-### High-compute pose atlas
+## Research status
 
-The first three-photo native-patch-assisted atlas searched a square with ±500 m east/north
-half-width at 50 m spacing and every 1° yaw. The 15° yaw perturbation was recorded but not used to
-constrain the search. Blind skyline ranking failed all three PFM and photo tracks (301.9 m and
-416.6 m median position error), but the frozen lattice contained an evaluation-only, GT-selected
-14.9–19.8 m horizontal/yaw hypothesis for every image. Under PFM evidence, a target-successful pose
-entered the stored candidate prefix within its top 5, 10, or 25 modes. Crucially, the current
-unregularized skyline score preferred a displaced pose even over a reference-east/north probe on
-all three controls, so more iterations of that same score are not the answer. That result identified
-independent range, occlusion, and typed-ridge verification over the shortlisted modes as the next
-gate. A fixed, truth-audited reference-depth fusion now moves those three PFM-atlas winners to 18.5,
-52.0 and 35.4 m (3/3 within 100 m); no individual skyline/depth/outline component reaches 3/3. This is an
-analysis-only ceiling because its PFM was rendered at the reference pose, not a production result.
-Over the automatic-photo candidate pools the same verifier reaches 2/3 at top one; on the remaining
-case it promotes a target-successful mode from photo rank 1,221 to geometry rank 31, motivating a
-multi-hypothesis photo/refinement beam rather than another hard top-one selection. See
-[the high-compute pose-atlas study](docs/development/pose-atlas-study.md) for the truth boundary,
-exact ranks, artifact hash, reproduction command, and research target.
+Peakle does not yet reliably recover metric camera position. The strongest current conclusions are:
 
-### Synthetic stage contracts
+- known-position horizon alignment can recover crop yaw;
+- a dense local atlas contains reference-near poses, but skyline-only ranking selects displaced
+  basins;
+- source-PFM geometry can rerank those candidates only as a diagnostic oracle ceiling;
+- the current RGB verifier abstains on all three controls but does not select a correct top pose;
+  this is too small to calibrate its risk; and
+- render-match/PnP remains experimental, with too little eligible real data and a known false
+  accept in its same-family holdout.
 
-The production cyltan atlas/raycast path now has exact-truth integration controls that separate
-proposal coverage from blind ranking and label same-raycaster depth as an identity ceiling. A
-separate custom-pinhole/shared-renderer harness sweeps exact versus coarsened estimator terrain,
-controlled priors, color/haze extraction, and fixed skyline/depth/outline scores. Its first 20-case
-artifact keeps proposal recall at 20/20 by construction, but factor-two terrain coarsening drops
-exact-mask skyline top-1 target hits from 8/10 to 3/10; automatic color skyline falls from 2/10 to
-0/10. Under coarse terrain, absolute metric range reaches 6/10 versus 3/10 for scale-aligned range
-and 2/10 for typed outlines. These are non-production upper-bound diagnostics, not real-photo wins.
-See [the synthetic localization benchmark](docs/development/synthetic-localization-benchmark.md) for
-the stage contracts, ambiguity rules and artifact hash.
-
-### Render-match-PnP benchmark
-
-The learned path is deliberately offline and reproducible. Its model manifest pins the source
-checkout, inference settings, DINOv2 and matcher checkpoint hashes. `--matcher-cache` enables an
-optional content-addressed cache of the worker's 5,000 candidates per image pair; a warm replay
-reuses those exact candidates and reruns padding rejection, inverse-depth terrain lifting, spatial
-holdout, independent balanced caps, and PnP/acceptance. `--native-patch-stride` controls fine-terrain mesh decimation: a 2 m source
-at the default stride 8 is an approximately 16 m render mesh, not a claim of 2 m rendering.
-swissALTI provisioning follows every STAC v1 page, selects one deterministic newest 2 m edition per
-coordinate, and rejects any bilinear elevation sample whose four source cells are not finite.
-Candidate-pose validation is enabled by default: a content-derived fold of an interleaved 8×6
-query grid is withheld from PnP, then checked for reprojection and z-buffer visibility against a
-fresh 2× render of the same terrain surface at the selected pose. `--disable-candidate-validation` exists only for explicit
-ablation/backward controls; its disabled state and all fixed gate settings are persisted in the
-artifact configuration.
-
-```bash
-python -m peakle.scripts.bench_pose_matrix \
-  --samples eth_ch1_IMG_4948_01024 \
-  --profile core \
-  --algorithms keep-prior,render-pnp \
-  --evidence photo_rgb \
-  --regimes perturbed_metadata \
-  --perturbation standard \
-  --replicates 3 \
-  --render-matcher worker \
-  --render-modality orthophoto \
-  --render-refinement-passes 0 \
-  --matcher-command "$PWD/.venv/bin/python $PWD/src/peakle/scripts/roma_match_worker.py" \
-  --matcher-id minima_roma \
-  --matcher-manifest local/models/minima/manifest.json \
-  --matcher-cache local/cache/matcher-correspondences \
-  --orthophoto-cache local/data/swissimage \
-  --native-patch-stride 8 \
-  --output local/output/<new-run>-geopose-bench
-```
-
-The initial one-image GLO-30 control is negative: MINIMA peaks at 72/800 inliers (9%), RoMa stays
-below 4%, and both abstain. A corrected high-resolution Swiss control now exercises the full
-orthophoto + swissALTI path. On the sole currently eligible `MAP_B/HEIGHT_A` image, three standard
-pre-gate MINIMA perturbations and the paired RoMa run all recover yaw within 1.02° and form strong
-consensus, but miss the published refined reference by 203.6–236.5 m. They land 31.6–35.8 m from the
-retained original noisy GPS, which is interesting evidence of a reference/appearance ambiguity—not
-a reason to change the success target.
-
-A frozen replay with the default spatial geometric holdout abstains on two wrong MINIMA candidates
-(235.5 m and 202.0 m from the refined reference), but still accepts a third candidate that is 215.0 m
-wrong. The matcher sees the complete query before the holdout, so this is not independent evidence
-and the false accept shows that it cannot certify a systematic same-family alternate solution. The
-method therefore remains experimental and ranking-excluded; independent silhouette/ridge evidence
-is the next required validation layer. Numbers, exclusions, and the replay diagnostics are recorded in
-[the pose-localization strategy](docs/development/pose-localization-strategy.md).
+The project is therefore in a consolidation and benchmark-design phase, not another solver-expansion
+phase. The [research and development program](docs/research-and-development.md) is the single source
+of truth for exact artifacts and hashes, accepted claims, literature baselines, benchmark metrics,
+the capture-surface experiment, codebase guardrails, and go/no-go roadmap. Dated atlas, synthetic,
+and PnP documents are historical evidence appendices.
 
 ## Data
 

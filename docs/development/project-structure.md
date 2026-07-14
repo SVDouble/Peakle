@@ -1,5 +1,9 @@
 # Project Structure
 
+> **Original architecture proposal.** The thin-CLI principle remains valid, but the tree below no
+> longer describes the whole research codebase. The consolidation target and current guardrails are
+> maintained in the [research and development program](../research-and-development.md).
+
 This structure separates domain models, geometry, rendering, optimization,
 annotation, persistence, and command-line orchestration. The CLI should assemble
 validated configs and call services; it should not own geometry or optimization

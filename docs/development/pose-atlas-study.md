@@ -1,5 +1,9 @@
 # High-compute pose-atlas study
 
+> **Historical study record (non-normative, frozen 2026-07-14).** This document preserves detailed
+> atlas and reranking evidence. Current status, accepted claims, and sequencing live only in the
+> [research and development program](../research-and-development.md).
+
 This study asks a narrower question than the production solver: when a GeoPose photo starts from a
 controlled position prior 200 m from the published reference, does the current terrain and image
 evidence contain a substantially better horizontal position and yaw if we spend enough computation
@@ -136,7 +140,8 @@ again before atomic publication.
 
 ## Photo-observable geometry verifier
 
-The deployable transfer was then measured without source PFM. The immutable artifact is
+The experimental photo-observable transfer was then measured without source PFM. It remains
+production-ineligible and uncalibrated. The immutable artifact is
 `local/output/20260714-three-photo-photo-geometry-verifier-v1`; its frozen estimator archive SHA-256
 is `f2b5e62508c8601977e9f27d2740331a7549ceb204cc80ee7e439e06b80a8689`, results SHA-256 is
 `a55235964989131d00b515eceffb4b5b98341e30940f4e39d41c6a81a33c7f9b`, and the selected

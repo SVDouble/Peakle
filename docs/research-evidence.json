@@ -1,0 +1,288 @@
+{
+  "schema": "peakle.research_evidence.v1",
+  "reviewed_at": "2026-07-14",
+  "canonical_strategy": "docs/research-and-development.md",
+  "hash_policy": {
+    "current_artifacts": "SHA-256 of the exact archived file bytes",
+    "future_content_artifacts": "Canonical schema/truth-contract/parents/resources/payload bytes; excludes embedded artifact_sha256 and volatile run metadata",
+    "run_sha256": "SHA-256 of the complete run manifest, including its recorded configuration and provenance"
+  },
+  "archive_policy": {
+    "current_availability": "local_only",
+    "limitation": "The referenced local/output files are ignored by Git and are not yet present in a remote content-addressed archive.",
+    "recipe_policy": "When run_sha256 is present, archive_locator/run.json is the recorded configuration, provenance, and runnable recipe. A null run_sha256 marks a legacy result without that contract.",
+    "required_future_fields": [
+      "remote_uri",
+      "content_sha256",
+      "resource_availability"
+    ]
+  },
+  "evidence": [
+    {
+      "id": "current_skyline_matrix_20260714",
+      "status": ["baseline", "negative"],
+      "truth_classes": ["weak_real", "diagnostic_oracle"],
+      "sample_count": 3,
+      "source_revision": "c27d4446157813d5e64d3cd64b72a3d84948c939",
+      "source_worktree_clean": false,
+      "archive_locator": "local/output/20260714-three-photo-current-skyline-baseline-geopose-bench",
+      "availability": "local_only",
+      "run_sha256": "884a5dbaaf59af231fd69e5ebe142a6bdb5d311ac41bb19569cd31fc132d3667",
+      "estimator_sha256": null,
+      "evaluation_sha256": "96bfc60c9e4831792246ef3c06ccbe4db0bab43fc77870305ffce7e1bc54122b",
+      "parents": [],
+      "truth_firewall": "legacy_combined_results",
+      "outcome": {
+        "position_successes": 0,
+        "attempts_per_track": 3,
+        "controlled_prior_position_error_m": 200,
+        "decision": "Known-position horizon alignment can recover yaw; tested methods do not recover position."
+      }
+    },
+    {
+      "id": "strategy_matrix_20260713",
+      "status": ["baseline", "negative"],
+      "truth_classes": ["weak_real", "diagnostic_oracle"],
+      "sample_count": 5,
+      "source_revision": "23c7eb6e44160dfd6220e4f0964fee9458f83ad9",
+      "source_worktree_clean": null,
+      "archive_locator": "local/output/20260713-165612-matrix-geopose-bench",
+      "availability": "local_only",
+      "run_sha256": "cb5460d8560109d40482cb90ee20ef7b8c56b41f4fd5489f6912f2e927ed0fe0",
+      "estimator_sha256": null,
+      "evaluation_sha256": "25d44d578b9642d068ee5d86d92b29ea5f936566d0e9a074c509b57f662170ee",
+      "parents": [],
+      "truth_firewall": "legacy_combined_results",
+      "outcome": {
+        "eligible_localization_success_rate": 0.0,
+        "no_prior_median_error_order": "9-16 km",
+        "decision": "Older local, contour-database, and regional/global strategies do not recover metric position."
+      }
+    },
+    {
+      "id": "native_skyline_atlas_v2_20260714",
+      "status": ["negative", "diagnostic_ceiling"],
+      "truth_classes": ["weak_real", "diagnostic_oracle"],
+      "sample_count": 3,
+      "source_revision": "14a74aa64f1727e01d1349c8a4cd097b0acdae3d",
+      "source_worktree_clean": true,
+      "archive_locator": "local/output/20260714-three-photo-native-skyline-pose-atlas-v2",
+      "availability": "local_only",
+      "run_sha256": "6074c6fdf54f8290d5267e343bfdf110e399b73bf600fb897b15b3424cce3e2a",
+      "estimator_sha256": null,
+      "evaluation_sha256": "5913a62ff65083457a3e7362edb1f228ffc1fef14c6cd5b0f213546e07f00e7d",
+      "parents": [],
+      "truth_firewall": "lattice_frozen_before_in_process_evaluation",
+      "outcome": {
+        "blind_successes_pfm": 0,
+        "blind_successes_rgb": 0,
+        "attempts_per_track": 3,
+        "full_lattice_oracle_successes": 3,
+        "oracle_horizontal_error_m": [14.9, 19.8],
+        "decision": "The local lattice covers reference-near poses; skyline ranking selects displaced basins."
+      }
+    },
+    {
+      "id": "pfm_geometry_rerank_20260714",
+      "status": ["diagnostic_ceiling"],
+      "truth_classes": ["diagnostic_oracle"],
+      "sample_count": 3,
+      "source_revision": "b3625f780fcb82617c0458d612b609ea72b6ebf1",
+      "source_worktree_clean": true,
+      "archive_locator": "local/output/20260714-three-photo-pfm-geometry-rerank-v1",
+      "availability": "local_only",
+      "run_sha256": "8fc37ba9269f9f1e820142006f0b1fcd98ce99b7d6df41b7cc16e7aa20c46643",
+      "estimator_sha256": "dc39392cd9a74470cbac2d351f15d089dae0d83f752cc6bc592ff171d09c28c3",
+      "evaluation_sha256": "0f246caaaf2858d5333842ee42997ef95f309369e186f8a27d5393c466e64c4d",
+      "parents": [
+        {"kind": "atlas_run", "sha256": "6074c6fdf54f8290d5267e343bfdf110e399b73bf600fb897b15b3424cce3e2a"},
+        {"kind": "atlas_evaluation", "sha256": "5913a62ff65083457a3e7362edb1f228ffc1fef14c6cd5b0f213546e07f00e7d"}
+      ],
+      "truth_firewall": "separate_frozen_estimator_archive",
+      "outcome": {
+        "top1_successes": 3,
+        "attempts": 3,
+        "selected_horizontal_error_m": [18.5, 52.0, 35.4],
+        "decision": "Reference depth and typed structure can rank the pool, but are unavailable at inference."
+      }
+    },
+    {
+      "id": "photo_pool_pfm_geometry_rerank_20260714",
+      "status": ["diagnostic_ceiling"],
+      "truth_classes": ["diagnostic_oracle"],
+      "sample_count": 3,
+      "source_revision": "b3625f780fcb82617c0458d612b609ea72b6ebf1",
+      "source_worktree_clean": true,
+      "archive_locator": "local/output/20260714-three-photo-photo-candidates-pfm-geometry-rerank-v1",
+      "availability": "local_only",
+      "run_sha256": "a96c577f711a95d91c3d3020e90ee96ddf2e02c2f5fcf08d3db3b5199516b206",
+      "estimator_sha256": "be8f82ae09e0f92883ec36e1857ccbb19837c54e6511893ba8f893da19c8e86a",
+      "evaluation_sha256": "9d02a702e6b0f779c86406b64b53a95d5ecb89488b2938ab38032dae1f134c5e",
+      "parents": [
+        {"kind": "atlas_run", "sha256": "6074c6fdf54f8290d5267e343bfdf110e399b73bf600fb897b15b3424cce3e2a"},
+        {"kind": "atlas_evaluation", "sha256": "5913a62ff65083457a3e7362edb1f228ffc1fef14c6cd5b0f213546e07f00e7d"}
+      ],
+      "truth_firewall": "separate_frozen_estimator_archive",
+      "outcome": {
+        "top1_successes": 2,
+        "attempts": 3,
+        "median_horizontal_error_m": 92.2,
+        "decision": "The automatic-photo pool has useful modes in some cases, but proposal recall also fails."
+      }
+    },
+    {
+      "id": "rgb_geometry_verifier_20260714",
+      "status": ["experimental", "negative"],
+      "truth_classes": ["weak_real"],
+      "sample_count": 3,
+      "source_revision": "a18b473852d7f309261a863f33bb4f9f91c854f8",
+      "source_worktree_clean": true,
+      "archive_locator": "local/output/20260714-three-photo-photo-geometry-verifier-v1",
+      "availability": "local_only",
+      "run_sha256": "8ace917530def144c204b59429d2880d6775a6428952d24999dcace2411a9333",
+      "estimator_sha256": "f2b5e62508c8601977e9f27d2740331a7549ceb204cc80ee7e439e06b80a8689",
+      "evaluation_sha256": "a55235964989131d00b515eceffb4b5b98341e30940f4e39d41c6a81a33c7f9b",
+      "parents": [
+        {"kind": "atlas_run", "sha256": "6074c6fdf54f8290d5267e343bfdf110e399b73bf600fb897b15b3424cce3e2a"},
+        {"kind": "atlas_evaluation", "sha256": "5913a62ff65083457a3e7362edb1f228ffc1fef14c6cd5b0f213546e07f00e7d"}
+      ],
+      "truth_firewall": "separate_frozen_estimator_archive",
+      "outcome": {
+        "top1_successes": 0,
+        "attempts": 3,
+        "abstentions": 3,
+        "beam32_target_recall": 0.6666666667,
+        "decision": "The RGB verifier is uncalibrated and does not select a useful pose."
+      }
+    },
+    {
+      "id": "minima_heldout_validation_img4948_20260714",
+      "status": ["experimental", "negative"],
+      "truth_classes": ["weak_real"],
+      "sample_count": 1,
+      "attempt_count": 3,
+      "source_revision": "36e0e2ba7dba673ccc08da3ad73a7487aba94ced",
+      "source_worktree_clean": null,
+      "archive_locator": "local/output/20260714-heldout-candidate-validation-minima-img4948-geopose-bench",
+      "availability": "local_only",
+      "run_sha256": "3703ed637d5ee0322317a281a7799ee2e59db50d9436d6aab4b5180045a97468",
+      "estimator_sha256": null,
+      "evaluation_sha256": "ecfd52bc375305987aaeea8c0244209a2621e31706440cbab9b316479bbfe14d",
+      "parents": [],
+      "truth_firewall": "legacy_combined_results",
+      "outcome": {
+        "successes": 0,
+        "abstentions": 2,
+        "returned_horizontal_error_m": 215.01684,
+        "returned_yaw_error_deg": 0.97945,
+        "decision": "The same-family spatial holdout cannot certify the returned alternative pose."
+      }
+    },
+    {
+      "id": "synthetic_pinhole_stage_ceiling_v2_20260714",
+      "status": ["diagnostic_ceiling"],
+      "truth_classes": ["diagnostic_oracle"],
+      "sample_count": 5,
+      "archive_count": 20,
+      "source_revision": "b3625f780fcb82617c0458d612b609ea72b6ebf1",
+      "source_worktree_clean": true,
+      "archive_locator": "local/output/20260714-synthetic-pinhole-stage-upper-bound-v2",
+      "availability": "local_only",
+      "run_sha256": "c6f9b7d9b2efcecf5497396ba79ec47cdd0ef9c567121f6f86b2ff1c3e0e635f",
+      "estimator_sha256": null,
+      "evaluation_sha256": "bf813d184d4b6c99be00ff6c0b75c3e8d4b7c5115478d932cd77638209f180a8",
+      "parents": [],
+      "truth_firewall": "multiple_frozen_archives_embedded_in_combined_result",
+      "outcome": {
+        "proposal_recall": 1.0,
+        "exact_mask_top1_exact_terrain": 0.8,
+        "exact_mask_top1_coarse_terrain": 0.3,
+        "rgb_skyline_top1_exact_terrain": 0.2,
+        "rgb_skyline_top1_coarse_terrain": 0.0,
+        "decision": "Shared-renderer ceilings expose terrain and extraction sensitivity; they are not production localization."
+      }
+    },
+    {
+      "id": "six_photo_compatibility_v2_20260714",
+      "status": ["experimental", "dataset_audit"],
+      "truth_classes": ["diagnostic_oracle"],
+      "sample_count": 6,
+      "source_revision": "c27d4446157813d5e64d3cd64b72a3d84948c939",
+      "source_worktree_clean": false,
+      "archive_locator": "local/output/20260714-high-compute-six-photo-compatibility-v2-geopose-bench",
+      "availability": "local_only",
+      "run_sha256": "cc6262bab2ace4fdf7f86d08a7583868b6a0801897bbe0597565379c0c9d03c8",
+      "estimator_sha256": null,
+      "evaluation_sha256": "a2937e7ad1464dbfa59ad8cead798bda64be2d06e2a9cea57d30c977dee80488",
+      "parents": [],
+      "truth_firewall": "evaluation_only_combined_result",
+      "outcome": {
+        "map_a": 2,
+        "map_b": 2,
+        "map_c": 2,
+        "decision": "Keep compatibility continuous; nearby seeded runs change hard tiers."
+      }
+    },
+    {
+      "id": "legacy_gt_alignment_audit_20260709",
+      "status": ["superseded", "dataset_audit"],
+      "truth_classes": ["diagnostic_oracle"],
+      "sample_count": 364,
+      "source_revision": null,
+      "source_worktree_clean": null,
+      "archive_locator": "local/output/20260709-155112-gt-alignment-audit",
+      "availability": "local_only",
+      "run_sha256": null,
+      "estimator_sha256": null,
+      "evaluation_sha256": "bc7ce33733e4893f832257fb1fa594869ef7d41500a9744651dd22239abc598f",
+      "parents": [],
+      "truth_firewall": "no_manifest_legacy_diagnostic",
+      "outcome": {
+        "clean": 192,
+        "suspect": 172,
+        "photo_pfm_registration_mismatch": 126,
+        "decision": "Supports corpus caution but cannot grade the reset benchmark."
+      }
+    },
+    {
+      "id": "legacy_orientation_60_case_20260707",
+      "status": ["baseline"],
+      "truth_classes": ["weak_real", "diagnostic_oracle"],
+      "sample_count": 60,
+      "source_revision": null,
+      "source_worktree_clean": null,
+      "archive_locator": "local/output/20260707-045620-geopose-bench",
+      "availability": "local_only",
+      "run_sha256": null,
+      "estimator_sha256": null,
+      "evaluation_sha256": "a7ac0c52572e1cf1bbabfa7cbb59f5e1bca5317d2af4c6c6648826fe4f123dd1",
+      "parents": [],
+      "truth_firewall": "no_manifest_legacy_result",
+      "outcome": {
+        "pfm_orientation_success_rate": 0.95,
+        "extracted_orientation_success_rate": 0.87,
+        "decision": "Supports orientation capacity only when position and FOV are supplied."
+      }
+    },
+    {
+      "id": "legacy_orientation_274_case_20260705",
+      "status": ["baseline"],
+      "truth_classes": ["weak_real", "diagnostic_oracle"],
+      "sample_count": 274,
+      "source_revision": null,
+      "source_worktree_clean": null,
+      "archive_locator": "local/output/20260705-211514-geopose-bench",
+      "availability": "local_only",
+      "run_sha256": null,
+      "estimator_sha256": null,
+      "evaluation_sha256": "de57964571ff7af6f9f0e5255876f4bcd8abf6af300acf8302c308fcc232d58d",
+      "parents": [],
+      "truth_firewall": "no_manifest_legacy_result",
+      "outcome": {
+        "pfm_orientation_success_rate": 0.93,
+        "extracted_orientation_success_rate": 0.4,
+        "decision": "Supports orientation capacity only when position and FOV are supplied."
+      }
+    }
+  ]
+}

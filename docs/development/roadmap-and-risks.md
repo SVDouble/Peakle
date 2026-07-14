@@ -1,5 +1,8 @@
 # Roadmap and Risks
 
+> **Retired MVP plan.** These milestones describe the original synthetic-demo build and are retained
+> as history. The current roadmap is the [research and development program](../research-and-development.md).
+
 ## Milestones
 
 ### M0: Planning

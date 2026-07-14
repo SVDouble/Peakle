@@ -1,5 +1,9 @@
 # Camera Fitting Research Notes
 
+> **Historical methods survey (non-normative).** Recommendations and “current” wording below record
+> the state of the survey when written. Current priorities and accepted evidence live only in the
+> [research and development program](../research-and-development.md).
+
 This note collects camera-pose fitting methods that may help Peakle move from
 synthetic skyline matching toward real mountain-photo alignment. The target
 problem is calibrated or partly calibrated camera localization from a photo,

@@ -1,5 +1,9 @@
 # High-Precision Reference Data
 
+> **Historical data-source survey (non-normative).** Source details remain useful, but current truth
+> classes, capture requirements, and dataset priorities live only in the
+> [research and development program](../research-and-development.md).
+
 This note tracks data sources that can help explain GT/photo/DEM contour
 discrepancies. The key distinction:
 
