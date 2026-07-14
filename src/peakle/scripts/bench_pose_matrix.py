@@ -35,6 +35,7 @@ from peakle.localize.paths import BASE
 from peakle.localize.render_match_pnp import CandidateValidationConfig
 from peakle.localize.strategy_bench import (
     ALGORITHMS,
+    DEFAULT_ALGORITHMS,
     EVIDENCE_TRACKS,
     MATRIX_EXTRACTORS,
     PRIOR_REGIMES,
@@ -166,7 +167,7 @@ def _parser() -> argparse.ArgumentParser:
         help="pinned sample list used when --samples is absent",
     )
     parser.add_argument("--profile", choices=("core", "full"), default="core")
-    parser.add_argument("--algorithms", default=",".join(ALGORITHMS))
+    parser.add_argument("--algorithms", default=",".join(DEFAULT_ALGORITHMS))
     parser.add_argument("--evidence", default=",".join(EVIDENCE_TRACKS))
     parser.add_argument("--regimes", default=",".join(PRIOR_REGIMES))
     parser.add_argument("--perturbation", choices=("mild", "standard", "hard"), default="standard")

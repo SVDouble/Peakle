@@ -15,6 +15,7 @@ from peakle.localize.geopose import GeoPoseOriginalMetadata, GeoPoseSample
 from peakle.localize.render_match_pnp import CandidateValidationConfig, RenderMatchConfig, RenderMatchPoseResult
 from peakle.localize.strategy_bench import (
     ALGORITHMS,
+    DEFAULT_ALGORITHMS,
     EvidenceTrack,
     MatrixConfig,
     RenderMatchResources,
@@ -119,6 +120,12 @@ def test_prior_regimes_are_deterministic_and_do_not_leak_missing_fields() -> Non
     assert no_prior.constructed_from_reference is False
 
 
+def test_default_matrix_only_schedules_evidence_backed_baselines() -> None:
+    assert DEFAULT_ALGORITHMS == ("keep-prior", "horizon")
+    assert MatrixConfig(terrain_grid=128).algorithms == DEFAULT_ALGORITHMS
+    assert "cmaes" in ALGORITHMS  # explicit historical replay remains available
+
+
 def test_map_center_is_stably_offset_from_reference() -> None:
     config = MatrixConfig(extent_m=20_000.0, terrain_grid=128, root_seed=11)
     first = deterministic_map_center_offset("sample-a", config)
@@ -175,6 +182,7 @@ def test_matcher_cache_is_explicit_worker_only_and_persisted_by_cli() -> None:
     default = MatrixConfig(terrain_grid=128)
     assert default.matcher_cache_dir is None
     assert config_record(default)["matcher_cache_dir"] is None
+    assert _parser().parse_args([]).algorithms == ",".join(DEFAULT_ALGORITHMS)
     with pytest.raises(ValueError, match="only for the external worker"):
         MatrixConfig(render_matcher="sift", matcher_cache_dir="local/cache", terrain_grid=128).validate()
 

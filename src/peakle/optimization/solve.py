@@ -37,6 +37,7 @@ MAX_TRACE_FRAMES = 60
 PRIOR_FREE_STRATEGIES = frozenset({"global"})
 STRATEGIES = ("horizon", "contourdb", "cmaes", "powell", "nelder", "evolution", "global")
 
+# Failed/windowed legacy strategies remain callable for artifact replay but are not advertised.
 AVAILABLE_STRATEGIES = [
     {
         "name": "horizon",
@@ -44,46 +45,6 @@ AVAILABLE_STRATEGIES = [
         "projections": ["pinhole", "cyltan"],
         "blurb": "The only current strategy with credible real-data evidence. It solves effective crop "
         "orientation at the supplied position; its confidence remains uncalibrated.",
-    },
-    {
-        "name": "contourdb",
-        "label": "Contour DB (experimental)",
-        "projections": ["pinhole", "cyltan"],
-        "blurb": "Precomputes compact skyline snapshots from ring viewpoints around the massif, ranks them by "
-        "normalized contour shape/depth, then locally refines the best matches with the selected priors.",
-    },
-    {
-        "name": "cmaes",
-        "label": "CMA-ES (experimental)",
-        "projections": ["pinhole", "cyltan"],
-        "blurb": "Covariance Matrix Adaptation Evolution Strategy over the full 5-DOF pose. "
-        "Better suited to coupled position/yaw/pitch basins than fixed simplex or direction-set search, "
-        "then polished locally.",
-    },
-    {
-        "name": "powell",
-        "label": "Powell (experimental)",
-        "projections": ["pinhole", "cyltan"],
-        "blurb": "Coarse pose scan around the prior, then Powell direction-set refinement.",
-    },
-    {
-        "name": "nelder",
-        "label": "Nelder-Mead (experimental)",
-        "projections": ["pinhole", "cyltan"],
-        "blurb": "Derivative-free simplex refining the full pose from the prior.",
-    },
-    {
-        "name": "evolution",
-        "label": "Differential evolution (experimental)",
-        "projections": ["pinhole", "cyltan"],
-        "blurb": "Population-based search across the bounded pose box around the prior.",
-    },
-    {
-        "name": "global",
-        "label": "Regional skyline grid (experimental)",
-        "projections": ["pinhole", "cyltan"],
-        "blurb": "No pose prior, but requires a supplied terrain window. Seeds a 20×20 position grid with "
-        "a fixed 2 m camera height and zero crop-pitch nuisance, then refines locally. Not country-scale.",
     },
 ]
 

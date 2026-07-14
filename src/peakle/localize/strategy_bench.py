@@ -115,6 +115,7 @@ ALGORITHMS: tuple[Algorithm, ...] = (
     "global",
     "render-pnp",
 )
+DEFAULT_ALGORITHMS: tuple[Algorithm, ...] = ("keep-prior", "horizon")
 EVIDENCE_TRACKS: tuple[EvidenceTrackName, ...] = ("pfm_oracle", "photo_auto", "photo_rgb")
 PRIOR_REGIMES: tuple[PriorRegimeName, ...] = (
     "raw_metadata",
@@ -190,7 +191,7 @@ class MatrixConfig:
     """Configuration whose complete value is persisted in ``run.json``."""
 
     profile: str = "core"
-    algorithms: tuple[Algorithm, ...] = ALGORITHMS
+    algorithms: tuple[Algorithm, ...] = DEFAULT_ALGORITHMS
     evidence_tracks: tuple[EvidenceTrackName, ...] = EVIDENCE_TRACKS
     prior_regimes: tuple[PriorRegimeName, ...] = PRIOR_REGIMES
     perturbation_bucket: str = "standard"

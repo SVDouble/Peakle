@@ -47,15 +47,7 @@ def client(scene: Scene, tmp_path) -> TestClient:
 def test_scene_terrain_peaks_endpoints(client: TestClient) -> None:
     scene = client.get("/api/scene").json()
     assert scene["providers"] == ["demo", "srtm"]
-    assert {strategy["name"] for strategy in scene["strategies"]} == {
-        "powell",
-        "cmaes",
-        "contourdb",
-        "nelder",
-        "evolution",
-        "global",
-        "horizon",
-    }
+    assert {strategy["name"] for strategy in scene["strategies"]} == {"horizon"}
     assert client.get("/api/terrain").json()["grid_width"] == 96
     assert len(client.get("/api/peaks").json()) >= 1
 
