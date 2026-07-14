@@ -163,6 +163,14 @@ refiner can measure capture from outside the formal target. A 32-seed render/mat
 only 2/3 input target recall and must report that before refinement; it cannot claim three-photo
 proposal success.
 
+The executor needed for that experiment is now in place. It validates the persisted verifier archive,
+maps the complete ordered beam to render seeds without truncation, renders every exact heading before
+one matcher batch, and solves/validates every seed without early stopping. A same-render synthetic
+SIFT control recovers a useful last seed exactly while keeping atlas seed pose and statistical prior
+separate. Because that control starts from an exact position/yaw seed and disables the independent
+acceptance gate, it is only an interface ceiling. It does not yet answer whether the 154 m IMG5145
+mode, or the beam-rank-12 modes in the other photos, lie inside MINIMA/RoMa's real capture basin.
+
 The failure is not just an unfortunate weight vector. The blue/bright automatic skyline candidates
 have zero agreement on all three photos, yet their high coverage passes the source extractor's
 coverage-only gate. The selected skyline then defines the terrain mask for learned ridges, monocular

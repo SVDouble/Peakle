@@ -1,25 +1,35 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
 
-from peakle.domain.camera import CameraExtrinsics
+from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
 from peakle.domain.coordinates import GeoPoint, LocalPoint
+from peakle.domain.pose import PosePrior
 from peakle.domain.terrain import TerrainMap, TerrainSpec
 from peakle.localize.atlas_geometry import render_cyltan_candidate_depth
+from peakle.localize.correspondence import SiftMatcher
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image
 from peakle.localize.pfm_geometry_rerank import (
     PfmGeometryRerankConfig,
     build_pfm_geometry_rerank,
     evaluate_pfm_geometry_rerank,
 )
+from peakle.localize.photo_beam_render_pnp import build_photo_beam_render_seed_bridge
 from peakle.localize.photo_geometry_verifier import (
     PhotoGeometryVerifierConfig,
     build_photo_geometry_verifier,
     evaluate_photo_geometry_verifier,
     extract_photo_geometry_evidence,
+)
+from peakle.localize.pnp import PoseRansacConfig
+from peakle.localize.render_match_pnp import (
+    CandidateValidationConfig,
+    RenderMatchConfig,
+    solve_render_match_pose_batch,
 )
 from peakle.localize.skyline_atlas import (
     SkylineAtlasArchive,
@@ -29,6 +39,8 @@ from peakle.localize.skyline_atlas import (
 )
 from peakle.localize.solve import HorizonProfile
 from peakle.localize.typed_outlines import extract_typed_outlines
+from peakle.rendering.orthophoto import LocalRasterTexture
+from peakle.rendering.terrain_view import TerrainViewRenderer
 
 WIDTH_PX = 64
 HEIGHT_PX = 48
@@ -249,6 +261,24 @@ def _encoded_shared_scene_photo(
     boundary_row = int(round(float(np.nanmedian(observed_skyline))))
     rgb[:boundary_row, :, :] = np.asarray([64, 0, 255], dtype=np.uint8)
     return rgb
+
+
+def _synthetic_checkerboard_appearance() -> LocalRasterTexture:
+    """Return deterministic matcher texture for a declared same-render ceiling."""
+
+    axis_m = np.linspace(-2_400.0, 2_400.0, 481)
+    columns, rows = np.meshgrid(np.arange(axis_m.size), np.arange(axis_m.size))
+    checker = (columns // 4 + rows // 4) % 2
+    rgb = np.empty((axis_m.size, axis_m.size, 3), dtype=np.uint8)
+    rgb[checker == 0] = np.asarray([40, 180, 230], dtype=np.uint8)
+    rgb[checker == 1] = np.asarray([230, 50, 80], dtype=np.uint8)
+    rgb[(columns // 12 + 2 * rows // 12) % 5 == 0] = np.asarray([245, 230, 40], dtype=np.uint8)
+    return LocalRasterTexture(
+        x_m=axis_m,
+        y_m=axis_m,
+        rgb=rgb,
+        source="synthetic_fixed_checkerboard_same_render_ceiling",
+    )
 
 
 def test_production_atlas_recovers_a_distinctive_synthetic_pose_after_freeze(
@@ -496,3 +526,187 @@ def test_photo_geometry_verifier_abstains_on_empty_synthetic_photo_cues(
     assert archive.decision.returned_candidate_id is None
     assert "insufficient_internal_ridge_support" in archive.decision.reasons
     assert "insufficient_relative_depth_span" in archive.decision.reasons
+
+
+def test_complete_frozen_photo_beam_reaches_a_late_pose_through_same_render_sift_pnp(
+    asymmetric_terrain: TerrainMap,
+) -> None:
+    """Exercise beam -> render -> SIFT -> lift -> PnP as a plumbing ceiling.
+
+    The checkerboard query and candidate views deliberately share the same
+    renderer and appearance raster. This proves that the production interfaces
+    preserve and refine a useful late seed; it does not measure real-photo
+    cross-modal matching or authorize a production pose selection.
+    """
+
+    nominal_truth = _truth(asymmetric_terrain, 0.0, 0.0, 0.0)
+    observed, atlas = _ambiguous_photo_atlas(asymmetric_terrain, nominal_truth)
+    verifier_config = replace(_photo_verifier_config(), beam_size=3)
+    empty_rgb = np.full((HEIGHT_PX, WIDTH_PX, 3), 64, dtype=np.uint8)
+    evidence = extract_photo_geometry_evidence(
+        empty_rgb,
+        observed,
+        _EncodedSyntheticEdges(),
+        _EncodedSyntheticDepth(),
+        observation_provenance=_photo_observation_provenance(
+            atlas,
+            shared_candidate_render_encoded=False,
+        ),
+        edge_model_provenance=_photo_model_provenance(_EncodedSyntheticEdges.name, "c"),
+        depth_model_provenance=_photo_model_provenance(_EncodedSyntheticDepth.name, "d"),
+        config=verifier_config,
+    )
+    verifier = build_photo_geometry_verifier(
+        asymmetric_terrain,
+        None,
+        evidence,
+        atlas.to_record(),
+        config=verifier_config,
+    )
+    frozen_verifier_record = verifier.to_record()
+    frozen_verifier_json = json.dumps(frozen_verifier_record, sort_keys=True)
+    bridge = build_photo_beam_render_seed_bridge(frozen_verifier_record)
+    frozen_bridge_json = json.dumps(bridge.to_record(), sort_keys=True)
+
+    assert verifier.decision.status == "abstained"
+    assert len(bridge.render_seeds) == verifier_config.beam_size
+    assert bridge.ordered_candidate_ids == tuple(verifier.beam_candidate_ids)
+    assert bridge.to_record()["beam"]["truncated"] is False
+    assert bridge.to_record()["beam"]["reranked"] is False
+
+    # The predeclared ceiling uses one fixed physical pinhole render pitch. It
+    # is deliberately different from every atlas crop-shift pitch: atlas pitch
+    # may initialize PnP, but must not rotate the terrain renders themselves.
+    fixed_render_pitch_deg = -10.0
+    assert all(seed.query_initial_pitch_deg != pytest.approx(fixed_render_pitch_deg) for seed in bridge.seeds)
+    physical_truth = CameraExtrinsics(
+        position=nominal_truth.position,
+        yaw_deg=nominal_truth.yaw_deg,
+        pitch_deg=fixed_render_pitch_deg,
+        roll_deg=0.0,
+    )
+    intrinsics = CameraIntrinsics.from_horizontal_fov(640, 480, FOV_DEG)
+    query_camera = CameraModel.from_intrinsics(intrinsics)
+    appearance = _synthetic_checkerboard_appearance()
+    renderer = TerrainViewRenderer()
+    query_render = renderer.render(
+        asymmetric_terrain,
+        intrinsics,
+        physical_truth,
+        modality="orthophoto",
+        appearance=appearance,
+        terrain_stride=1,
+    )
+    prior_east_m = 400.0
+    prior_north_m = 400.0
+    prior = PosePrior(
+        position=LocalPoint(
+            east_m=prior_east_m,
+            north_m=prior_north_m,
+            up_m=asymmetric_terrain.elevation_at(prior_east_m, prior_north_m) + 2.5,
+        ),
+        yaw_deg=25.0,
+        pitch_deg=5.0,
+        horizontal_sigma_m=250.0,
+        vertical_sigma_m=80.0,
+        yaw_sigma_deg=30.0,
+        pitch_sigma_deg=12.0,
+    )
+    batch = solve_render_match_pose_batch(
+        asymmetric_terrain,
+        query_render.rgb,
+        query_camera,
+        prior,
+        SiftMatcher(max_dimension_px=768, max_ratio=0.95, max_matches=2_000),
+        bridge.render_seeds,
+        use_position_prior=False,
+        use_orientation_prior=False,
+        appearance=appearance,
+        config=RenderMatchConfig(
+            render_width_px=640,
+            render_height_px=480,
+            render_horizontal_fov_deg=FOV_DEG,
+            maximum_render_fov_deg=90.0,
+            orientation_prior_half_span_deg=0.0,
+            render_pitch_deg=fixed_render_pitch_deg,
+            modality="orthophoto",
+            terrain_stride=1,
+            max_matches_per_frame=1_200,
+            min_lifted_matches_per_frame=12,
+            expand_pnp_search_radii_from_prior_sigma=False,
+            refinement_passes=0,
+            # This stage isolates proposal capture and continuous PnP. The
+            # independent acceptance gate remains a separate contract.
+            candidate_validation=CandidateValidationConfig(enabled=False),
+            pnp=PoseRansacConfig(
+                iterations=96,
+                max_iterations=400,
+                horizontal_search_radius_m=250.0,
+                vertical_search_radius_m=100.0,
+                yaw_search_radius_deg=20.0,
+                min_inliers=10,
+                min_inlier_ratio=0.20,
+            ),
+        ),
+        seed=4,
+        renderer=renderer,
+    )
+
+    # Use numeric truth only to grade the already completed estimator run. The
+    # resulting minimum is an evaluation oracle, not an estimator selection.
+    input_seed_errors = [
+        (
+            float(
+                np.hypot(
+                    seed.east_m - physical_truth.position.east_m,
+                    seed.north_m - physical_truth.position.north_m,
+                )
+            ),
+            abs((seed.yaw_deg - physical_truth.yaw_deg + 180.0) % 360.0 - 180.0),
+            seed,
+        )
+        for seed in bridge.seeds
+    ]
+    input_horizontal_error_m, input_yaw_error_deg, input_gt_oracle = min(
+        input_seed_errors,
+        key=lambda value: (value[0], value[1]),
+    )
+    solved = [item for item in batch.results if item.result.extrinsics is not None]
+    assert solved
+    evaluated = []
+    for item in solved:
+        estimate = item.result.extrinsics
+        assert estimate is not None
+        horizontal_error_m = float(
+            np.hypot(
+                estimate.position.east_m - physical_truth.position.east_m,
+                estimate.position.north_m - physical_truth.position.north_m,
+            )
+        )
+        yaw_error_deg = abs((estimate.yaw_deg - physical_truth.yaw_deg + 180.0) % 360.0 - 180.0)
+        evaluated.append((horizontal_error_m, yaw_error_deg, item))
+    horizontal_error_m, yaw_error_deg, gt_oracle_result = min(
+        evaluated,
+        key=lambda value: (value[0], value[1]),
+    )
+
+    assert batch.ordered_candidate_ids == bridge.ordered_candidate_ids
+    assert len(batch.results) == len(bridge.seeds) == 3
+    assert input_gt_oracle.candidate_id == bridge.ordered_candidate_ids[-1]
+    assert input_horizontal_error_m == 0.0
+    assert input_yaw_error_deg == 0.0
+    assert gt_oracle_result.candidate_id == bridge.ordered_candidate_ids[-1]
+    assert gt_oracle_result.result.status == "solved"
+    assert horizontal_error_m < 1e-6
+    assert yaw_error_deg < 1e-6
+    assert gt_oracle_result.result.extrinsics is not None
+    assert gt_oracle_result.result.extrinsics.pitch_deg == pytest.approx(physical_truth.pitch_deg, abs=1e-6)
+    assert gt_oracle_result.render_seed.pitch_deg != pytest.approx(physical_truth.pitch_deg)
+    assert gt_oracle_result.result.diagnostics["candidate_validation"]["enabled"] is False
+    assert batch.provenance["matching"]["matcher_match_many_invocations"] == 1
+    assert batch.provenance["shared_pose_prior"]["position_regularization_enabled"] is False
+    assert batch.provenance["shared_pose_prior"]["orientation_regularization_enabled"] is False
+    assert batch.provenance["uses_reference_truth"] is False
+    assert batch.provenance["estimator_inputs"]["reference_pose"] is False
+    assert json.dumps(verifier.to_record(), sort_keys=True) == frozen_verifier_json
+    assert json.dumps(bridge.to_record(), sort_keys=True) == frozen_bridge_json

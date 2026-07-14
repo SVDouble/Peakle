@@ -310,6 +310,21 @@ the next capture-range test, not a claimed three-photo solution. It must keep th
 prior separate from each atlas render seed, grade beam recall before refinement, validate each
 resulting pose with evidence not used by PnP, and retain abstention.
 
+The truth-blind handoff and round-zero executor are now implemented. Serialized verifier archives are
+hash-checked and structurally validated before a bridge converts all 32 ordered beam candidates into
+detached render seeds; no top-K truncation or reranking is allowed. The batch renderer completes one
+exact-heading render per seed, invokes `match_many` once for the whole beam, derives PnP randomness
+from candidate identity rather than list position, and keeps one deep-copied statistical prior
+unchanged across every solve. Atlas roll is discarded as a crop-slope nuisance and atlas pitch only
+initializes the query fit; neither changes the physical render pitch.
+
+A synthetic same-render orthophoto/SIFT ceiling now proves this late-seed path end to end: an
+abstaining verifier places the useful exact position/yaw seed last in a three-mode beam, and that seed
+still reaches the exact pose with position and orientation regularization disabled. Candidate
+validation is explicitly disabled in this capture-only ceiling, and truth chooses the reported oracle
+only after the batch finishes. This verifies plumbing, not translation capture, learned photo/render
+generalization or production selection. Those remain the next immutable benchmark outputs.
+
 The source skyline candidates have zero blue/bright agreement on all three controls. Worse, the
 selected skyline defines the terrain mask for ridge, ordinal-depth and overlap scoring, so a bad
 image-side arbitration poisons every nominally separate cue. Fusion is strongly biased toward common

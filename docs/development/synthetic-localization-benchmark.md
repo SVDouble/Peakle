@@ -46,7 +46,11 @@ Two deliberately different controls are now implemented:
   frozen pool: an authoritative RGB channel encoding promotes the exact target from skyline rank two
   to verifier/beam rank one, while empty cues score the pool and abstain. Both positive controls use
   the same scene/raycaster and are explicitly identity/plumbing ceilings, not photo-model
-  generalization evidence.
+  generalization evidence. The same test now validates the serialized verifier, preserves an
+  abstaining three-mode beam without reranking, and sends all modes through the real orthophoto
+  render -> batched SIFT -> lift -> nonlinear PnP interface. The useful exact position/yaw seed is
+  deliberately last; it still solves after the first two modes, with both prior penalties disabled
+  and with atlas crop pitch kept separate from physical render pitch.
 - `python -m peakle.scripts.bench_synthetic_pipeline` is a custom pinhole, shared-mesh-renderer stage
   harness. It compares exact versus deterministically coarsened estimator terrain, controlled priors,
   exact-mask/color/haze skylines, and fixed depth/outline scores. It does **not** call the production
@@ -66,6 +70,15 @@ Two deliberately different controls are now implemented:
 | Candidate validation | Held-out matches can share the same systematic bias as the matches that generated a pose. They certify internal consistency, not geographic correctness. | Construct coherent wrong correspondences that pass match-family folds, then require a separately generated depth/outline/photo verifier to reject the pose. Record this as an expected diagnostic pass followed by independent rejection. |
 | Priors | Prior penalties can keep a plausible solution near a wrong prior, while unregularized evidence can move farther into an ambiguous basin. | Sweep exact, 50, 100, 200 and 500 m priors in several directions. Report proposal coverage, evidence-only rank, prior-fused rank, improvement over prior, and unchanged-prior competitor. Ambiguous evidence must retain/abstain instead of confidently worsening the pose. |
 | Refinement | Direct synthetic PnP tests show local capacity but do not prove that production proposals enter its basin. | Feed frozen atlas top-K modes through the production render/match/lift/PnP interface. Report continuous error only after proposal recall and candidate selection, including false accepts and abstention coverage. |
+
+The round-zero orchestration part of the refinement contract is now implemented. A strict validator
+rejects rehashed truth injection, the bridge forwards every frozen beam ID in order, all exact-heading
+renders complete before one `match_many` call, and candidate-ID-derived RNG makes each PnP solve
+independent of beam order. The current positive synthetic result is intentionally only an identity
+ceiling: its input-beam oracle is already at 0 m / 0 deg and the post-PnP oracle remains exact. The
+held-out candidate gate is disabled in that one test so capture and acceptance are not conflated.
+Translation capture radius, learned cross-modal matching and independent acceptance remain separate
+benchmark gates; this result must not be reported as real-photo localization accuracy.
 
 ## Deterministic case families
 
@@ -149,3 +162,7 @@ numbers do not establish real-photo accuracy.
    render seed separate from the unchanged statistical prior and reporting proposal recall first.
 6. Transfer only the strategies that pass these contracts to clean real GT/DEM compatibility
    strata, where label uncertainty remains a separate reported variable.
+
+Step 5 now has a passing identity/plumbing ceiling and a complete-beam execution contract. It is not
+complete as an algorithmic claim until offset seeds are swept and a frozen learned-matcher run reports
+input recall, per-seed solve/validation outcomes, selection regret and false accepts.
