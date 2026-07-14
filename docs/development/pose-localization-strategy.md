@@ -279,6 +279,37 @@ support, and nuisance/clearance boundary checks. An unchanged-position competito
 Schur-projected horizontal uncertainty estimate remain useful observability gates, but they cannot
 catch a set of systematically biased matches that genuinely prefers the wrong translation.
 
+The subsequent [three-photo high-compute atlas](pose-atlas-study.md) confirms the same gate from a
+different proposal family: the frozen search contains GT-selected 14.9–19.8 m horizontal/yaw grid
+hypotheses for all three controls, but the unregularized skyline score ranks displaced 124–359 m PFM
+poses first. On PFM evidence, a target-successful mode is already present within the first 5–25
+stored candidates, so independent range/occlusion/typed-ridge verification should precede another
+optimizer or correspondence refinement pass.
+
+That reference-depth ceiling is now implemented and truth-audited. Its fixed skyline, typed-outline,
+centred-depth and overlap fusion selects 18.5, 52.0 and 35.4 m candidates (3/3 within 100 m), versus
+the 358.5, 301.9 and 124.1 m skyline winners. Typed outlines alone reach 2/3; overlap reaches 1/3;
+centred depth and skyline alone reach 0/3. The interaction is the strategy worth transferring to
+photo evidence, not any one oracle component. Because the source PFM is reference-pose-rendered,
+these are still analysis-only ceilings.
+
+Over the automatic-photo atlas pools, the same frozen verifier reaches 18.5, 92.2 and 385.3 m: 2/3
+at top one. In the failed IMG5145 control it nevertheless promotes a target-successful hypothesis
+from photo rank 1,221 to geometry rank 31 and removes the 123° yaw failure. On this control, the next
+photo strategy must retain at least a 32-mode beam, rerender/match those modes, and require an
+independent margin or abstain; the required beam size must be calibrated on held-out data. Forcing
+another top-one skyline decision would discard the measured recovery path.
+
+The follow-up [synthetic stage contracts](synthetic-localization-benchmark.md) isolate two more
+failure sources. First, the old implicit ray range discarded diagonal terrain; it now reaches the
+per-camera farthest DEM corner and has analytic diagonal/offset/cap tests. Second, in a declared
+shared-renderer upper bound, factor-two estimator-terrain coarsening drops exact-mask skyline top-1
+target hits from 8/10 to 3/10 and scale-aligned depth from 10/10 to 3/10. Absolute metric depth is
+more robust under that mismatch (6/10), while radial controls show that even exact self-rendered
+geometry still needs an ambiguity abstention rule. This makes terrain-resolution compatibility and
+absolute range the next isolated production gates; the custom pinhole numbers are not production
+atlas or real-photo results.
+
 For the no-position-prior track, build the geographic 360° DEM-horizon index first, retrieve top-K
 location/yaw cells, and only then invoke the same fine orthophoto render → learned match → PnP stage.
 That supplies auditable regional recall and a bounded search window before any expensive dense

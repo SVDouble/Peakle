@@ -54,6 +54,8 @@ uv run peakle demo run              # the original synthetic render→recover de
 
 The web app also serves `/bench`: a filterable strategy-matrix dashboard with oracle/photo
 tracks, map/height strata, paired change from the prior, provenance, and per-cell failure drill-down.
+It also exposes diagnostic pose-atlas studies, while keeping their evaluation-only GT oracles out
+of the recommended-strategy ranking.
 
 ## How it works
 
@@ -100,8 +102,43 @@ they are not solver results, priors, or evaluation truth. The CLIs are:
 python -m peakle.scripts.build_gt_v2 --manual      # refine the MANUAL corpus
 python -m peakle.scripts.bench_geopose             # PFM + photo tracks, compatibility + provenance
 python -m peakle.scripts.bench_pose_matrix --max-n 5        # controlled strategy/prior matrix
+python -m peakle.scripts.bench_pose_atlas --help   # high-compute local proposal/ranking ceiling
+python -m peakle.scripts.bench_synthetic_pipeline --help    # custom-pinhole stage upper bound
 python -m peakle.scripts.acceptance                # end-to-end acceptance checks
 ```
+
+### High-compute pose atlas
+
+The first three-photo native-patch-assisted atlas searched a square with ±500 m east/north
+half-width at 50 m spacing and every 1° yaw. The 15° yaw perturbation was recorded but not used to
+constrain the search. Blind skyline ranking failed all three PFM and photo tracks (301.9 m and
+416.6 m median position error), but the frozen lattice contained an evaluation-only, GT-selected
+14.9–19.8 m horizontal/yaw hypothesis for every image. Under PFM evidence, a target-successful pose
+entered the stored candidate prefix within its top 5, 10, or 25 modes. Crucially, the current
+unregularized skyline score preferred a displaced pose even over a reference-east/north probe on
+all three controls, so more iterations of that same score are not the answer. That result identified
+independent range, occlusion, and typed-ridge verification over the shortlisted modes as the next
+gate. A fixed, truth-audited reference-depth fusion now moves those three PFM-atlas winners to 18.5,
+52.0 and 35.4 m (3/3 within 100 m); no individual skyline/depth/outline component reaches 3/3. This is an
+analysis-only ceiling because its PFM was rendered at the reference pose, not a production result.
+Over the automatic-photo candidate pools the same verifier reaches 2/3 at top one; on the remaining
+case it promotes a target-successful mode from photo rank 1,221 to geometry rank 31, motivating a
+multi-hypothesis photo/refinement beam rather than another hard top-one selection. See
+[the high-compute pose-atlas study](docs/development/pose-atlas-study.md) for the truth boundary,
+exact ranks, artifact hash, reproduction command, and research target.
+
+### Synthetic stage contracts
+
+The production cyltan atlas/raycast path now has exact-truth integration controls that separate
+proposal coverage from blind ranking and label same-raycaster depth as an identity ceiling. A
+separate custom-pinhole/shared-renderer harness sweeps exact versus coarsened estimator terrain,
+controlled priors, color/haze extraction, and fixed skyline/depth/outline scores. Its first 20-case
+artifact keeps proposal recall at 20/20 by construction, but factor-two terrain coarsening drops
+exact-mask skyline top-1 target hits from 8/10 to 3/10; automatic color skyline falls from 2/10 to
+0/10. Under coarse terrain, absolute metric range reaches 6/10 versus 3/10 for scale-aligned range
+and 2/10 for typed outlines. These are non-production upper-bound diagnostics, not real-photo wins.
+See [the synthetic localization benchmark](docs/development/synthetic-localization-benchmark.md) for
+the stage contracts, ambiguity rules and artifact hash.
 
 ### Render-match-PnP benchmark
 
@@ -167,7 +204,8 @@ Corpus and DEM inputs live under `local/` and are not committed:
 - `local/models/{minima,roma}/` — local pinned matcher manifests and checkpoints.
 - `local/cache/matcher-correspondences/` — optional content-addressed learned-match cache.
 - `local/derived/gt_v2/` — refined GT records, arrays and layer PNGs.
-- `local/output/*-geopose-bench/` — immutable benchmark artifacts shown at `/bench`.
+- `local/output/*-geopose-bench/` and completed pose-atlas study directories — immutable benchmark
+  artifacts shown at `/bench`.
 
 For the real-terrain workbench without the corpus, drop SRTM `.hgt` tiles in the
 directory named by `PEAKLE_DEM_DIR` (default `data/dem_samples`).
