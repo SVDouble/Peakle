@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from scipy.ndimage import binary_dilation, label
 
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
+from peakle.domain.coordinates import LocalPoint
 from peakle.domain.pose import PosePrior
 from peakle.domain.terrain import TerrainMap
 from peakle.localize.candidate_validation import (
@@ -50,6 +51,7 @@ _QUERY_PADDING_CORE_MAX_CHANNEL = 8
 _QUERY_PADDING_FRINGE_MAX_CHANNEL = 24
 _QUERY_PADDING_MIN_COMPONENT_PIXELS = 16
 _QUERY_PADDING_MIN_COMPONENT_FRACTION = 0.0005
+RENDER_SEED_SCHEMA = "peakle_render_match_seed_v1"
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,51 @@ class _QueryPaddingMask:
 
     mask: NDArray[np.bool_]
     record: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RenderSeed:
+    """Truth-blind render hypothesis, independent of the statistical prior.
+
+    The position and yaw place the terrain-render fan. ``pitch_deg`` initializes
+    the query-camera fit; the pinhole render pitch remains the explicit
+    ``RenderMatchConfig.render_pitch_deg`` setting. In particular, a cyltan
+    atlas crop-shift must not be passed here as a physical pinhole pitch.
+    """
+
+    position: LocalPoint
+    yaw_deg: float
+    pitch_deg: float
+
+    @classmethod
+    def from_prior(cls, prior: PosePrior) -> RenderSeed:
+        """Preserve the legacy prior-seeded behavior for existing callers."""
+
+        return cls(
+            position=prior.position.model_copy(deep=True),
+            yaw_deg=prior.yaw_deg,
+            pitch_deg=prior.pitch_deg,
+        )
+
+    def validate(self) -> None:
+        values = (*self.position.as_tuple(), self.yaw_deg, self.pitch_deg)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("render seed coordinates and angles must be finite")
+        if not -360.0 <= self.yaw_deg <= 360.0:
+            raise ValueError("render seed yaw must be in [-360, 360] degrees")
+        if not -89.0 <= self.pitch_deg <= 89.0:
+            raise ValueError("render seed pitch must be in [-89, 89] degrees")
+
+    def to_record(self, *, source: str) -> dict[str, Any]:
+        return {
+            "schema": RENDER_SEED_SCHEMA,
+            "source": source,
+            "position": self.position.model_dump(mode="json"),
+            "yaw_deg": self.yaw_deg,
+            "query_pnp_initial_pitch_deg": self.pitch_deg,
+            "render_pitch_source": "render_config.render_pitch_deg",
+            "uses_reference_truth": False,
+        }
 
 
 @dataclass(frozen=True)
@@ -79,6 +126,7 @@ class RenderMatchConfig:
     match_selection_cell_px: int = 16
     min_lifted_matches_per_frame: int = 12
     max_relative_depth_span: float = 0.08
+    expand_pnp_search_radii_from_prior_sigma: bool = True
     refinement_passes: int = 1
     candidate_validation: CandidateValidationConfig = field(default_factory=CandidateValidationConfig)
     pnp: PoseRansacConfig = field(default_factory=PoseRansacConfig)
@@ -88,8 +136,11 @@ class RenderMatchConfig:
             raise ValueError("render matching frames must be at least 64 pixels in each dimension")
         if not 5.0 <= self.yaw_step_deg <= 90.0:
             raise ValueError("render fan yaw step must be in [5, 90] degrees")
-        if self.orientation_prior_half_span_deg < self.yaw_step_deg / 2.0:
-            raise ValueError("orientation-prior fan span must cover at least half a yaw step")
+        if self.orientation_prior_half_span_deg < 0.0 or (
+            self.orientation_prior_half_span_deg != 0.0
+            and self.orientation_prior_half_span_deg < self.yaw_step_deg / 2.0
+        ):
+            raise ValueError("orientation-prior fan span must be zero or cover at least half a yaw step")
         if self.terrain_stride < 1:
             raise ValueError("render matching terrain stride must be positive")
         if self.native_patch_stride < 1:
@@ -144,11 +195,17 @@ def solve_render_match_pose(
     use_orientation_prior: bool,
     appearance: AppearanceRaster | None = None,
     native_elevation_patch: HeightfieldLike | None = None,
+    render_seed: RenderSeed | None = None,
     config: RenderMatchConfig | None = None,
     seed: int = 0,
     renderer: TerrainViewRenderer | None = None,
 ) -> RenderMatchPoseResult:
-    """Render a yaw fan at the location seed, match, lift, and fit pose."""
+    """Render at an explicit hypothesis while keeping prior terms independent.
+
+    Omitting ``render_seed`` preserves the original behavior by deriving it
+    from ``prior``. An explicit seed can also provide the required render
+    location when position-prior regularization is disabled.
+    """
 
     settings = config or RenderMatchConfig()
     settings.validate()
@@ -163,7 +220,7 @@ def solve_render_match_pose(
     query_sha256 = hashlib.sha256(memoryview(np.ascontiguousarray(query)).cast("B")).hexdigest()
     holdout_fold = _query_holdout_fold(query_sha256, settings.candidate_validation)
     query_padding = _query_warp_padding_mask(query)
-    if not use_position_prior:
+    if render_seed is None and not use_position_prior:
         return _abstained_result(
             settings,
             matcher,
@@ -173,6 +230,9 @@ def solve_render_match_pose(
             query_camera=query_camera,
             query_padding=query_padding,
         )
+    render_seed_source = "explicit_argument" if render_seed is not None else "pose_prior_compatibility_fallback"
+    active_render_seed = render_seed or RenderSeed.from_prior(prior)
+    active_render_seed.validate()
     view_renderer = renderer or TerrainViewRenderer()
     render_fov = _render_fov(query_camera, settings)
     render_intrinsics = CameraIntrinsics.from_horizontal_fov(
@@ -180,11 +240,11 @@ def solve_render_match_pose(
         settings.render_height_px,
         render_fov,
     )
-    yaws = render_fan_yaws(prior.yaw_deg, use_orientation_prior, settings)
+    yaws = render_fan_yaws(active_render_seed.yaw_deg, use_orientation_prior, settings)
     bundles: list[TerrainRenderBundle] = []
     for yaw_deg in yaws:
         render_pose = CameraExtrinsics(
-            position=prior.position,
+            position=active_render_seed.position,
             yaw_deg=yaw_deg,
             pitch_deg=settings.render_pitch_deg,
             roll_deg=0.0,
@@ -219,6 +279,8 @@ def solve_render_match_pose(
             native_elevation_patch=native_elevation_patch,
             holdout_fold=holdout_fold,
             query_sha256=query_sha256,
+            render_seed=active_render_seed,
+            render_seed_source=render_seed_source,
         )
         attempts.append(attempt)
 
@@ -233,6 +295,11 @@ def solve_render_match_pose(
         yaws,
         attempts,
         query_padding,
+        prior,
+        active_render_seed,
+        render_seed_source,
+        use_position_prior,
+        use_orientation_prior,
     )
     if not solved_attempts:
         return RenderMatchPoseResult(
@@ -276,30 +343,28 @@ def solve_render_match_pose(
             seed=_derived_seed(seed, "refinement"),
         )
         refined_settings = replace(settings, pnp=tight_pnp, refinement_passes=0)
-        refined_prior = PosePrior(
+        refinement_seed = RenderSeed(
             position=estimate.position,
             yaw_deg=estimate.yaw_deg,
             pitch_deg=estimate.pitch_deg,
-            horizontal_sigma_m=max(25.0, min(prior.horizontal_sigma_m, 150.0)),
-            vertical_sigma_m=max(15.0, min(prior.vertical_sigma_m, 100.0)),
-            yaw_sigma_deg=max(2.0, min(prior.yaw_sigma_deg, 15.0)),
-            pitch_sigma_deg=max(2.0, min(prior.pitch_sigma_deg, 10.0)),
         )
         refined = _match_and_fit_frame(
             len(attempts),
             refined_bundle,
             matcher.match(query, refined_bundle.rgb),
             query_camera,
-            refined_prior,
+            prior,
             terrain,
-            True,
-            True,
+            use_position_prior,
+            use_orientation_prior,
             refined_settings,
             seed,
             query_padding=query_padding,
             native_elevation_patch=native_elevation_patch,
             holdout_fold=holdout_fold,
             query_sha256=query_sha256,
+            render_seed=refinement_seed,
+            render_seed_source="first_pass_estimate",
         )
         refinement_record = refined.record
         refinement_batch = _common_matcher_batch([refined])
@@ -390,9 +455,11 @@ def render_fan_yaws(
     use_orientation_prior: bool,
     config: RenderMatchConfig,
 ) -> tuple[float, ...]:
-    """LandscapeAR-style deterministic direction fan (full 360° without yaw)."""
+    """Deterministic seed-centred fan (full 360° without orientation guidance)."""
 
     if use_orientation_prior:
+        if config.orientation_prior_half_span_deg == 0.0:
+            return (round(_wrap180(prior_yaw_deg), 10),)
         offsets = np.arange(
             -config.orientation_prior_half_span_deg,
             config.orientation_prior_half_span_deg + config.yaw_step_deg * 0.5,
@@ -714,7 +781,14 @@ def _match_and_fit_frame(
     native_elevation_patch: HeightfieldLike | None = None,
     holdout_fold: int = 0,
     query_sha256: str | None = None,
+    render_seed: RenderSeed | None = None,
+    render_seed_source: str | None = None,
 ) -> _FrameAttempt:
+    active_render_seed = render_seed or RenderSeed.from_prior(prior)
+    active_render_seed_source = render_seed_source or (
+        "explicit_argument" if render_seed is not None else "pose_prior_compatibility_fallback"
+    )
+    active_render_seed.validate()
     matches = match_set.chosen()
     if query_padding is None:
         query_padding = _query_warp_padding_mask(
@@ -807,11 +881,12 @@ def _match_and_fit_frame(
     holdout_confidence = lift_holdout_matches.confidence[holdout_order]
     holdout_world = holdout_world_all[holdout_order]
     pnp_result: PoseRansacResult | None = None
+    initial: CameraExtrinsics | None = None
     if len(world) >= settings.min_lifted_matches_per_frame:
         initial = CameraExtrinsics(
-            position=prior.position,
+            position=active_render_seed.position,
             yaw_deg=render.extrinsics.yaw_deg,
-            pitch_deg=prior.pitch_deg if use_orientation_prior else 0.0,
+            pitch_deg=active_render_seed.pitch_deg if use_orientation_prior else 0.0,
             roll_deg=0.0,
         )
         clearance_policy = settings.pnp.clearance_constraint_policy
@@ -825,13 +900,21 @@ def _match_and_fit_frame(
         pnp_settings = replace(
             settings.pnp,
             clearance_constraint_policy=clearance_policy,
-            horizontal_search_radius_m=max(
-                settings.pnp.horizontal_search_radius_m,
-                min(3.0 * prior.horizontal_sigma_m, 2_000.0),
+            horizontal_search_radius_m=(
+                max(
+                    settings.pnp.horizontal_search_radius_m,
+                    min(3.0 * prior.horizontal_sigma_m, 2_000.0),
+                )
+                if use_position_prior and settings.expand_pnp_search_radii_from_prior_sigma
+                else settings.pnp.horizontal_search_radius_m
             ),
-            vertical_search_radius_m=max(
-                settings.pnp.vertical_search_radius_m,
-                min(3.0 * prior.vertical_sigma_m, 800.0),
+            vertical_search_radius_m=(
+                max(
+                    settings.pnp.vertical_search_radius_m,
+                    min(3.0 * prior.vertical_sigma_m, 800.0),
+                )
+                if use_position_prior and settings.expand_pnp_search_radii_from_prior_sigma
+                else settings.pnp.vertical_search_radius_m
             ),
             seed=_derived_seed(seed, index, render.extrinsics.yaw_deg),
         )
@@ -905,6 +988,13 @@ def _match_and_fit_frame(
         "lifting": lifted.rejection_counts,
         "matcher_diagnostics": matches.diagnostics,
         "render": render.provenance,
+        "render_seed": active_render_seed.to_record(source=active_render_seed_source),
+        "pnp_initial_pose": initial.model_dump(mode="json") if initial is not None else None,
+        "pose_prior_usage": {
+            "position_regularization_enabled": use_position_prior,
+            "orientation_regularization_enabled": use_orientation_prior,
+            "clearance_anchor_uses_supplied_prior": (query_camera.projection == "cyltan" and use_position_prior),
+        },
         "pnp_status": pnp_result.status if pnp_result is not None else "not_attempted",
         "pnp": pnp_result.diagnostics if pnp_result is not None else None,
     }
@@ -968,6 +1058,11 @@ def _base_diagnostics(
     yaws: tuple[float, ...],
     attempts: list[_FrameAttempt],
     query_padding: _QueryPaddingMask,
+    prior: PosePrior,
+    render_seed: RenderSeed,
+    render_seed_source: str,
+    use_position_prior: bool,
+    use_orientation_prior: bool,
 ) -> dict[str, Any]:
     diagnostics = {
         "kind": "render_match_lift_pnp_v2",
@@ -979,6 +1074,14 @@ def _base_diagnostics(
             "warp_padding_mask": query_padding.record,
         },
         "render_config": _render_config_record(settings, render_fov),
+        "render_seed": render_seed.to_record(source=render_seed_source),
+        "pose_prior": {
+            **prior.model_dump(mode="json"),
+            "position_regularization_enabled": use_position_prior,
+            "orientation_regularization_enabled": use_orientation_prior,
+            "clearance_anchor_enabled": query_camera.projection == "cyltan" and use_position_prior,
+            "unchanged_during_refinement": True,
+        },
         "render_fan_yaws_deg": list(yaws),
         "frames": [attempt.record for attempt in attempts],
         "seed": seed,
@@ -986,6 +1089,7 @@ def _base_diagnostics(
             "query_rgb": True,
             "terrain": True,
             "pose_prior": True,
+            "explicit_render_seed": render_seed_source == "explicit_argument",
             "source_depth_pfm": False,
             "reference_pose": False,
             "gt_v2_refined_pose": False,
@@ -1064,6 +1168,7 @@ def _render_config_record(config: RenderMatchConfig, actual_fov: float) -> dict[
         },
         "min_lifted_matches_per_frame": config.min_lifted_matches_per_frame,
         "max_relative_depth_span": config.max_relative_depth_span,
+        "expand_pnp_search_radii_from_prior_sigma": config.expand_pnp_search_radii_from_prior_sigma,
         "refinement_passes": config.refinement_passes,
         "candidate_validation": dict(config.candidate_validation.__dict__),
         "pnp": dict(config.pnp.__dict__),

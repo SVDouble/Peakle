@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from skimage import data
 
+import peakle.localize.render_match_pnp as render_match_module
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
 from peakle.domain.coordinates import LocalPoint
 from peakle.domain.pose import PosePrior
@@ -36,6 +37,7 @@ from peakle.localize.pnp import (
     RANSAC_SAMPLING_SCHEMA,
     WORLD_CONSENSUS_GEOMETRY_SCHEMA,
     PoseRansacConfig,
+    PoseRansacResult,
     fit_pose_ransac,
     project_world_points,
     required_finite_population_ransac_trials,
@@ -47,8 +49,10 @@ from peakle.localize.render_match_pnp import (
     MATCH_SELECTION_SCHEMA,
     QUERY_PADDING_MASK_METHOD,
     QUERY_PADDING_MASK_SCHEMA,
+    RENDER_SEED_SCHEMA,
     CandidateValidationConfig,
     RenderMatchConfig,
+    RenderSeed,
     _balanced_match_cap_indices,
     _candidate_render_extrinsics,
     _FrameAttempt,
@@ -58,11 +62,12 @@ from peakle.localize.render_match_pnp import (
     _query_spatial_holdout_mask,
     _query_warp_padding_mask,
     _validate_candidate_pose,
+    render_fan_yaws,
     solve_render_match_pose,
 )
 from peakle.localize.swissdem import Patch
 from peakle.rendering.pinhole import camera_axes
-from peakle.rendering.terrain_view import TerrainViewRenderer, lift_render_pixels
+from peakle.rendering.terrain_view import TerrainRenderBundle, TerrainViewRenderer, lift_render_pixels
 from peakle.scene.scene import Scene
 from peakle.scripts.roma_match_worker import _joint_grid_select
 
@@ -1819,6 +1824,325 @@ def test_correspondence_cache_never_crosses_seed_manifest_or_worker_implementati
             changed_worker,
         )
     )
+
+
+def test_orientation_guided_fan_allows_an_exact_seed_heading() -> None:
+    config = RenderMatchConfig(orientation_prior_half_span_deg=0.0)
+
+    config.validate()
+
+    assert render_fan_yaws(181.0, True, config) == (-179.0,)
+    assert RenderMatchConfig().expand_pnp_search_radii_from_prior_sigma is True
+
+
+def test_explicit_render_seed_places_fan_independently_of_pose_prior(scene: Scene) -> None:
+    rendered_poses: list[CameraExtrinsics] = []
+
+    class RecordingRenderer(TerrainViewRenderer):
+        def render(self, terrain, intrinsics, extrinsics, **kwargs):
+            rendered_poses.append(extrinsics)
+            return super().render(terrain, intrinsics, extrinsics, **kwargs)
+
+    class EmptyMatcher:
+        def identity(self):
+            return {"id": "empty-render-seed-test"}
+
+        def match(self, query_rgb, render_rgb):
+            del query_rgb, render_rgb
+            return MatchSet(
+                query_xy_px=np.empty((0, 2)),
+                render_xy_px=np.empty((0, 2)),
+                confidence=np.empty(0),
+            )
+
+    prior_pose = _placed_pose(scene)
+    prior = PosePrior(
+        position=prior_pose.position,
+        yaw_deg=prior_pose.yaw_deg,
+        pitch_deg=prior_pose.pitch_deg,
+        horizontal_sigma_m=75.0,
+        vertical_sigma_m=40.0,
+        yaw_sigma_deg=12.0,
+        pitch_sigma_deg=8.0,
+    )
+    seed_position = LocalPoint(
+        east_m=2_400.0,
+        north_m=900.0,
+        up_m=scene.terrain.elevation_at(2_400.0, 900.0) + 6.0,
+    )
+    render_seed = RenderSeed(position=seed_position, yaw_deg=112.0, pitch_deg=-3.0)
+    camera = CameraModel(width_px=80, height_px=60, horizontal_fov_deg=60.0)
+
+    result = solve_render_match_pose(
+        scene.terrain,
+        np.full((60, 80, 3), 128, dtype=np.uint8),
+        camera,
+        prior,
+        EmptyMatcher(),
+        use_position_prior=False,
+        use_orientation_prior=True,
+        render_seed=render_seed,
+        config=RenderMatchConfig(
+            render_width_px=64,
+            render_height_px=64,
+            yaw_step_deg=30.0,
+            orientation_prior_half_span_deg=30.0,
+            refinement_passes=0,
+        ),
+        renderer=RecordingRenderer(),
+    )
+
+    assert result.status == "abstained"
+    assert len(rendered_poses) == 3
+    assert [pose.yaw_deg for pose in rendered_poses] == pytest.approx([82.0, 112.0, 142.0])
+    assert all(pose.position == seed_position for pose in rendered_poses)
+    assert all(pose.position != prior.position for pose in rendered_poses)
+    seed_record = result.diagnostics["render_seed"]
+    assert seed_record["schema"] == RENDER_SEED_SCHEMA
+    assert seed_record["source"] == "explicit_argument"
+    assert seed_record["position"] == seed_position.model_dump(mode="json")
+    assert result.diagnostics["pose_prior"]["position"] == prior.position.model_dump(mode="json")
+    assert result.diagnostics["pose_prior"]["position_regularization_enabled"] is False
+
+
+def test_render_seed_initializes_pnp_but_prior_still_anchors_regularization_and_clearance(
+    scene: Scene,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prior_east_m = 0.0
+    prior_north_m = -800.0
+    prior_ground_m = scene.terrain.elevation_at(prior_east_m, prior_north_m)
+    prior = PosePrior(
+        position=LocalPoint(east_m=prior_east_m, north_m=prior_north_m, up_m=prior_ground_m + 8.0),
+        yaw_deg=5.0,
+        pitch_deg=2.0,
+        horizontal_sigma_m=60.0,
+        vertical_sigma_m=30.0,
+        yaw_sigma_deg=10.0,
+        pitch_sigma_deg=6.0,
+    )
+    seed_east_m = 1_500.0
+    seed_north_m = -2_500.0
+    seed_ground_m = scene.terrain.elevation_at(seed_east_m, seed_north_m)
+    render_seed = RenderSeed(
+        position=LocalPoint(east_m=seed_east_m, north_m=seed_north_m, up_m=seed_ground_m + 30.0),
+        yaw_deg=25.0,
+        pitch_deg=-4.0,
+    )
+    intrinsics = CameraIntrinsics.from_horizontal_fov(128, 96, 60.0)
+    render = TerrainViewRenderer().render(
+        scene.terrain,
+        intrinsics,
+        CameraExtrinsics(
+            position=render_seed.position,
+            yaw_deg=render_seed.yaw_deg,
+            pitch_deg=-8.0,
+            roll_deg=0.0,
+        ),
+        modality="normal",
+        terrain_stride=2,
+    )
+    terrain_rows_columns = np.argwhere(render.terrain_mask)
+    render_candidates = terrain_rows_columns[:, ::-1].astype(np.float64)
+    candidate_lift = lift_render_pixels(render, render_candidates)
+    render_xy = render_candidates[candidate_lift.valid][:16]
+    assert len(render_xy) == 16
+    matches = MatchSet(
+        # Deliberately degenerate so the real fitter records the prior/clearance
+        # policy and then abstains before expensive nonlinear RANSAC.
+        query_xy_px=np.tile([64.0, 48.0], (len(render_xy), 1)),
+        render_xy_px=render_xy,
+        confidence=np.ones(len(render_xy)),
+    )
+    query_camera = CameraModel(width_px=128, height_px=96, horizontal_fov_deg=60.0, projection="cyltan")
+    settings = RenderMatchConfig(
+        min_lifted_matches_per_frame=12,
+        expand_pnp_search_radii_from_prior_sigma=False,
+        refinement_passes=0,
+        candidate_validation=CandidateValidationConfig(enabled=False),
+        pnp=PoseRansacConfig(
+            horizontal_search_radius_m=40.0,
+            vertical_search_radius_m=25.0,
+            prior_weight_px=9.0,
+        ),
+    )
+    captured: dict[str, object] = {}
+    real_fit_pose_ransac = render_match_module.fit_pose_ransac
+
+    def recording_fit_pose_ransac(*args, **kwargs):
+        captured["initial"] = args[4]
+        captured.update(kwargs)
+        return real_fit_pose_ransac(*args, **kwargs)
+
+    monkeypatch.setattr(render_match_module, "fit_pose_ransac", recording_fit_pose_ransac)
+
+    attempt = render_match_module._match_and_fit_frame(
+        0,
+        render,
+        matches,
+        query_camera,
+        prior,
+        scene.terrain,
+        True,
+        True,
+        settings,
+        17,
+        render_seed=render_seed,
+    )
+
+    assert captured["prior"] is prior
+    assert captured["use_position_prior"] is True
+    assert captured["use_orientation_prior"] is True
+    captured_config = captured["config"]
+    assert isinstance(captured_config, PoseRansacConfig)
+    assert captured_config.prior_weight_px == pytest.approx(9.0)
+    assert captured_config.horizontal_search_radius_m == pytest.approx(40.0)
+    assert captured_config.vertical_search_radius_m == pytest.approx(25.0)
+    initial = captured["initial"]
+    assert isinstance(initial, CameraExtrinsics)
+    assert initial.position == render_seed.position
+    assert initial.pitch_deg == pytest.approx(render_seed.pitch_deg)
+    assert attempt.pnp_result is not None
+    constraint = attempt.pnp_result.diagnostics["clearance_constraint"]
+    assert constraint["initial_clearance_m"] == pytest.approx(30.0)
+    assert constraint["raw_prior_clearance_m"] == pytest.approx(8.0)
+    assert constraint["anchor_clearance_m"] == pytest.approx(8.0)
+    assert constraint["prior_ground_sample"]["elevation_m"] == pytest.approx(prior_ground_m)
+    assert attempt.record["pose_prior_usage"]["clearance_anchor_uses_supplied_prior"] is True
+
+
+def test_refinement_moves_render_seed_without_replacing_pose_prior(
+    scene: Scene,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundles: dict[int, TerrainRenderBundle] = {}
+    rendered_poses: list[CameraExtrinsics] = []
+
+    class RecordingRenderer(TerrainViewRenderer):
+        def render(self, terrain, intrinsics, extrinsics, **kwargs):
+            bundle = super().render(terrain, intrinsics, extrinsics, **kwargs)
+            rendered_poses.append(extrinsics)
+            bundles[id(bundle.rgb)] = bundle
+            return bundle
+
+    class LiftableMatcher:
+        def identity(self):
+            return {"id": "liftable-refinement-test"}
+
+        def match(self, query_rgb, render_rgb):
+            bundle = bundles[id(render_rgb)]
+            rows_columns = np.argwhere(bundle.terrain_mask)
+            candidates = rows_columns[:, ::-1].astype(np.float64)
+            lifted = lift_render_pixels(bundle, candidates)
+            render_xy = candidates[lifted.valid][:20]
+            assert len(render_xy) == 20
+            count = len(render_xy)
+            query_xy = np.column_stack(
+                (
+                    np.linspace(5.0, query_rgb.shape[1] - 6.0, count),
+                    np.linspace(5.0, query_rgb.shape[0] - 6.0, count),
+                )
+            )
+            return MatchSet(
+                query_xy_px=query_xy,
+                render_xy_px=render_xy,
+                confidence=np.ones(count),
+            )
+
+    prior_pose = _placed_pose(scene)
+    prior = PosePrior(
+        position=prior_pose.position,
+        yaw_deg=prior_pose.yaw_deg,
+        pitch_deg=prior_pose.pitch_deg,
+        horizontal_sigma_m=80.0,
+        vertical_sigma_m=35.0,
+        yaw_sigma_deg=12.0,
+        pitch_sigma_deg=7.0,
+    )
+    seed_position = LocalPoint(
+        east_m=2_000.0,
+        north_m=-1_000.0,
+        up_m=scene.terrain.elevation_at(2_000.0, -1_000.0) + 5.0,
+    )
+    render_seed = RenderSeed(position=seed_position, yaw_deg=100.0, pitch_deg=-2.0)
+    pnp_initials: list[CameraExtrinsics] = []
+    pnp_priors: list[PosePrior] = []
+    pnp_configs: list[PoseRansacConfig] = []
+    pnp_prior_flags: list[tuple[bool, bool]] = []
+
+    def solved_fit_pose_ransac(*args, **kwargs):
+        initial = args[4]
+        assert isinstance(initial, CameraExtrinsics)
+        fit_prior = kwargs["prior"]
+        fit_config = kwargs["config"]
+        assert isinstance(fit_prior, PosePrior)
+        assert isinstance(fit_config, PoseRansacConfig)
+        pnp_initials.append(initial)
+        pnp_priors.append(fit_prior)
+        pnp_configs.append(fit_config)
+        pnp_prior_flags.append((kwargs["use_position_prior"], kwargs["use_orientation_prior"]))
+        if len(pnp_initials) <= 3:
+            estimate = initial.model_copy(
+                update={
+                    "position": LocalPoint(
+                        east_m=initial.position.east_m + 25.0,
+                        north_m=initial.position.north_m - 15.0,
+                        up_m=initial.position.up_m + 1.0,
+                    ),
+                    "yaw_deg": initial.yaw_deg + 1.0,
+                }
+            )
+        else:
+            estimate = initial
+        correspondence_count = len(args[0])
+        return PoseRansacResult(
+            status="solved",
+            extrinsics=estimate,
+            inlier_mask=np.ones(correspondence_count, dtype=np.bool_),
+            reprojection_error_px=np.zeros(correspondence_count),
+            diagnostics={
+                "inliers": correspondence_count,
+                "inlier_ratio": 1.0,
+                "median_reprojection_error_px": 0.0,
+                "candidate_pose": estimate.model_dump(mode="json"),
+            },
+        )
+
+    monkeypatch.setattr(render_match_module, "fit_pose_ransac", solved_fit_pose_ransac)
+    camera = CameraModel(width_px=120, height_px=80, horizontal_fov_deg=60.0)
+    result = solve_render_match_pose(
+        scene.terrain,
+        np.full((80, 120, 3), 128, dtype=np.uint8),
+        camera,
+        prior,
+        LiftableMatcher(),
+        use_position_prior=True,
+        use_orientation_prior=True,
+        render_seed=render_seed,
+        config=RenderMatchConfig(
+            render_width_px=96,
+            render_height_px=64,
+            yaw_step_deg=30.0,
+            orientation_prior_half_span_deg=30.0,
+            terrain_stride=2,
+            refinement_passes=1,
+            candidate_validation=CandidateValidationConfig(enabled=False),
+            pnp=PoseRansacConfig(prior_weight_px=4.0),
+        ),
+        renderer=RecordingRenderer(),
+    )
+
+    assert result.solved
+    assert len(pnp_initials) == 4
+    assert all(fit_prior is prior for fit_prior in pnp_priors)
+    assert pnp_prior_flags == [(True, True)] * 4
+    assert all(fit_config.prior_weight_px == pytest.approx(4.0) for fit_config in pnp_configs)
+    assert all(initial.position == seed_position for initial in pnp_initials[:3])
+    refinement_initial = pnp_initials[-1]
+    assert refinement_initial.position != seed_position
+    assert rendered_poses[-1].position == refinement_initial.position
+    assert result.diagnostics["refinement"]["render_seed"]["source"] == "first_pass_estimate"
+    assert result.diagnostics["pose_prior"]["position"] == prior.position.model_dump(mode="json")
 
 
 def test_render_pipeline_serializes_shared_worker_batch_once(scene: Scene) -> None:
