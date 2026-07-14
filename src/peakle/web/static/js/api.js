@@ -72,6 +72,8 @@ export const api = {
   duplicateView: (id, label) => request("POST", `/api/views/${id}/duplicate`, label ? { label } : {}),
   viewImageUrl: (id) => `/api/views/${id}/image`,
   viewPhotoUrl: (id) => `/api/views/${id}/photo`,
+  viewPoseLayerUrl: (id, poseKey, layer) =>
+    `/api/views/${encodeURIComponent(id)}/poses/${encodeURIComponent(poseKey)}/layers/${encodeURIComponent(layer)}.png`,
 
   listGtSamples: () => request("GET", "/api/gt/samples"),
   getGtAlignmentAudit: (limit = 100, includeClean = false, metric = false) =>

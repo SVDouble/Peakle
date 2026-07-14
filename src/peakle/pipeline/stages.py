@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from typing import Protocol
+from typing import Protocol, cast
 
 import numpy as np
 
@@ -246,8 +246,11 @@ def localize(evidence: Evidence, terrain: TerrainMap) -> PoseSolveResult:
 def _prior_from_gps(exif: ExifData, terrain: TerrainMap) -> PosePrior:
     origin = terrain.spec.origin
     east_scale = EARTH_RADIUS_M * math.cos(math.radians(origin.latitude_deg))
-    north_m = math.radians(exif.gps_lat_deg - origin.latitude_deg) * EARTH_RADIUS_M
-    east_m = math.radians(exif.gps_lon_deg - origin.longitude_deg) * east_scale
+    # The position stage calls this helper only after checking both coordinates.
+    gps_lat_deg = cast(float, exif.gps_lat_deg)
+    gps_lon_deg = cast(float, exif.gps_lon_deg)
+    north_m = math.radians(gps_lat_deg - origin.latitude_deg) * EARTH_RADIUS_M
+    east_m = math.radians(gps_lon_deg - origin.longitude_deg) * east_scale
     ground = terrain.elevation_at(east_m, north_m)
     up_m = exif.gps_alt_m if exif.gps_alt_m is not None else ground + 2.0
     yaw_deg = ((exif.heading_deg + 180.0) % 360.0) - 180.0 if exif.heading_deg is not None else 0.0

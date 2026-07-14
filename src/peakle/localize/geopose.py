@@ -3,7 +3,10 @@
 Dataset: 3000+ Alpine photos with GT pose and GT-rendered depth
 (merlin.fit.vutbr.cz/elevation/geoPose3K_final_publish.tar.gz).  Photos under ``cyl/`` are
 CYLINDRICAL crops.  ``info.txt`` layout: line1 = MANUAL|AUTO pose-source flag, line2 = ZYZ Euler
-(a, b, g) radians, lines 3-6 = lat, lon, elevation m, horizontal FOV radians.
+(a, b, g) radians, lines 3-6 = refined lat, lon, elevation m, and horizontal FOV radians.  In
+newer archives, optional lines 7-10 retain the corresponding original/noisy metadata.  The
+refined values remain the sole pose reference; the original values are label-ambiguity
+diagnostics only.
 
 Orientation decode: ``R = Rx(-g) @ Rz(-b) @ Ry(-a) @ P`` with ``P = [[0,1,0],[0,0,1],[1,0,0]]``;
 look = R @ [1,0,0]; east = -look[2], north = look[0], up = look[1].
@@ -26,6 +29,16 @@ from pathlib import Path
 import numpy as np
 
 
+@dataclass(frozen=True)
+class GeoPoseOriginalMetadata:
+    """Original/noisy location and FOV retained alongside the refined label."""
+
+    lat: float
+    lon: float
+    elev_m: float
+    fov_deg: float
+
+
 @dataclass
 class GeoPoseSample:
     name: str
@@ -38,6 +51,7 @@ class GeoPoseSample:
     yaw_gt_deg: float  # azimuth, 0 = North, clockwise to East
     pitch_gt_deg: float
     roll_gt_deg: float  # image-plane roll; the solver assumes 0, so large |roll| = harder GT
+    original_metadata: GeoPoseOriginalMetadata | None = None
 
     @property
     def photo_path(self) -> Path:
@@ -83,6 +97,16 @@ def load_sample(sample_dir: str | Path) -> GeoPoseSample:
     lines = [ln.strip() for ln in (root / "info.txt").read_text().splitlines() if ln.strip()]
     a, b, g = (float(x) for x in lines[1].split())
     yaw, pitch, roll = _decode_orientation(a, b, g)
+    original_metadata = (
+        GeoPoseOriginalMetadata(
+            lat=float(lines[6]),
+            lon=float(lines[7]),
+            elev_m=float(lines[8]),
+            fov_deg=math.degrees(float(lines[9])),
+        )
+        if len(lines) >= 10
+        else None
+    )
     return GeoPoseSample(
         name=root.name,
         root=root,
@@ -94,6 +118,7 @@ def load_sample(sample_dir: str | Path) -> GeoPoseSample:
         yaw_gt_deg=yaw,
         pitch_gt_deg=pitch,
         roll_gt_deg=roll,
+        original_metadata=original_metadata,
     )
 
 

@@ -85,7 +85,11 @@ class SolveRequest(BaseModel):
 
     Attributes:
         strategy: Solver strategy to run.
-        params: Optional solver parameters (e.g. `seed`, `position_prior`, `orientation_prior`).
+        params: Optional solver parameters (e.g. `seed`, `position_prior`,
+            `orientation_prior`, `prior_source`, `evidence_source`). `prior_source`
+            may be `metadata`, `pose:truth`, or `pose:solve:<id>`. Evidence choices
+            are exposed by the view payload; GT views default to `photo_auto`, while
+            `pfm_oracle` must be selected explicitly.
     """
 
     strategy: StrategyName

@@ -9,8 +9,10 @@ from scipy.ndimage import map_coordinates
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import LocalPoint
 from peakle.domain.pose import PosePrior
+from peakle.domain.projection import ImageProjectionName
 from peakle.domain.terrain import TerrainMap
 from peakle.optimization.scoring import huber_mean, robust_contour_residuals
+from peakle.rendering.point_skyline import cyltan_point_skyline
 from peakle.rendering.rasterizer import SyntheticRenderer
 
 type PoseTheta = NDArray[np.float64]
@@ -18,6 +20,8 @@ type PoseTheta = NDArray[np.float64]
 HORIZONTAL_POSITION_WEIGHT = 1.4
 VERTICAL_POSITION_WEIGHT = 0.8
 ORIENTATION_WEIGHT = 0.35
+MIN_CAMERA_CLEARANCE_M = 1.5
+TERRAIN_COLLISION_WEIGHT = 100.0
 # The fast skyline takes the topmost projected point per column, which misses
 # sub-grid silhouette edges; upsampling the terrain grid ~2x closes that gap
 # (~3px vs the rasterized reference) while staying ~10x cheaper than rasterizing.
@@ -76,6 +80,8 @@ class PoseObjective:
         terrain_stride: int,
         use_position_prior: bool = True,
         use_orientation_prior: bool = True,
+        projection: ImageProjectionName = "pinhole",
+        horizontal_fov_deg: float | None = None,
     ) -> None:
         self.terrain = terrain
         self.observed_profile = observed_profile
@@ -83,6 +89,8 @@ class PoseObjective:
         self.prior = prior
         self.renderer = renderer
         self.terrain_stride = terrain_stride
+        self.projection = projection
+        self.horizontal_fov_deg = horizontal_fov_deg or intrinsics.horizontal_fov_deg()
         # Build the (upsampled) terrain points once; every score() reuses them for
         # the fast point-projection skyline instead of re-flattening + rasterizing.
         self._points = dense_terrain_points(terrain, POINT_UPSAMPLE_FACTOR, stride=terrain_stride)
@@ -103,10 +111,23 @@ class PoseObjective:
         """
 
         extrinsics = self.extrinsics_from_theta(theta)
-        predicted = self.renderer.fast_skyline(self._points, self.intrinsics, extrinsics)
+        predicted = self.predict_profile(extrinsics)
         residuals = robust_contour_residuals(predicted, self.observed_profile)
         contour_loss = huber_mean(residuals, delta=8.0)
         return contour_loss + self._prior_penalty(theta)
+
+    def predict_profile(
+        self,
+        extrinsics: CameraExtrinsics,
+        intrinsics: CameraIntrinsics | None = None,
+    ) -> NDArray[np.float64]:
+        """Project the cached terrain points in the observed image geometry."""
+
+        target = intrinsics or self.intrinsics
+        if self.projection == "cyltan":
+            return cyltan_point_skyline(self._points, target, extrinsics, self.horizontal_fov_deg)
+        # Keep the established pinhole objective byte-for-byte equivalent.
+        return self.renderer.fast_skyline(self._points, target, extrinsics)
 
     def extrinsics_from_theta(self, theta: PoseTheta) -> CameraExtrinsics:
         """Converts optimization parameters to camera extrinsics."""
@@ -117,7 +138,10 @@ class PoseObjective:
                 north_m=float(theta[1]),
                 up_m=float(theta[2]),
             ),
-            yaw_deg=float(theta[3]),
+            # Population optimizers routinely step outside the nominal yaw
+            # bounds.  CameraExtrinsics intentionally validates its public
+            # input, so normalize the periodic optimization coordinate here.
+            yaw_deg=_wrap_yaw_deg(float(theta[3])),
             pitch_deg=float(theta[4]),
             roll_deg=0.0,
         )
@@ -140,6 +164,7 @@ class PoseObjective:
         """Returns solver bounds: a box around the prior, or the whole terrain
         for position when the position prior is disabled."""
 
+        pitch_limit_deg = 50.0 if self.projection == "cyltan" else 45.0
         if self.use_orientation_prior:
             orientation_bounds = [
                 (
@@ -147,12 +172,12 @@ class PoseObjective:
                     self.prior.yaw_deg + 3.0 * self.prior.yaw_sigma_deg,
                 ),
                 (
-                    max(-45.0, self.prior.pitch_deg - 3.0 * self.prior.pitch_sigma_deg),
-                    min(45.0, self.prior.pitch_deg + 3.0 * self.prior.pitch_sigma_deg),
+                    max(-pitch_limit_deg, self.prior.pitch_deg - 3.0 * self.prior.pitch_sigma_deg),
+                    min(pitch_limit_deg, self.prior.pitch_deg + 3.0 * self.prior.pitch_sigma_deg),
                 ),
             ]
         else:
-            orientation_bounds = [(-180.0, 180.0), (-45.0, 45.0)]
+            orientation_bounds = [(-180.0, 180.0), (-pitch_limit_deg, pitch_limit_deg)]
         if not self.use_position_prior:
             return [
                 (float(self.terrain.x_m[0]), float(self.terrain.x_m[-1])),
@@ -179,7 +204,7 @@ class PoseObjective:
     def _prior_penalty(self, theta: PoseTheta) -> float:
         penalty = 0.0
         if self.use_orientation_prior:
-            dyaw = (theta[3] - self.prior.yaw_deg) / self.prior.yaw_sigma_deg
+            dyaw = _angular_delta_deg(float(theta[3]), self.prior.yaw_deg) / self.prior.yaw_sigma_deg
             dpitch = (theta[4] - self.prior.pitch_deg) / self.prior.pitch_sigma_deg
             penalty += ORIENTATION_WEIGHT * (dyaw * dyaw + dpitch * dpitch)
         if self.use_position_prior:
@@ -187,4 +212,19 @@ class PoseObjective:
             dy = (theta[1] - self.prior.position.north_m) / self.prior.horizontal_sigma_m
             dz = (theta[2] - self.prior.position.up_m) / self.prior.vertical_sigma_m
             penalty += HORIZONTAL_POSITION_WEIGHT * (dx * dx + dy * dy) + VERTICAL_POSITION_WEIGHT * dz * dz
+        ground_m = self.terrain.elevation_at(float(theta[0]), float(theta[1]))
+        clearance_shortfall_m = max(0.0, ground_m + MIN_CAMERA_CLEARANCE_M - float(theta[2]))
+        penalty += TERRAIN_COLLISION_WEIGHT * clearance_shortfall_m * clearance_shortfall_m
         return float(penalty)
+
+
+def _wrap_yaw_deg(yaw_deg: float) -> float:
+    """Normalizes a periodic yaw to the CameraExtrinsics canonical interval."""
+
+    return (yaw_deg + 180.0) % 360.0 - 180.0
+
+
+def _angular_delta_deg(value_deg: float, reference_deg: float) -> float:
+    """Returns the signed shortest angular difference in degrees."""
+
+    return _wrap_yaw_deg(value_deg - reference_deg)

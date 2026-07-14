@@ -180,7 +180,7 @@ def bench_charts(rows: list[dict], out: Path) -> dict:
         b = np.array([s[k] for s in solves if not s["correct"] and np.isfinite(s.get(k, np.nan))])
         a = float((g[:, None] > b[None, :]).mean() + 0.5 * (g[:, None] == b[None, :]).mean())
         aucs[k] = round(1 - a if invert else a, 2)
-    order = sorted(aucs, key=aucs.get)
+    order = sorted(aucs, key=aucs.__getitem__)
     fig, ax = plt.subplots(figsize=(6.8, 2.7))
     ax.barh(range(len(order)), [aucs[k] for k in order], color=BLUE, height=0.55)
     ax.set_yticks(range(len(order)), order)
@@ -311,6 +311,7 @@ def example_chamfer(sample, profile, out: Path) -> dict:
             if c < best[0]:
                 best = (c, rows)
         cham, rows = best
+        assert rows is not None  # the fixed, non-empty shift range always yields a candidate
         img = _draw_lines(
             rgb,
             [(obs, GOOD, 3), (rows, YELLOW, 3)],

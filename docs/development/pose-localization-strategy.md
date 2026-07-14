@@ -1,0 +1,309 @@
+# Pose localization strategy after the refined-pose reset
+
+The product goal is not to draw a plausible DEM overlay. It is to recover a camera pose that
+improves a real prior—or localizes without one—and to abstain when the image/terrain evidence does
+not support that result.
+
+## Current evidence
+
+Only the orientation-only horizon solver currently has credible multi-sample real-data evidence on
+GeoPose's cylindrical/tangent crops. The render-match-PnP branch described below is now implemented,
+including learned matching and native-patch rendering. It now has corrected high-resolution Swiss
+controls, but not a successful eligible case against the published refined reference. It remains
+experimental and ranking-excluded. The baseline every new method must beat is **keep the identical
+prior unchanged**.
+
+The older full-pose point-objective strategies remain unvalidated: reduced and native-width scores
+disagree and real MAP_A tests show position drift. They do not become credible merely because the
+render-match-PnP path can now consume a fine elevation patch.
+
+The matrix exposes three evidence tracks:
+
+- `pfm_oracle`: source depth/PFM skyline; isolates terrain, camera conventions, and pose search.
+- `photo_auto`: automatic photo skyline; measures the end-to-end system.
+- `photo_rgb`: the query RGB image; used only by the render-matching branch.
+
+Before a solver track is scored, `gt_dem_compat_v1` measures fixed-pose source-depth↔DEM agreement.
+It allows only a cross-fitted global vertical crop shift and reports angular median, p90, trimmed
+symmetric Chamfer, coverage, and the fitted shift. `raw_camera_clearance_v1` independently checks
+the unmodified metadata altitude against DEM ground. PFM edge support in the photo is a separate
+diagnostic, not a claim that the image skyline was reproduced. None reads a solver result or GT-v2 refinement.
+
+Terrain policy is coarse-to-fine. Copernicus GLO-30 remains the regional surface and cached
+swissALTI3D supplies a prior-centred near-field patch where available. Render-match-PnP composites
+that native-source patch over the regional mesh in the same depth buffer. The estimator may obtain
+the patch only from its supplied position prior; a separate reference-centred patch used by the
+GT↔DEM compatibility evaluator is never passed to the estimator. A no-position-prior cell receives
+no reference-centred patch.
+
+Swiss terrain provisioning uses the
+[geo.admin STAC v1 endpoint](https://docs.geo.admin.ch/download-data/stac-api/overview.html) and
+follows every continuation link; the API page size is not treated as the catalogue size. For each
+kilometre coordinate, the cache
+selects the deterministic newest available 2 m edition, both while downloading and while loading an
+existing cache. Nodata is resampled separately from elevation: a bilinear result is finite only when
+all four contributing source cells are finite. This prevents the `-9999` source sentinel from being
+blended into plausible-looking negative terrain near tile gaps.
+
+Every artifact distinguishes source spacing from rendered mesh spacing. For example, a 2 m
+swissALTI3D source with `--native-patch-stride 8` is rasterized as an approximately 16 m mesh, while
+the current GLO-30 control uses a 30 m source with terrain stride 6, or approximately 180 m effective
+regional mesh spacing. The provenance reports both; neither upsampling nor a finer texture creates
+new elevation detail. Full-pose point objectives still omit the native patch and remain
+ranking-excluded when one is available.
+
+## With a location/orientation prior
+
+### 1. Prior-regularized outline search
+
+This remains the lower-cost comparator and likely production-first path. Search orientation and
+camera calibration before widening position, constrain height to
+`DEM(east,north) + eye_height`, retain top-K modes, and use a robust angular loss:
+
+- trimmed bidirectional distance-transform/Chamfer skyline loss;
+- derivative/curvature agreement so a smooth vertical offset cannot dominate;
+- separately weighted internal ridges and occlusion boundaries;
+- masks for clouds, vegetation, poles, buildings, and low-confidence columns;
+- Mahalanobis prior cost with an explicit unchanged-prior competitor;
+- replace the prior only when held-out fit and mode margin improve materially.
+
+Baboud et al. demonstrate robust photo-edge to rendered terrain-silhouette alignment from an
+estimated viewpoint and FOV: [Photo-to-terrain alignment](https://resources.mpi-inf.mpg.de/photo-to-terrain/).
+
+### 2. Render matching, 3D lifting, and PnP/RANSAC (implemented, experimental)
+
+The implemented high-upside branch follows LandscapeAR:
+
+1. render a prior-centred yaw fan of orthophoto-textured DEM views with metric depth, normals,
+   world coordinates, and silhouette;
+2. run a pinned MINIMA or RoMa worker offline and retain its deterministic 5,000 candidates per
+   query/render pair;
+3. reject border-connected near-black padding introduced by the cylindrical/tangent query warp;
+4. reject matches that lift to sky, missing appearance, or a render-depth discontinuity;
+5. apply a deterministic joint query/render spatial cap, retaining at most 800 balanced matches;
+6. solve with projection-aware nonlinear PnP/RANSAC through the exact query camera model; and
+7. optionally re-render once around an accepted estimate and repeat matching/refinement.
+
+The `5,000 → padding filter → render lift → balanced 800` ordering is deliberate. The
+matcher cache stores the worker-selected candidates, not the later geometry-dependent subset, so
+padding, lifting, cap, RANSAC, and acceptance changes can be replayed without another model pass.
+Selection and every rejection count are persisted per render frame.
+
+LandscapeAR used twelve 30° render directions and this exact lift→PnP structure:
+[LandscapeAR, ECCV 2020](https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123740290.pdf).
+
+The worker accepts two RoMa-architecture checkpoints:
+
+- [MINIMA, CVPR 2025](https://openaccess.thecvf.com/content/CVPR2025/papers/Ren_MINIMA_Modality_Invariant_Image_Matching_CVPR_2025_paper.pdf) ([official code](https://github.com/LSXI7/MINIMA))—the primary cross-modal candidate;
+- [RoMa, CVPR 2024](https://openaccess.thecvf.com/content/CVPR2024/papers/Edstedt_RoMa_Robust_Dense_Feature_Matching_CVPR_2024_paper.pdf) ([official code](https://github.com/Parskatt/RoMa))—the RGB wide-baseline comparator.
+
+[MatchAnything](https://arxiv.org/abs/2501.07556) ([official code](https://github.com/zju3dv/MatchAnything))
+remains a promising broad-modality experiment, but it is not accepted by the current pinned worker.
+
+MINIMA and RoMa inference runs out of process. A local manifest pins the allowed matcher ID,
+repository commit, inference settings, DINOv2 and matcher checkpoint paths, byte sizes, and SHA-256
+digests. The worker verifies the clean checkout and artifacts before import, blocks Torch Hub and
+model downloads, and records runtime/VRAM provenance. A missing or mismatched artifact is a visible
+skip/error, never an implicit download.
+
+`--matcher-cache DIR` enables an optional read-through, content-addressed correspondence cache. Its
+key includes the exact query/render RGB content, coordinate/offline contract, seed, normalized and
+source manifests, inference configuration, artifact identities, worker command, and worker file
+hashes. Cache entries are validated and corrupt entries are recomputed atomically. On a warm replay,
+producer inference runtime remains historical provenance while `current_worker_runtime_s` is zero
+and the batch says that the worker was not invoked. Omitting the flag disables cache reads and writes.
+
+For GeoPose `cyltan` queries with a position prior, PnP resolves the vertical crop/altitude
+degeneracy by parameterizing camera height as
+`DEM(east, north) + bounded_clearance`. The bounded clearance is anchored to the supplied prior;
+crop pitch remains a separate image nuisance. A supplied clearance is trusted only inside the
+declared 0.5–12 m ground-camera range. Values above or below that range use a neutral 2 m anchor and
+0.5–12 m bounds instead of turning a horizontally displaced/vertically noisy prior into an aerial
+camera constraint. RANSAC mixes uniform and progressive-confidence
+trials, computes the exact finite-population trial count for the declared 20% inlier floor and 99%
+target probability, and records whether its hard budget meets that contract. Acceptance also gates
+query-image coverage, duplicate/near-collinear 3D support, horizontal and 3D baseline, camera angular
+span, and physical clearance. Planar mountain surfaces are explicitly allowed. A failed gate produces
+an explicit abstention with the best candidate and diagnostics, not a pose disguised as success.
+
+#### Current GLO-30 control
+
+On the frozen one-image GLO-30 control, MINIMA's strongest frame reaches 72 inliers out of the
+balanced 800 (9%); RoMa remains below 4%. Both correctly abstain below the 20% acceptance floor. The
+query contains 7.07% detected cylindrical-warp padding and substantial non-terrain occlusion, while
+no cached swissALTI3D patch covers the sample and the GLO-30 elevation mesh is effectively about
+180 m at the configured stride. The cached z14 orthophoto is appearance only and makes no claim of
+native imagery or elevation resolution. This is a useful negative diagnostic of that image/render
+configuration, **not** a dataset-wide matcher comparison or evidence that the strategy cannot work.
+
+#### Corrected Swiss high-resolution controls
+
+The first provisioned sample, `eth_ch1_48605067_01024`, demonstrated that the pipeline can solve a
+real orthophoto-textured native-patch case: MINIMA finished 37.1 m / 0.62° from the reference and
+RoMa 44.2 m / 0.46°. It cannot count as primary evidence. Once the complete deterministic 2 m patch
+replaced the clipped catalogue result, the fixed-pose evaluator reclassified it as `MAP_C/HEIGHT_B`
+(median 1.50°, p90 2.80°, raw clearance -5.39 m). Both solver cells also remain ranking-excluded as
+experimental.
+
+`eth_ch1_IMG_4948_01024` is the first completed native-patch control that retains primary-compatible
+input status: `MAP_B/HEIGHT_A`, fixed-pose median 0.19°, p90 0.75°, raw clearance 2.61 m, and 98.0%
+photo-edge support. Its estimator patch is a 5501×5501 2 m source grid with about 87.4% finite
+coverage; stride 8 produces an approximately 16 m render mesh. The z14 SWISSIMAGE input was
+pre-provisioned and hashed before the offline runs.
+
+The strict result is negative:
+
+| matcher/run | refined horizontal | yaw | consensus | original-GPS diagnostic |
+|---|---:|---:|---:|---:|
+| MINIMA standard replicate 0 | 235.0 m | 0.89° | 475/800 (59.4%) | 34.5 m |
+| MINIMA standard replicate 1 | 203.6 m | 1.02° | 308/800 (38.5%) | 31.6 m |
+| MINIMA standard replicate 2 | 236.5 m | 0.89° | 491/800 (61.4%) | 35.8 m |
+| RoMa paired control | 232.8 m | 0.90° | 463/800 (57.9%) | 34.7 m |
+
+All four estimates fail the declared 100 m refined-reference position threshold. The three MINIMA
+solutions span only about 34 m despite different 200 m horizontal, ±75 m vertical, and ±15° yaw
+perturbations; MINIMA and RoMa also recover nearly the same pose. One MINIMA replicate reaches the
+12 m clearance ceiling, so even the stability evidence is not an unconditional acceptance signal.
+
+The [GeoPose3K dataset](https://cphoto.fit.vutbr.cz/geoPose3K/) retains two metadata blocks: the
+published refined pose/FOV is the sole benchmark reference,
+while the original noisy Flickr GPS/elevation/FOV is diagnostic only. The latter is recorded after
+solving with `used_by_estimator=false`, `used_for_success_grading=false`, and
+`used_for_ranking=false`. Agreement with that noisy GPS cannot convert these failures into successes
+or justify relabelling the reference. It does show that the failure is systematic enough to require
+an independent physical check, rather than another reprojection threshold tuned on this image.
+
+A reproducible focused run (replace the output path for every run) is:
+
+```bash
+python -m peakle.scripts.bench_pose_matrix \
+  --samples eth_ch1_IMG_4948_01024 \
+  --profile core \
+  --algorithms keep-prior,render-pnp \
+  --evidence photo_rgb \
+  --regimes perturbed_metadata \
+  --perturbation standard \
+  --replicates 3 \
+  --seed 20260713 \
+  --render-matcher worker \
+  --render-modality orthophoto \
+  --render-refinement-passes 0 \
+  --matcher-command "$PWD/.venv/bin/python $PWD/src/peakle/scripts/roma_match_worker.py" \
+  --matcher-id minima_roma \
+  --matcher-manifest local/models/minima/manifest.json \
+  --matcher-cache local/cache/matcher-correspondences \
+  --orthophoto-cache local/data/swissimage \
+  --orthophoto-zoom 14 \
+  --orthophoto-time current \
+  --native-patch-stride 8 \
+  --output local/output/<new-run>-geopose-bench
+```
+
+Use `--matcher-id roma_outdoor --matcher-manifest local/models/roma/manifest.json` for the paired
+RoMa control. Benchmarks never fetch missing orthophoto tiles or model files.
+
+#### Recommended next experiment
+
+Do not relax the 100 m target or accept consensus alone. Re-render each candidate pose independently
+and validate visibility, terrain occlusion ordering, silhouette/ridge alignment, and held-out spatial
+regions that were not used to fit PnP. Require agreement across independent evidence families and
+abstain when clearance/nuisance parameters are boundary-limited. An unchanged-position competitor
+and a Schur-projected horizontal uncertainty estimate remain useful observability gates, but they
+cannot catch a set of systematically biased matches that genuinely prefers the wrong translation.
+
+For the no-position-prior track, build the geographic 360° DEM-horizon index first, retrieve top-K
+location/yaw cells, and only then invoke the same fine orthophoto render → learned match → PnP stage.
+That supplies auditable regional recall and a bounded search window before any expensive dense
+matching; a general geolocator may propose additional regions but must not count as the final pose.
+
+[Towards Unconstrained Cross-View Pose Estimation, WACV 2026](https://openaccess.thecvf.com/content/WACV2026/papers/Wollam_Towards_Unconstrained_Cross-View_Pose_Estimation_WACV_2026_paper.pdf)
+is worth an aerial-image auxiliary experiment because it searches unknown FOV, pitch, roll, and
+projection. It is trained/evaluated on ground-to-aerial imagery rather than bare terrain, however,
+so it must not displace the geometry-verifiable DEM pipeline without a mountain-domain benchmark.
+
+Use [GeoCalib](https://github.com/cvg/GeoCalib) to estimate FOV, gravity, roll, distortion, and
+confidence independently before terrain optimization. Monocular depth/normals can support the
+loss, but kilometre-scale absolute depth must not determine pose by itself.
+
+### Segmentation backbone experiment: LingBot Vision
+
+[LingBot-Vision](https://huggingface.co/robbyant/lingbot-vision-vit-giant) is relevant to the
+photo-evidence problem because its boundary-centric pretraining is designed for dense prediction.
+The published Giant checkpoint is a **backbone**, however: it emits normalized patch tokens and
+does not include a trained sky/terrain segmentation head. It therefore cannot replace SAM or the
+current colour extractor directly.
+
+Treat it as a measured downstream experiment: freeze a Base or Large backbone first, train a small
+binary decoder/linear probe on sky/terrain masks, and compare boundary F-score, skyline angular
+error, coverage, runtime, and downstream pose recall on a location-held-out split. Only try the
+roughly billion-parameter Giant model if the smaller variants demonstrate a useful boundary gain.
+The [official repository](https://github.com/robbyant/lingbot-vision) and
+[paper](https://arxiv.org/abs/2607.05247) provide the backbone interface; neither supplies a
+ready-made mountain-sky decoder.
+
+### 3. Featuremetric refinement
+
+After a good discrete hypothesis exists, test PixLoc-style multi-scale feature alignment or a
+differentiable silhouette/depth renderer. These are local refiners, not global initializers:
+[PixLoc](https://arxiv.org/abs/2103.09213) and the
+[PyTorch3D camera-optimization tutorial](https://pytorch3d.org/tutorials/camera_position_optimization_with_differentiable_rendering).
+
+## Without a prior
+
+### 1. Geographic DEM skyline index
+
+Precompute 360° horizon profiles on a hierarchical terrain grid, encode overlapping contourlets,
+retrieve/vote for location and direction, then verify top-K candidates at full resolution. The ETH
+Alps system is still the most directly validated mountain-specific blueprint, reporting 88% within
+1 km across Switzerland: [project](https://cvg.ethz.ch/research/mountain_res) and
+[IJCV paper](https://people.inf.ethz.ch/pomarc/pubs/SaurerIJCV15.pdf).
+
+Modernize retrieval with a learned 1D skyline descriptor plus ANN, while retaining geometry-aware
+location/direction voting and dense final verification.
+
+### 2. Photo-to-render retrieval, then the same PnP stage
+
+Precompute multi-FOV render descriptors, retrieve top-K regions, locally re-render at the finest
+available DEM resolution, then apply cross-modal matching and PnP. AnyLoc is a useful cross-domain
+retrieval baseline: [official code](https://github.com/AnyLoc/AnyLoc). A Peakle-specific dual encoder
+trained only on validated photo/render pairs is the likely end state.
+
+### 3. Region proposal and reference-photo localization
+
+General geolocation can reduce the planet to candidate regions, never serve as the final pose:
+[Scaling Image Geo-Localization to Continent Level, NeurIPS 2025](https://scaling-geoloc.github.io/)
+is the strongest recent regional proposal to benchmark first: it fuses learned ground prototypes
+with aerial embeddings and reports 68% of its Europe queries within 200 m, while also showing that
+rural cases remain a weakness. Treat its top-K cells as search windows for DEM verification, not
+as a camera pose.
+[PIGEON/PIGEOTTO, CVPR 2024](https://openaccess.thecvf.com/content/CVPR2024/html/Haas_PIGEON_Predicting_Image_Geolocations_CVPR_2024_paper.html)
+and [GeoCLIP, NeurIPS 2023](https://proceedings.neurips.cc/paper_files/paper/2023/hash/1b57aaddf85ab01a2445a79c9edc1f4b-Abstract-Conference.html).
+[HierLoc, ICLR 2026](https://iclr.cc/virtual/2026/poster/10008439) is a compact global region
+proposal when storing a huge reference-image bank is impractical, but its country/region/city
+entities are intentionally too coarse to count as a solved camera pose.
+
+Popular viewpoints also justify a reference-photo branch. Benchmark
+[ImLoc (2026)](https://arxiv.org/abs/2601.04185) first: it augments database images with depth,
+uses dense query↔reference matching, lifts those matches through depth, and estimates pose with
+PnP/RANSAC. Retain [Hierarchical Localization](https://github.com/cvg/Hierarchical-Localization)
+as the established sparse comparator; [AsymLoc, CVPR 2026](https://openaccess.thecvf.com/content/CVPR2026/html/Omama_AsymLoc_Towards_Asymmetric_Feature_Matching_for_Efficient_Visual_Localization_CVPR_2026_paper.html)
+is an efficiency option if query-side compute matters. Follow any reference-photo result with DEM
+alignment, and audit Flickr/reference overlap before reporting a number.
+
+## Benchmark contract
+
+Run three tracks: real raw-metadata priors, controlled perturbations bucketed by initial error, and
+no-prior regional/global localization. Split by massif/location, photographer, and near-duplicate
+group—not random images. Report:
+
+- horizontal/vertical position, yaw, and FOV errors; effective crop-pitch nuisance separately
+  (physical pitch/roll are not scoreable until the GeoPose vertical crop transform is known);
+- recall at 100 m/2°, 200 m/5°, and for no-prior retrieval 1 km/5° top-1 and top-5;
+- improvement over prior, regression rate, unchanged-prior win rate, and abstention;
+- top-K recall, risk–coverage/confidence calibration, runtime, renders, RAM/VRAM;
+- all MANUAL cases, `MAP_A`, `MAP_A + photo_edge_support`, and identifiability bins separately;
+- paired, location-grouped bootstrap confidence intervals.
+
+Do not compare optimizer-native costs. Re-render every output at full resolution and score it with
+one independent evaluator. Do not optimize dense RGB against an untextured DEM, force a single
+hypothesis, or use end-to-end pose regression as the primary system.

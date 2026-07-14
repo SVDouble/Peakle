@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peakle · Pose benchmarks</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/benchmark.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <a class="brand" href="/">PEAKLE</a>
+      <span class="slash">/</span>
+      <span>Pose benchmarks</span>
+    </div>
+    <nav><a href="/">Workbench</a><a href="/gt">GT Lab</a></nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Evaluation, not another pose viewer</p>
+        <h1>Which pose strategy actually improves the prior?</h1>
+        <p class="lede">Every strategy is compared on the same evidence and prior. DEM skyline agreement and raw camera height are gated independently, so broken image–terrain pairs cannot flatter or punish a solver.</p>
+      </div>
+      <label class="run-picker">Benchmark run<select id="runSelect" aria-label="Benchmark run"></select></label>
+    </section>
+
+    <section id="provenance" class="provenance"></section>
+    <section id="warning" class="warning" hidden></section>
+
+    <section class="toolbar" aria-label="Benchmark filters">
+      <div id="subsetTabs" class="tabs"></div>
+      <label class="search"><span>Find sample</span><input id="search" type="search" placeholder="Matterhorn, sample id…"></label>
+    </section>
+
+    <section id="cards" class="cards" aria-live="polite"></section>
+
+    <section class="grid">
+      <article class="panel leaderboard-panel">
+        <div class="panel-head"><div><p class="eyebrow">Current evidence</p><h2>Condition matrix</h2></div><span id="subsetCount" class="muted"></span></div>
+        <div class="table-wrap">
+          <table>
+            <thead id="leaderboardHead"></thead>
+            <tbody id="leaderboard"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel strata-panel">
+        <div class="panel-head"><div><p class="eyebrow">Dataset gate</p><h2 id="strataTitle">Evaluation strata</h2></div></div>
+        <div id="strata" class="strata"></div>
+        <p id="strataNote" class="footnote">New runs use fixed-pose angular <code>gt_dem_compat_v1</code> and an independent raw-height gate.</p>
+      </article>
+    </section>
+
+    <section class="panel cases-panel">
+      <div class="panel-head"><div><p class="eyebrow">Failure drill-down</p><h2>Samples</h2></div><span id="caseCount" class="muted"></span></div>
+      <div class="table-wrap">
+        <table class="cases">
+          <thead id="casesHead"></thead>
+          <tbody id="cases"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/js/benchmark.js"></script>
+</body>
+</html>

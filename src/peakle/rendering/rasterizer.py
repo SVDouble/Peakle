@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from dataclasses import dataclass
+from typing import NamedTuple, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -11,10 +12,69 @@ from pydantic import BaseModel, ConfigDict
 
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.terrain import TerrainMap
-from peakle.rendering.pinhole import project_points
+from peakle.rendering.pinhole import camera_axes, project_points
 from peakle.rendering.skyline import interpolate_profile
 
 RASTER_EPSILON = 1e-8
+
+
+class HeightfieldLike(Protocol):
+    """Structural interface for a georeferenced regular elevation grid."""
+
+    x_m: NDArray[np.float64]
+    y_m: NDArray[np.float64]
+    elevation_m: NDArray[np.float64]
+
+
+@dataclass(frozen=True)
+class HeightfieldGrid:
+    """Validated local-ENU heightfield whose elevations may contain nodata."""
+
+    x_m: NDArray[np.float64]
+    y_m: NDArray[np.float64]
+    elevation_m: NDArray[np.float64]
+
+    @classmethod
+    def from_like(cls, surface: HeightfieldLike) -> HeightfieldGrid:
+        """Build a non-copying validated view of a structural heightfield."""
+
+        return cls(
+            x_m=np.asarray(surface.x_m, dtype=np.float64),
+            y_m=np.asarray(surface.y_m, dtype=np.float64),
+            elevation_m=np.asarray(surface.elevation_m, dtype=np.float64),
+        )
+
+    def __post_init__(self) -> None:
+        x_m = np.asarray(self.x_m, dtype=np.float64)
+        y_m = np.asarray(self.y_m, dtype=np.float64)
+        elevation_m = np.asarray(self.elevation_m, dtype=np.float64)
+        if x_m.ndim != 1 or y_m.ndim != 1:
+            raise ValueError("heightfield coordinate axes must be one-dimensional")
+        if x_m.size < 2 or y_m.size < 2:
+            raise ValueError("heightfield coordinate axes must contain at least two samples")
+        if elevation_m.shape != (y_m.size, x_m.size):
+            raise ValueError(
+                "heightfield elevation shape must be (len(y_m), len(x_m)); "
+                f"got {elevation_m.shape} for {(y_m.size, x_m.size)}"
+            )
+        if not np.all(np.isfinite(x_m)) or not np.all(np.isfinite(y_m)):
+            raise ValueError("heightfield coordinate axes must be finite")
+        if not np.all(np.diff(x_m) > 0.0) or not np.all(np.diff(y_m) > 0.0):
+            raise ValueError("heightfield coordinate axes must be strictly increasing")
+        object.__setattr__(self, "x_m", x_m)
+        object.__setattr__(self, "y_m", y_m)
+        object.__setattr__(self, "elevation_m", elevation_m)
+
+    def sampled(self, stride: int) -> HeightfieldGrid:
+        """Return the exact mesh sampled by the rasterizer, including boundaries."""
+
+        rows = _stride_indices(self.y_m.size, stride)
+        columns = _stride_indices(self.x_m.size, stride)
+        return HeightfieldGrid(
+            x_m=self.x_m[columns],
+            y_m=self.y_m[rows],
+            elevation_m=self.elevation_m[np.ix_(rows, columns)],
+        )
 
 
 class RenderArrays(BaseModel):
@@ -31,6 +91,17 @@ class RenderArrays(BaseModel):
     image: Image.Image
     terrain_mask: NDArray[np.bool_]
     skyline_profile: NDArray[np.float64]
+
+
+class GeometryRenderArrays(BaseModel):
+    """Metric pinhole render products used for correspondence lifting."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    forward_depth_m: NDArray[np.float64]
+    terrain_mask: NDArray[np.bool_]
+    skyline_profile: NDArray[np.float64]
+    native_overlay_mask: NDArray[np.bool_]
 
 
 class _ScreenVertex(NamedTuple):
@@ -55,6 +126,7 @@ class _RasterizedTerrain(BaseModel):
     terrain_mask: NDArray[np.bool_]
     skyline_profile: NDArray[np.float64]
     inverse_depth: NDArray[np.float64]
+    native_overlay_mask: NDArray[np.bool_]
 
 
 class SyntheticRenderer:
@@ -66,6 +138,9 @@ class SyntheticRenderer:
         intrinsics: CameraIntrinsics,
         extrinsics: CameraExtrinsics,
         stride: int = 1,
+        *,
+        overlay: HeightfieldLike | None = None,
+        overlay_stride: int = 1,
     ) -> RenderArrays:
         """Renders an RGB image, terrain mask, and skyline profile.
 
@@ -79,7 +154,14 @@ class SyntheticRenderer:
             Render arrays for image and contour extraction.
         """
 
-        raster = self._rasterize_visible_terrain(terrain, intrinsics, extrinsics, stride=stride)
+        raster = self._rasterize_visible_terrain(
+            terrain,
+            intrinsics,
+            extrinsics,
+            stride=stride,
+            overlay=overlay,
+            overlay_stride=overlay_stride,
+        )
         image = self._paint_image(raster.skyline_profile, raster.terrain_mask)
         return RenderArrays(
             image=image,
@@ -93,6 +175,9 @@ class SyntheticRenderer:
         intrinsics: CameraIntrinsics,
         extrinsics: CameraExtrinsics,
         stride: int = 1,
+        *,
+        overlay: HeightfieldLike | None = None,
+        overlay_stride: int = 1,
     ) -> NDArray[np.float64]:
         """Rasterizes visible terrain and returns its upper silhouette profile."""
 
@@ -101,6 +186,8 @@ class SyntheticRenderer:
             intrinsics,
             extrinsics,
             stride=stride,
+            overlay=overlay,
+            overlay_stride=overlay_stride,
         ).skyline_profile
 
     def visible_mask(
@@ -109,6 +196,9 @@ class SyntheticRenderer:
         intrinsics: CameraIntrinsics,
         extrinsics: CameraExtrinsics,
         stride: int = 1,
+        *,
+        overlay: HeightfieldLike | None = None,
+        overlay_stride: int = 1,
     ) -> NDArray[np.bool_]:
         """Rasterizes visible terrain and returns its boolean coverage mask."""
 
@@ -117,6 +207,8 @@ class SyntheticRenderer:
             intrinsics,
             extrinsics,
             stride=stride,
+            overlay=overlay,
+            overlay_stride=overlay_stride,
         ).terrain_mask
 
     def fast_skyline(
@@ -161,25 +253,96 @@ class SyntheticRenderer:
         intrinsics: CameraIntrinsics,
         extrinsics: CameraExtrinsics,
         stride: int,
+        overlay: HeightfieldLike | None = None,
+        overlay_stride: int = 1,
     ) -> _RasterizedTerrain:
-        """Projects the terrain mesh and rasterizes visible pixels with depth."""
+        """Rasterize regional terrain and an optional fine patch into one z-buffer."""
 
         width = intrinsics.width_px
         height = intrinsics.height_px
-        points = terrain.flattened_points(stride=stride)
+        inverse_depth_buffer = np.full((height, width), -np.inf, dtype=np.float64)
+        regional = HeightfieldGrid(
+            x_m=np.asarray(terrain.x_m, dtype=np.float64),
+            y_m=np.asarray(terrain.y_m, dtype=np.float64),
+            elevation_m=np.asarray(terrain.elevation_m, dtype=np.float64),
+        )
+        self._rasterize_heightfield_into_buffer(
+            regional,
+            intrinsics,
+            extrinsics,
+            stride=stride,
+            inverse_depth_buffer=inverse_depth_buffer,
+        )
+        native_overlay_mask = np.zeros((height, width), dtype=np.bool_)
+        if overlay is not None:
+            native_surface = HeightfieldGrid.from_like(overlay).sampled(overlay_stride)
+            native_inverse_depth_buffer = np.full((height, width), -np.inf, dtype=np.float64)
+            self._rasterize_heightfield_into_buffer(
+                native_surface,
+                intrinsics,
+                extrinsics,
+                stride=1,
+                inverse_depth_buffer=native_inverse_depth_buffer,
+            )
+            # A coarse triangle represents the same physical surface only when
+            # its visible world point lies inside a finite triangle of the
+            # authoritative native mesh. Suppress exactly those base pixels.
+            # Regional ridges outside the patch footprint remain in the depth
+            # test and can correctly occlude a farther native surface.
+            base_east_m, base_north_m = self._unproject_buffer_xy(
+                inverse_depth_buffer,
+                intrinsics,
+                extrinsics,
+            )
+            authoritative_support = _finite_triangle_support(
+                native_surface,
+                base_east_m,
+                base_north_m,
+            )
+            native_visible = np.isfinite(native_inverse_depth_buffer)
+            # Do not punch a screen-space hole at the projected boundary of a
+            # substantially displaced fine surface. Authority can replace a
+            # base pixel only where the native raster also supplies a sample.
+            inverse_depth_buffer[authoritative_support & native_visible] = -np.inf
+            native_overlay_mask = native_visible & (native_inverse_depth_buffer > inverse_depth_buffer)
+            inverse_depth_buffer[native_overlay_mask] = native_inverse_depth_buffer[native_overlay_mask]
+
+        mask = np.isfinite(inverse_depth_buffer)
+        return _RasterizedTerrain(
+            terrain_mask=mask,
+            skyline_profile=self._profile_from_mask(mask, fallback=float(height * 0.62)),
+            inverse_depth=inverse_depth_buffer,
+            native_overlay_mask=native_overlay_mask,
+        )
+
+    def _rasterize_heightfield_into_buffer(
+        self,
+        surface: HeightfieldGrid,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        *,
+        stride: int,
+        inverse_depth_buffer: NDArray[np.float64],
+    ) -> None:
+        """Project one regular heightfield into a shared inverse-depth buffer."""
+
+        sampled = surface.sampled(stride)
+        x_grid, y_grid = np.meshgrid(sampled.x_m, sampled.y_m)
+        z_grid = sampled.elevation_m
+        points = np.column_stack((x_grid.ravel(), y_grid.ravel(), z_grid.ravel())).astype(np.float64)
         u_px, v_px, _depth, valid = project_points(points, intrinsics, extrinsics)
 
-        grid_height = terrain.elevation_m[::stride, ::stride].shape[0]
-        grid_width = terrain.elevation_m[::stride, ::stride].shape[1]
+        grid_height, grid_width = z_grid.shape
         u_grid = u_px.reshape(grid_height, grid_width)
         v_grid = v_px.reshape(grid_height, grid_width)
+        finite_point = np.all(np.isfinite(points), axis=1)
+        valid &= finite_point & np.isfinite(u_px) & np.isfinite(v_px) & np.isfinite(_depth)
         valid_grid = valid.reshape(grid_height, grid_width)
         depth_grid = _depth.reshape(grid_height, grid_width)
         inverse_depth_grid = np.zeros_like(u_grid, dtype=np.float64)
-        finite_depth = depth_grid > 0.0
+        finite_depth = valid_grid & (depth_grid > 0.0)
         inverse_depth_grid[finite_depth] = 1.0 / depth_grid[finite_depth]
 
-        inverse_depth_buffer = np.full((height, width), -np.inf, dtype=np.float64)
         for row in range(grid_height - 1):
             for col in range(grid_width - 1):
                 top_left = self._screen_vertex(row, col, u_grid, v_grid, inverse_depth_grid, valid_grid)
@@ -195,12 +358,27 @@ class SyntheticRenderer:
                     (top_right, bottom_right, bottom_left),
                 )
 
-        mask = np.isfinite(inverse_depth_buffer)
-        return _RasterizedTerrain(
-            terrain_mask=mask,
-            skyline_profile=self._profile_from_mask(mask, fallback=float(height * 0.62)),
-            inverse_depth=inverse_depth_buffer,
-        )
+    def _unproject_buffer_xy(
+        self,
+        inverse_depth_buffer: NDArray[np.float64],
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Unproject visible base depth to world east/north coordinates."""
+
+        visible = np.isfinite(inverse_depth_buffer) & (inverse_depth_buffer > 0.0)
+        depth = np.full_like(inverse_depth_buffer, np.nan)
+        depth[visible] = 1.0 / inverse_depth_buffer[visible]
+        rows, columns = np.indices(inverse_depth_buffer.shape, dtype=np.float64)
+        x_camera = (columns - intrinsics.principal_x_px) / intrinsics.focal_length_px * depth
+        y_camera = (rows - intrinsics.principal_y_px) / intrinsics.focal_length_px * depth
+        right, down, forward = camera_axes(extrinsics)
+        position = np.asarray(extrinsics.position.as_tuple(), dtype=np.float64)
+        east_m = position[0] + x_camera * right[0] + y_camera * down[0] + depth * forward[0]
+        north_m = position[1] + x_camera * right[1] + y_camera * down[1] + depth * forward[1]
+        east_m[~visible] = np.nan
+        north_m[~visible] = np.nan
+        return east_m, north_m
 
     def depth_image(
         self,
@@ -208,14 +386,54 @@ class SyntheticRenderer:
         intrinsics: CameraIntrinsics,
         extrinsics: CameraExtrinsics,
         stride: int = 1,
+        *,
+        overlay: HeightfieldLike | None = None,
+        overlay_stride: int = 1,
     ) -> NDArray[np.float64]:
         """Returns the per-pixel visible-terrain depth in metres (NaN for sky)."""
 
-        buffer = self._rasterize_visible_terrain(terrain, intrinsics, extrinsics, stride=stride).inverse_depth
+        buffer = self._rasterize_visible_terrain(
+            terrain,
+            intrinsics,
+            extrinsics,
+            stride=stride,
+            overlay=overlay,
+            overlay_stride=overlay_stride,
+        ).inverse_depth
         depth = np.full_like(buffer, np.nan)
         visible = np.isfinite(buffer) & (buffer > 0.0)
         depth[visible] = 1.0 / buffer[visible]
         return depth
+
+    def geometry(
+        self,
+        terrain: TerrainMap,
+        intrinsics: CameraIntrinsics,
+        extrinsics: CameraExtrinsics,
+        stride: int = 1,
+        *,
+        overlay: HeightfieldLike | None = None,
+        overlay_stride: int = 1,
+    ) -> GeometryRenderArrays:
+        """Return one occlusion-consistent metric depth/mask/silhouette pass."""
+
+        raster = self._rasterize_visible_terrain(
+            terrain,
+            intrinsics,
+            extrinsics,
+            stride=stride,
+            overlay=overlay,
+            overlay_stride=overlay_stride,
+        )
+        depth = np.full_like(raster.inverse_depth, np.nan)
+        visible = np.isfinite(raster.inverse_depth) & (raster.inverse_depth > 0.0)
+        depth[visible] = 1.0 / raster.inverse_depth[visible]
+        return GeometryRenderArrays(
+            forward_depth_m=depth,
+            terrain_mask=raster.terrain_mask,
+            skyline_profile=raster.skyline_profile,
+            native_overlay_mask=raster.native_overlay_mask,
+        )
 
     def ridge_layers(
         self,
@@ -225,6 +443,8 @@ class SyntheticRenderer:
         stride: int = 1,
         max_layers: int = 4,
         drop_fraction: float = 0.3,
+        overlay: HeightfieldLike | None = None,
+        overlay_stride: int = 1,
     ) -> NDArray[np.float64]:
         """Predicts occlusion ridge rows per column from the rendered depth.
 
@@ -235,7 +455,14 @@ class SyntheticRenderer:
         for matching against the photo's extracted ridges.
         """
 
-        buffer = self._rasterize_visible_terrain(terrain, intrinsics, extrinsics, stride=stride).inverse_depth
+        buffer = self._rasterize_visible_terrain(
+            terrain,
+            intrinsics,
+            extrinsics,
+            stride=stride,
+            overlay=overlay,
+            overlay_stride=overlay_stride,
+        ).inverse_depth
         height, width = buffer.shape
         layers = np.full((max_layers + 1, width), np.nan, dtype=np.float64)
         for column in range(width):
@@ -299,8 +526,12 @@ class SyntheticRenderer:
         if abs(denominator) <= RASTER_EPSILON:
             return
 
-        x_coords = np.arange(min_x, max_x + 1, dtype=np.float64) + 0.5
-        y_coords = np.arange(min_y, max_y + 1, dtype=np.float64) + 0.5
+        # Camera projection in this project uses integer coordinates for pixel
+        # centres (for example, an odd-width principal point is an integer).
+        # Sampling triangles at the same centres is essential when a depth
+        # pixel is later lifted back to metric 3D for PnP.
+        x_coords = np.arange(min_x, max_x + 1, dtype=np.float64)
+        y_coords = np.arange(min_y, max_y + 1, dtype=np.float64)
         sample_x = x_coords[None, :]
         sample_y = y_coords[:, None]
 
@@ -392,3 +623,52 @@ class SyntheticRenderer:
         points = [(int(column), int(round(y_px))) for column, y_px in enumerate(profile)]
         if len(points) >= 2:
             draw.line(points, fill=fill, width=width)
+
+
+def _stride_indices(size: int, stride: int) -> NDArray[np.int64]:
+    """Subsample a regular axis while retaining both physical boundaries."""
+
+    if stride < 1:
+        raise ValueError("stride must be positive")
+    indices = np.arange(0, size, stride, dtype=np.int64)
+    if indices.size == 0 or indices[-1] != size - 1:
+        indices = np.append(indices, np.int64(size - 1))
+    return indices
+
+
+def _finite_triangle_support(
+    surface: HeightfieldGrid,
+    east_m: NDArray[np.float64],
+    north_m: NDArray[np.float64],
+) -> NDArray[np.bool_]:
+    """Return whether each world XY lies in a finite rasterized mesh triangle."""
+
+    east = np.asarray(east_m, dtype=np.float64)
+    north = np.asarray(north_m, dtype=np.float64)
+    if east.shape != north.shape:
+        raise ValueError("heightfield-support east and north arrays must have the same shape")
+    inside = (
+        np.isfinite(east)
+        & np.isfinite(north)
+        & (east >= surface.x_m[0])
+        & (east <= surface.x_m[-1])
+        & (north >= surface.y_m[0])
+        & (north <= surface.y_m[-1])
+    )
+    safe_east = np.where(inside, east, surface.x_m[0])
+    safe_north = np.where(inside, north, surface.y_m[0])
+    columns = np.searchsorted(surface.x_m, safe_east, side="right") - 1
+    rows = np.searchsorted(surface.y_m, safe_north, side="right") - 1
+    columns = np.clip(columns, 0, surface.x_m.size - 2)
+    rows = np.clip(rows, 0, surface.y_m.size - 2)
+    east_fraction = (safe_east - surface.x_m[columns]) / (surface.x_m[columns + 1] - surface.x_m[columns])
+    north_fraction = (safe_north - surface.y_m[rows]) / (surface.y_m[rows + 1] - surface.y_m[rows])
+    finite = np.isfinite(surface.elevation_m)
+    top_left = finite[rows, columns]
+    top_right = finite[rows, columns + 1]
+    bottom_left = finite[rows + 1, columns]
+    bottom_right = finite[rows + 1, columns + 1]
+    diagonal = east_fraction + north_fraction
+    first_triangle = (diagonal <= 1.0 + RASTER_EPSILON) & top_left & top_right & bottom_left
+    second_triangle = (diagonal >= 1.0 - RASTER_EPSILON) & top_right & bottom_right & bottom_left
+    return np.asarray(inside & (first_triangle | second_triangle), dtype=np.bool_)

@@ -9,6 +9,8 @@ horizontal FOV.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
+from typing import Any, Protocol, cast
 
 from PIL import ExifTags, Image
 
@@ -19,6 +21,10 @@ from peakle.pipeline.evidence import ExifData
 # to a horizontal FOV without needing a per-model sensor-size database.
 FULL_FRAME_WIDTH_MM = 36.0
 _GPS_TAGS = ExifTags.GPSTAGS
+
+
+class _ExifWithIfd(Protocol):
+    def get_ifd(self, tag: int) -> dict[int, object]: ...
 
 
 def read_exif(image: Image.Image | None) -> ExifData:
@@ -62,7 +68,7 @@ def intrinsics_from_exif(exif: ExifData, width_px: int, height_px: int, default_
 
 def _gps_tags(exif: object) -> dict:
     try:
-        ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)  # type: ignore[attr-defined]
+        ifd = cast(_ExifWithIfd, exif).get_ifd(ExifTags.IFD.GPSInfo)
     except AttributeError, KeyError, ValueError:
         return {}
     return {_GPS_TAGS.get(key, key): value for key, value in (ifd or {}).items()}
@@ -72,7 +78,7 @@ def _gps_coordinate(dms: object, ref: object) -> float | None:
     if not dms:
         return None
     try:
-        degrees, minutes, seconds = (_to_float(part) or 0.0 for part in dms)
+        degrees, minutes, seconds = (_to_float(part) or 0.0 for part in cast(Iterable[object], dms))
     except TypeError, ValueError:
         return None
     value = degrees + minutes / 60.0 + seconds / 3600.0
@@ -85,7 +91,7 @@ def _to_float(value: object) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        return float(cast(Any, value))
     except TypeError, ValueError:
         return None
 

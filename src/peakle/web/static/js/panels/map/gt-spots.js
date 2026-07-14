@@ -3,7 +3,7 @@
 // GT sample spots on the 3D map: a pin + clickable photo-thumbnail chip for
 // every corpus sample inside the current terrain window. Clicking a chip selects
 // the sample (inspector + list follow); the selected sample additionally shows a
-// pose glyph at its refined placement so it is visible in 3D.
+// pose glyph at the original dataset placement so it is visible in 3D.
 
 import * as THREE from "three";
 import { CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
@@ -67,19 +67,19 @@ export function buildGtSpotsLayer(terrain, frame, samples, selectedName, onPick,
     label.position.y += 0.028;
     group.add(label);
 
-    // Show the labelled pose placement for the selected sample: position is
-    // GPS + the refinement's east/north correction, heading is the refined yaw.
-    if (selected && sample.yaw_deg !== undefined) {
+    // Show only the original dataset pose. GT-v2 offsets remain diagnostics in
+    // GT Lab and must never masquerade as the reference camera.
+    if (selected && sample.gt_yaw_deg !== undefined) {
       const extrinsics = {
         position: {
-          east_m: local.east_m + (sample.de_m ?? 0),
-          north_m: local.north_m + (sample.dn_m ?? 0),
-          up_m: up,
+          east_m: local.east_m,
+          north_m: local.north_m,
+          up_m: sample.gt_elev_m ?? up,
         },
-        yaw_deg: sample.yaw_deg,
-        pitch_deg: 0,
+        yaw_deg: sample.gt_yaw_deg,
+        pitch_deg: sample.gt_pitch_deg ?? 0,
       };
-      group.add(createCameraMarker(extrinsics, frame, 0xffd24a, `${sample.name} · GT pose`, "gt-camera"));
+      group.add(createCameraMarker(extrinsics, frame, 0xffd24a, `${sample.name} · Original GT pose`, "gt-camera"));
     }
   }
   return group;

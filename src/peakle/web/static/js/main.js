@@ -30,6 +30,7 @@ main().catch((error) => {
 });
 
 async function main() {
+  setupLoadingIndicator();
   const layout = buildLayout(document.getElementById("layoutRoot"));
   for (const [name, setup] of Object.entries(PANEL_SETUP)) {
     wirePanel(layout, name, setup);
@@ -37,6 +38,24 @@ async function main() {
   // Dev console handle: inspect state and dispatch actions from the browser.
   window.peakle = { store };
   await store.init();
+}
+
+function setupLoadingIndicator() {
+  const label = document.createElement("span");
+  label.textContent = "Loading...";
+  const spinner = document.createElement("span");
+  spinner.className = "app-loading-spinner";
+  const indicator = document.createElement("div");
+  indicator.className = "app-loading";
+  indicator.setAttribute("role", "status");
+  indicator.setAttribute("aria-live", "polite");
+  indicator.hidden = true;
+  indicator.append(spinner, label);
+  document.body.append(indicator);
+  store.on("loading", () => {
+    indicator.hidden = !store.loading.active;
+    label.textContent = store.loading.message || "Loading...";
+  });
 }
 
 function wirePanel(layout, name, setup) {

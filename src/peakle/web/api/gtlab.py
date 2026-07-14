@@ -7,14 +7,14 @@ per-sample metadata, and per-layer transparent PNGs generated lazily and cached 
   photo            the cylindrical crop
   gt_depth         GT depth render, colormapped (from distance_crop.pfm)
   dem_depth        our DEM depth render at the refined pose, same colormap
-  pfm_sky          original GT depth/PFM skyline, before any photo-target substitution
-  gt_sky/dem_sky   chosen GT-v2 observation skyline and DEM reconstruction
+  pfm_sky          source-depth/PFM skyline (the sole default reference overlay)
+  gt_sky/dem_sky   GT-v2 substituted observation and reconstruction diagnostics
   gt_occ/dem_occ   type-1 occlusion (jump) contours
   gt_rib/dem_rib   type-2a convex creases (spurs / counterforts)
   gt_cou/dem_cou   type-2b concave creases (couloirs)
 
-GT layers come from the dataset's own depth; DEM layers from the refined pose in the GT v2
-record — where they disagree, the viewer shows exactly which family and where.
+GT-v2 layers are diagnostics only. Workbench solves instead use an explicit evidence track:
+automatic photo extraction by default, or the source-depth/PFM oracle when deliberately selected.
 """
 
 from __future__ import annotations
@@ -36,7 +36,9 @@ from peakle.domain.angles import angle_delta_deg
 from peakle.domain.camera import CameraExtrinsics, CameraModel
 from peakle.domain.contours import ImagePoint, SkylineContour
 from peakle.domain.coordinates import GeoPoint, LocalFrame, LocalPoint
+from peakle.domain.pose import PosePrior
 from peakle.localize.copdem import load_cop_around
+from peakle.localize.extract import best_skyline_candidate, extract_candidates
 from peakle.localize.geopose import load_sample, read_pfm, resampled_oracle_skyline
 from peakle.localize.gtquality import alignment_audit, metric_skyline_errors_for_record
 from peakle.localize.gtrefine import crop_az_deg, dem_depth_image, dem_skyline, quality_tier, shift_align
@@ -57,6 +59,8 @@ SWISS_DIR = BASE / "local/data/swissalti"
 OSM_CACHE = BASE / "data/dem_samples"
 SWISS_SKYLINE_RES_M = 5.0
 SWISS_SKYLINE_RADIUS_M = 12_000.0
+GT_PHOTO_EXTRACTOR = "color"
+GT_PHOTO_MIN_COVERAGE = 0.25
 
 # GT = warm/green family; DEM = cool family — two parallel curves in sibling colors = the error
 PFM_SKY_COLOR = (255, 216, 74)
@@ -238,8 +242,11 @@ def _visible_peak_tags(rec: dict, lat: float, lon: float, limit: int = 8) -> lis
 
 
 def _open_gt_view(scene, name: str):
-    """Materialize a GT sample into the scene as a View: focus the map on it, build the sample's
-    image camera + refined pose (local) + GT-v2 observed skyline, and add the view.
+    """Materialize a GT sample without importing the rejected GT-v2 refined pose.
+
+    The evaluation pose and prior centre come from the original GeoPose metadata. Automatic photo
+    extraction is the default solve evidence. The PFM/depth skyline is retained as a separately
+    named oracle diagnostic and is never substituted when photo extraction is unavailable.
 
     Runs in a worker thread (focus loads terrain)."""
 
@@ -250,39 +257,104 @@ def _open_gt_view(scene, name: str):
     w, h, fov = rec["width"], rec["height"], rec["fov_deg"]
     photo = Image.open(s.photo_path).convert("RGB").resize((w, h), Image.Resampling.BILINEAR)
 
-    # A materialized GT view must carry the same observed contour as the GT Lab overlays.
-    # Re-extracting from the photo can latch onto foreground/texture edges and creates jagged
-    # editable-view yellow lines that disagree with the vetted GT-v2 skyline.
-    rows = np.load(GTV2 / f"{name}.npz")["gt_skyline"].astype(float)
-    contour = _rows_contour(rows, w, h, source="gt_skyline")
+    pfm_rows = resampled_oracle_skyline(s.depth_path, w, h)
+    pfm_contour = _rows_contour(pfm_rows, w, h, source="pfm_oracle")
+    candidates = extract_candidates(np.asarray(photo, dtype=np.uint8), backend=GT_PHOTO_EXTRACTOR)
+    chosen = best_skyline_candidate(candidates, min_coverage=GT_PHOTO_MIN_COVERAGE)
+    evidence_contours = {"pfm_oracle": pfm_contour}
+    evidence_metadata: dict[str, dict[str, Any]] = {
+        "pfm_oracle": {
+            "label": "PFM/source-depth oracle (diagnostic)",
+            "available": bool(pfm_contour.points),
+            "diagnostic": True,
+            "source": "source_depth_pfm",
+            "coverage": round(float(np.isfinite(pfm_rows).mean()), 5),
+        }
+    }
+    if chosen is None:
+        contour = SkylineContour(
+            image_width_px=w,
+            image_height_px=h,
+            points=[],
+            source="photo_auto:unavailable",
+        )
+        evidence_metadata["photo_auto"] = {
+            "label": "Photo skyline (automatic)",
+            "available": False,
+            "diagnostic": False,
+            "source": GT_PHOTO_EXTRACTOR,
+            "reason": f"no candidate with {GT_PHOTO_MIN_COVERAGE:.0%} coverage",
+            "detected_candidates": sorted(candidates),
+            "selection_uses_ground_truth": False,
+        }
+    else:
+        candidate_name, candidate = chosen
+        contour = _rows_contour(candidate.rows, w, h, source=f"photo_auto:{candidate_name}")
+        evidence_contours["photo_auto"] = contour
+        evidence_metadata["photo_auto"] = {
+            "label": "Photo skyline (automatic)",
+            "available": bool(contour.points),
+            "diagnostic": False,
+            "source": GT_PHOTO_EXTRACTOR,
+            "candidate": candidate_name,
+            "detected_candidates": sorted(candidates),
+            "coverage": round(candidate.coverage, 5),
+            "agreement": round(candidate.agreement, 5),
+            "selection_uses_ground_truth": False,
+        }
 
     image_camera = CameraModel(width_px=w, height_px=h, horizontal_fov_deg=fov, projection="cyltan")
     intrinsics = build_intrinsics(w, h, fov)
-    pitch_deg = image_camera.pitch_deg_from_vertical_shift_px(rec.get("dv_px") or 0.0)
-    position = _sample_local_position(scene, s.lat, s.lon, rec)
+    position = _raw_sample_local_position(scene, s.lat, s.lon, s.elev_m)
     if position is None:
         scene.focus_geo(s.lat, s.lon)
-        position = LocalPoint(east_m=rec["de_m"], north_m=rec["dn_m"], up_m=rec["cam_z_m"])
+        position = _raw_sample_local_position(scene, s.lat, s.lon, s.elev_m)
+    if position is None:
+        msg = f"sample {name!r} is outside the focused terrain window"
+        raise ValueError(msg)
     extrinsics = CameraExtrinsics(
         position=position,
-        yaw_deg=rec["yaw_deg"],
-        pitch_deg=pitch_deg,
-        roll_deg=0.0,
+        yaw_deg=s.yaw_gt_deg,
+        pitch_deg=s.pitch_gt_deg,
+        roll_deg=s.roll_gt_deg,
     )
-    return scene.add_gt_view(name, intrinsics, extrinsics, contour, photo, image_camera=image_camera)
+    # These uncertainties are deliberately broad enough to test actual refinement. They describe
+    # a plausible geotag/compass prior, not the accuracy of the MANUAL evaluation label itself.
+    prior = PosePrior(
+        position=position,
+        yaw_deg=s.yaw_gt_deg,
+        pitch_deg=s.pitch_gt_deg,
+        horizontal_sigma_m=200.0,
+        vertical_sigma_m=100.0,
+        yaw_sigma_deg=15.0,
+        pitch_sigma_deg=15.0,
+    )
+    return scene.add_gt_view(
+        name,
+        intrinsics,
+        extrinsics,
+        contour,
+        photo,
+        image_camera=image_camera,
+        prior=prior,
+        evidence_contours=evidence_contours,
+        evidence_metadata=evidence_metadata,
+        default_evidence_source="photo_auto",
+        pitch_comparable=False,
+    )
 
 
-def _sample_local_position(scene, lat: float, lon: float, rec: dict[str, Any]) -> LocalPoint | None:
-    """Return refined sample position in the current terrain frame, or None if outside it."""
+def _raw_sample_local_position(scene, lat: float, lon: float, elevation_m: float) -> LocalPoint | None:
+    """Return the raw dataset position in the current terrain frame, if it is inside the map."""
 
     local = scene.terrain.frame.geo_to_local(GeoPoint(latitude_deg=lat, longitude_deg=lon, elevation_m=0.0))
-    east_m = local.east_m + float(rec["de_m"])
-    north_m = local.north_m + float(rec["dn_m"])
-    if not (float(scene.terrain.x_m[0]) <= east_m <= float(scene.terrain.x_m[-1])):
+    if not (float(scene.terrain.x_m[0]) <= local.east_m <= float(scene.terrain.x_m[-1])):
         return None
-    if not (float(scene.terrain.y_m[0]) <= north_m <= float(scene.terrain.y_m[-1])):
+    if not (float(scene.terrain.y_m[0]) <= local.north_m <= float(scene.terrain.y_m[-1])):
         return None
-    return LocalPoint(east_m=east_m, north_m=north_m, up_m=float(rec["cam_z_m"]))
+    # Preserve the dataset altitude exactly. If it lies below the selected DEM, that is a datum or
+    # map-compatibility failure to expose—not something materialization may silently repair.
+    return LocalPoint(east_m=local.east_m, north_m=local.north_m, up_m=float(elevation_m))
 
 
 def _rows_contour(rows: np.ndarray, w: int, h: int, *, source: str) -> SkylineContour:
@@ -296,7 +368,7 @@ def _rows_contour(rows: np.ndarray, w: int, h: int, *, source: str) -> SkylineCo
 
 @router.post("/gt/samples/{name}/open-view")
 async def open_gt_view(name: str, request: Request) -> dict[str, Any]:
-    """Open a GT sample as a scene View (photo + refined pose), returning it. Recenters the map."""
+    """Open a GT sample with photo evidence plus an explicit PFM diagnostic track."""
 
     scene = request.app.state.scene
     async with request.app.state.scene_lock:

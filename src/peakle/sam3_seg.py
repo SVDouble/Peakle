@@ -12,6 +12,8 @@ unavailable, `load_segmenter` returns None and callers fall back to a point-prom
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -32,7 +34,10 @@ class Sam3Segmenter(Segmenter):
         self._torch = torch
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._processor = Sam3Processor.from_pretrained(model_id)
-        self._model = Sam3Model.from_pretrained(model_id).to(self._device).eval()
+        # The optional transformers model uses a decorated ``to`` method whose
+        # runtime overloads are not represented correctly by its current stubs.
+        model = cast(Any, Sam3Model.from_pretrained(model_id))
+        self._model = model.to(self._device).eval()
         self.concept = concept  # text prompt used for terrain instances
 
     def _to_pil(self, rgb: NDArray[np.float64]):

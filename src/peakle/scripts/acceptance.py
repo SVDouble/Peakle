@@ -8,8 +8,9 @@ results are verified against thresholds instead of eyeballed. Run after local/ma
   T4  distant-horizon solve  Matterhorn/Gornergrat: yaw near true bearing, telephoto fov, small
                              pitch, median skyline gap small, summit column aligned
   T5  near-field limit    the 5 selfies: best achievable gap >> distant (SRTM resolution wall)
-  T7  benchmark invariants   latest GeoPose3K bench (peakle.scripts.bench_geopose): NO wrong solve is
-                             ever CONFIRMED (the honesty invariant) + oracle MANUAL success floor
+  T7  benchmark invariants   latest schema-v2 matrix has attempted/primary cells, paired baselines,
+                             no raw-reference leakage, and no hidden solver errors
+  T8  dataset compatibility  fixed-pose source-depth/DEM and raw camera-height gates are both present
 
 Each test prints PASS/FAIL with the measured value and the threshold.
 """
@@ -99,53 +100,78 @@ def main() -> None:
     else:
         check("T3/T4", "matterhorn_result.json present", False, "missing", "run local/matterhorn_solve.py first")
 
-    # ---- T7: GeoPose3K benchmark invariants (latest run of peakle.scripts.bench_geopose) ----
+    # ---- T7/T8: immutable strategy matrix and independent dataset gates ----
     bench_files = sorted(glob.glob(str(BASE / "local/output/*-geopose-bench/results.json")))
-    if bench_files:
-        bench = [r for r in json.load(open(bench_files[-1])) if "error" not in r]
-        solves = [(r, t, r.get(t)) for r in bench for t in ("oracle", "extracted") if isinstance(r.get(t), dict)]
-        confirmed = [(r, t, s) for r, t, s in solves if s.get("verdict") == "CONFIRMED"]
-        false_conf = [(r["name"], t) for r, t, s in confirmed if not s.get("correct")]
-        detail = f"{len(false_conf)} false / {len(confirmed)} confirmed"
-        if false_conf:
-            detail += f" e.g. {false_conf[0]}"
-        check("T7", "no wrong solve CONFIRMED", len(false_conf) == 0, detail, "0 false")
-        man = [r for r in bench if r.get("manual") and isinstance(r.get("oracle"), dict)]
-        if man:
-            ok = sum(1 for r in man if r["oracle"].get("correct"))
-            check("T7", "oracle MANUAL success floor", ok / len(man) >= 0.6, f"{ok}/{len(man)}", ">=60%")
-    else:
-        check("T7", "geopose bench results present", False, "missing", "run peakle.scripts.bench_geopose")
+    matrix = None
+    legacy_runs = []
+    for path in reversed(bench_files):
+        payload = json.load(open(path))
+        if matrix is None and isinstance(payload, dict) and isinstance(payload.get("matrix_cases"), list):
+            matrix = payload
+        elif isinstance(payload, list):
+            legacy_runs.append([row for row in payload if isinstance(row, dict) and "error" not in row])
 
-    # ---- T8: GT v2 invariants (refined ground truth; run peakle.scripts.build_gt_v2) ----
-    gtv2_index = BASE / "local/derived/gt_v2/index.json"
-    if gtv2_index.exists() and bench_files:
-        gtv2 = {r["name"]: r for r in json.load(open(gtv2_index))}
-        bench_names = [r["name"] for r in bench]
-        have = [n for n in bench_names if n in gtv2]
+    if matrix is not None:
+        matrix_rows = [row for row in matrix.get("rows", []) if isinstance(row, dict) and "error" not in row]
+        cases = [case for case in matrix.get("matrix_cases", []) if isinstance(case, dict)]
+        attempted = [case for case in cases if case.get("status") != "skipped"]
+        primary = [case for case in attempted if case.get("ranking_eligible") is True]
+        errors = [case for case in attempted if case.get("status") == "error"]
+        raw_ranked = [case for case in primary if case.get("prior_regime") == "raw_metadata"]
+        paired = [
+            case
+            for case in attempted
+            if case.get("algorithm") != "keep-prior"
+            and case.get("prior_regime") in {"perturbed_metadata", "position_only"}
+        ]
+        missing_baseline = [case for case in paired if not isinstance(case.get("baseline"), dict)]
+        check("T7", "matrix attempted cells", bool(attempted), str(len(attempted)), ">0")
+        check("T7", "matrix primary cells", bool(primary), str(len(primary)), ">0")
+        check("T7", "solver errors are visible", not errors, str(len(errors)), "0")
+        check("T7", "raw reference never ranked", not raw_ranked, str(len(raw_ranked)), "0")
+        check("T7", "paired prior baselines", not missing_baseline, str(len(missing_baseline)), "0 missing")
+
+        compatibility = [row.get("gt_dem_compatibility") for row in matrix_rows]
+        outlined = [
+            value for value in compatibility if isinstance(value, dict) and value.get("policy") == "gt_dem_compat_v1"
+        ]
+        height = [
+            value.get("height")
+            for value in outlined
+            if isinstance(value.get("height"), dict) and value["height"].get("policy") == "raw_camera_clearance_v1"
+        ]
+        usable = [value for value in outlined if value.get("tier") in {"MAP_A", "MAP_B"}]
         check(
             "T8",
-            "GT v2 coverage of bench",
-            len(have) >= 0.8 * len(bench_names),
-            f"{len(have)}/{len(bench_names)}",
-            ">=80%",
+            "fixed-pose map gate",
+            len(outlined) == len(matrix_rows),
+            f"{len(outlined)}/{len(matrix_rows)}",
+            "all",
         )
-        if have:
-            clean = [n for n in have if gtv2[n]["quality"] == "CLEAN"]
-            check("T8", "CLEAN tier fraction", len(clean) >= 0.6 * len(have), f"{len(clean)}/{len(have)}", ">=60%")
-            # oracle success vs REFINED yaw on the CLEAN tier — the number that matters
-            ok = n_tot = 0
-            by_name = {r["name"]: r for r in bench}
-            for n in clean:
-                s = by_name[n].get("oracle")
-                if isinstance(s, dict) and "yaw" in s:
-                    n_tot += 1
-                    if abs((s["yaw"] - gtv2[n]["yaw_deg"] + 180) % 360 - 180) <= 5.0:
-                        ok += 1
-            if n_tot:
-                check("T8", "oracle@5deg vs refined GT (CLEAN)", ok >= 0.85 * n_tot, f"{ok}/{n_tot}", ">=85%")
+        check(
+            "T8",
+            "independent height gate",
+            len(height) == len(matrix_rows),
+            f"{len(height)}/{len(matrix_rows)}",
+            "all",
+        )
+        check("T8", "usable map stratum exists", bool(usable), str(len(usable)), ">0")
+    elif legacy_runs:
+        # Legacy orientation runs remain readable, but their GT-v2-derived confidence labels are retired.
+        bench = next((run for run in legacy_runs if len(run) >= 30), legacy_runs[0])
+        manual = [row for row in bench if row.get("manual") and isinstance(row.get("oracle"), dict)]
+        ok = sum(1 for row in manual if row["oracle"].get("correct"))
+        check(
+            "T7",
+            "legacy MANUAL oracle floor",
+            bool(manual) and ok / len(manual) >= 0.6,
+            f"{ok}/{len(manual)}",
+            ">=60%",
+        )
+        check("T8", "schema-v2 compatibility", False, "legacy artifact", "run peakle.scripts.bench_pose_matrix")
     else:
-        check("T8", "GT v2 index present", False, "missing", "run peakle.scripts.build_gt_v2")
+        check("T7", "pose matrix present", False, "missing", "run peakle.scripts.bench_pose_matrix")
+        check("T8", "dataset gates present", False, "missing", "run peakle.scripts.bench_pose_matrix")
 
     # ---- print table ----
     print(f"\n{'id':5} {'result':6} {'criterion':26} {'measured':34} threshold")

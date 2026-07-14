@@ -8,9 +8,9 @@ shift).  The residual is a symmetric, distance-capped curve chamfer — capping 
 garbage columns in the extraction from dominating the score.
 
 Every solve returns the full yaw-chamfer profile plus derived diagnostics (basin width, alias
-margin, coverage).  Thresholds behind ``verdict`` are PROVISIONAL until calibrated on the
-GeoPose3K benchmark (peakle.scripts.bench_geopose); treat CONFIRMED as "worth looking at", not truth,
-until that calibration lands.
+margin, coverage). The former confidence gate was calibrated against circular GT-v2 targets and
+has been retired. Non-rejected results remain ``UNCALIBRATED`` until a frozen, location-held-out
+MANUAL + MAP_A calibration set exists.
 """
 
 from __future__ import annotations
@@ -102,10 +102,18 @@ class HorizonProfile:
         d_max: float | None = None,
         cam_e: float = 0.0,
         cam_n: float = 0.0,
+        patch=None,
     ):
         self.az_deg = np.arange(0.0, 360.0, AZ_STEP_DEG)
         el = horizon_elevation(
-            terrain, np.radians(self.az_deg), cam_up_m, step=step, d_max=d_max, cam_e=cam_e, cam_n=cam_n
+            terrain,
+            np.radians(self.az_deg),
+            cam_up_m,
+            step=step,
+            d_max=d_max,
+            cam_e=cam_e,
+            cam_n=cam_n,
+            patch=patch,
         )
         self.el = el  # radians, NaN where the DEM had no sample
         self.cam_up_m = cam_up_m
@@ -190,7 +198,7 @@ def solve_orientation(
     height: int,
     profile: HorizonProfile,
     fov_deg: float | tuple[float, float, float],
-    projection: str = "cyl",
+    projection: ProjectionName = "cyl",
     pitch_bounds: tuple[float, float] = (-30.0, 30.0),
     cap_px: float = 60.0,
     yaw_step_deg: float = 1.0,
@@ -204,12 +212,14 @@ def solve_orientation(
     obs = np.asarray(obs_rows, float)
     width = len(obs)
     coverage = float(np.isfinite(obs).mean())
-    fovs = (
-        [fov_deg] if isinstance(fov_deg, (int, float)) else list(np.arange(fov_deg[0], fov_deg[1] + 1e-9, fov_deg[2]))
+    fovs: list[float] = (
+        [float(fov_deg)]
+        if isinstance(fov_deg, (int, float))
+        else [float(value) for value in np.arange(fov_deg[0], fov_deg[1] + 1e-9, fov_deg[2])]
     )
 
     yaws = np.arange(0.0, 360.0, yaw_step_deg)
-    best = None  # (chamfer, yaw, dv, fov, profile_ch, profile_dv)
+    best: tuple[float, float, float, float, np.ndarray, np.ndarray] | None = None
     for fov in fovs:
         dv_max = _dv_for_pitch(projection, width, height, fov, max(abs(pitch_bounds[0]), abs(pitch_bounds[1])))
         ch = np.full(len(yaws), np.inf)
@@ -223,6 +233,8 @@ def solve_orientation(
         if best is None or ch[i] < best[0]:
             best = (float(ch[i]), float(yaws[i]), float(dv_at[i]), float(fov), ch.copy(), dv_at.copy())
 
+    if best is None:
+        raise ValueError("FOV search produced no hypotheses")
     _, _, _, fov0, prof_ch, prof_dv = best
 
     def _polish(yaw_c: float, dv_c: float) -> tuple[float, float, float]:
@@ -307,7 +319,7 @@ def solve_orientation(
     return solve
 
 
-def _dv_for_pitch(projection: str, width: int, height: int, fov: float, pitch_deg: float) -> int:
+def _dv_for_pitch(projection: ProjectionName, width: int, height: int, fov: float, pitch_deg: float) -> int:
     del height
     return int(abs(vertical_shift_px_from_pitch_deg(width, fov, projection, pitch_deg))) + 1
 
@@ -344,16 +356,13 @@ def _median_centered_shift_chamfer(
 
 
 def _provisional_verdict(s: OrientationSolve, cap_px: float) -> str:
-    """Recalibrated 2026-07-07 on the combined clean-manual + bench-60 runs (both scored
-    against the hybrid-targeted GT v2; peakle.scripts.calibrate_verdict): 0 wrong of 105
-    confirmations, recall 84% (the previous snr>=3 gate held precision 1.00 but only 44%
-    recall).  The tightened alias (1.5) + narrow well (10°) pair now excludes the narrow-FOV
-    doppelgänger class that originally motivated the SNR floor.  MUST be recalibrated after
-    any solver/search change; 100% precision on the bench is not a field guarantee.
+    """Reject unusable evidence; do not claim calibrated confidence.
+
+    The previous ``CONFIRMED`` thresholds were tuned on GT-v2 poses produced with DEM/photo
+    alignment. That makes their apparent precision circular for this solver, so viable results
+    deliberately stay uncalibrated pending a frozen, location-held-out MANUAL + MAP_A split.
     """
 
     if s.coverage < 0.25 or s.chamfer_px > 0.5 * cap_px:
         return "REJECTED"
-    if s.alias_ratio >= 1.5 and s.well_width_deg <= 10.0 and s.chamfer_px <= 15.0:
-        return "CONFIRMED"
-    return "AMBIGUOUS"
+    return "UNCALIBRATED"

@@ -27,10 +27,14 @@ class Store {
     this.gtSamples = null;
     this.gtError = null;
     this.selectedGtName = null;
-    // Per-layer visibility (keys = GT Lab layer names). Skylines on by default.
-    this.gtDisplay = { gt_sky: true, pfm_sky: true, dem_sky: true };
+    // Source-depth/PFM is the sole default GT reference. GT-v2 substituted/refined layers are
+    // opt-in diagnostics and are never treated as solver evidence.
+    this.gtDisplay = { pfm_sky: true, gt_sky: false, dem_sky: false };
     this.photoOpacity = 0.5; // GT photo overlaid on the 3D terrain in POV
     this._gtLoading = false;
+    this.loading = { active: false, message: "" };
+    this._loadingEntries = [];
+    this._loadingSeq = 0;
     this._listeners = new Map();
   }
 
@@ -99,51 +103,61 @@ class Store {
   // --- actions ---
 
   async init() {
-    await this.refreshSceneState();
-    this.emitSceneAndViews();
-    this.emit("selection");
+    return this.withLoading("Loading workbench...", async () => {
+      await this.refreshSceneState();
+      this.emitSceneAndViews();
+      this.emit("selection");
+    });
   }
 
   async rebuildScene(config) {
-    await this.refreshSceneState(await api.setConfig(config));
-    this.selectedViewId = null;
-    this.selectedSolveId = null;
-    this.selectedPoseKey = "truth";
-    this.selectedGtName = null;
-    this.solveCache.clear();
-    this.emitSceneAndViews();
-    this.emit("selection");
+    return this.withLoading("Rebuilding scene...", async () => {
+      await this.refreshSceneState(await api.setConfig(config));
+      this.selectedViewId = null;
+      this.selectedSolveId = null;
+      this.selectedPoseKey = "truth";
+      this.selectedGtName = null;
+      this.solveCache.clear();
+      this.emitSceneAndViews();
+      this.emit("selection");
+    });
   }
 
   async createView(placement) {
-    const view = await api.createView(placement);
-    this.views = [...this.views, view];
-    this.placing = false;
-    this.emit("views");
-    this.selectView(view.id);
-    return view;
+    return this.withLoading("Creating view...", async () => {
+      const view = await api.createView(placement);
+      this.views = [...this.views, view];
+      this.placing = false;
+      this.emit("views");
+      this.selectView(view.id);
+      return view;
+    });
   }
 
   async createPhotoView(file, params) {
-    const view = await api.createViewFromPhoto(file, params);
-    await this.refreshSceneState();
-    this.selectedGtName = null;
-    this.selectedPoseKey = "truth";
-    this.solveCache.clear();
-    this.emitSceneAndViews();
-    this.emit("gt");
-    this.selectView(view.id);
-    return view;
+    return this.withLoading("Importing photo view...", async () => {
+      const view = await api.createViewFromPhoto(file, params);
+      await this.refreshSceneState();
+      this.selectedGtName = null;
+      this.selectedPoseKey = "truth";
+      this.solveCache.clear();
+      this.emitSceneAndViews();
+      this.emit("gt");
+      this.selectView(view.id);
+      return view;
+    });
   }
 
   // Fork any view (placed or GT-derived) under a new name; the copy is selected so you can move it
   // freely while the original stays put.
   async duplicateView(id, label) {
-    const view = await api.duplicateView(id, label);
-    this.views = [...this.views, view];
-    this.emit("views");
-    this.selectView(view.id);
-    return view;
+    return this.withLoading("Duplicating view...", async () => {
+      const view = await api.duplicateView(id, label);
+      this.views = [...this.views, view];
+      this.emit("views");
+      this.selectView(view.id);
+      return view;
+    });
   }
 
   async patchView(id, changes) {
@@ -159,29 +173,31 @@ class Store {
   }
 
   async deleteView(id) {
-    await api.deleteView(id);
-    this.views = this.views.filter((view) => view.id !== id);
-    this.emit("views");
-    if (this.selectedViewId === id) {
-      const nextView = this.views.length ? this.views[this.views.length - 1] : null;
-      if (nextView) {
-        this.selectView(nextView.id);
+    return this.withLoading("Deleting view...", async () => {
+      await api.deleteView(id);
+      this.views = this.views.filter((view) => view.id !== id);
+      this.emit("views");
+      if (this.selectedViewId === id) {
+        const nextView = this.views.length ? this.views[this.views.length - 1] : null;
+        if (nextView) {
+          this.selectView(nextView.id);
+        } else {
+          this.selectedViewId = null;
+          this.selectedSolveId = null;
+          this.selectedPoseKey = "truth";
+          this.emit("selection");
+        }
       } else {
-        this.selectedViewId = null;
-        this.selectedSolveId = null;
-        this.selectedPoseKey = "truth";
         this.emit("selection");
       }
-    } else {
-      this.emit("selection");
-    }
+    });
   }
 
   selectView(id) {
     this.selectedViewId = id;
     const view = this.viewById(id);
     this.selectedSolveId = view && view.solves.length ? view.solves[view.solves.length - 1].id : null;
-    this.selectedPoseKey = this.selectedSolveId ? `solve:${this.selectedSolveId}` : "truth";
+    this.selectedPoseKey = this.selectedSolveId ? `solve:${this.selectedSolveId}` : view?.source === "gt" ? "gt-depth" : "truth";
     this.placing = false;
     if (this.selectedGtName) {
       this.selectedGtName = null;
@@ -192,8 +208,7 @@ class Store {
     // can show its prediction (summaries in the view list omit the trace).
     if (this.selectedSolveId && !this.solveCache.has(this.selectedSolveId)) {
       const solveId = this.selectedSolveId;
-      api
-        .getSolve(id, solveId)
+      this.withLoading("Loading pose details...", () => api.getSolve(id, solveId))
         .then((solve) => {
           this.solveCache.set(solve.id, solve);
           if (this.selectedSolveId === solveId) {
@@ -220,7 +235,7 @@ class Store {
     this.selectedGtName = name;
     this.selectedViewId = null;
     this.selectedSolveId = null;
-    this.selectedPoseKey = "truth";
+    this.selectedPoseKey = "gt-depth";
     this.placing = false;
     this.emit("gt");
     this.emit("selection");
@@ -236,6 +251,7 @@ class Store {
       return;
     }
     this._gtLoading = true;
+    const loadingId = this._pushLoading("Loading GT catalogue...");
     try {
       this.gtSamples = await api.listGtSamples();
       this.gtError = null;
@@ -244,6 +260,7 @@ class Store {
       this.gtError = error.message;
     } finally {
       this._gtLoading = false;
+      this._popLoading(loadingId);
     }
     this.emit("gt");
   }
@@ -254,7 +271,7 @@ class Store {
       this.selectedGtName = null;
       this.selectedViewId = null;
       this.selectedSolveId = null;
-      this.selectedPoseKey = "truth";
+      this.selectedPoseKey = "gt-depth";
       this.placing = false;
       this.gtError = null;
       this.emit("gt");
@@ -269,7 +286,7 @@ class Store {
     if (name) {
       this.selectedViewId = null;
       this.selectedSolveId = null;
-      this.selectedPoseKey = "truth";
+      this.selectedPoseKey = "gt-depth";
       this.placing = false;
     }
     this.gtError = null;
@@ -300,56 +317,61 @@ class Store {
   }
 
   async focusScene(latDeg, lonDeg, extentM, options = {}) {
-    await this.refreshSceneState(await api.focusScene(latDeg, lonDeg, extentM));
-    this.selectedViewId = null;
-    this.selectedSolveId = null;
-    this.selectedPoseKey = "truth";
-    this.selectedGtName = options.selectedGtName ?? null;
-    this.gtError = null;
-    this.solveCache.clear();
-    this.emitSceneAndViews();
-    this.emit("selection");
-    this.emit("gt");
+    return this.withLoading("Loading terrain window...", async () => {
+      await this.refreshSceneState(await api.focusScene(latDeg, lonDeg, extentM));
+      this.selectedViewId = null;
+      this.selectedSolveId = null;
+      this.selectedGtName = options.selectedGtName ?? null;
+      this.selectedPoseKey = this.selectedGtName ? "gt-depth" : "truth";
+      this.gtError = null;
+      this.solveCache.clear();
+      this.emitSceneAndViews();
+      this.emit("selection");
+      this.emit("gt");
+    });
   }
 
   async focusGtSample(sample, extentM) {
     await this.focusScene(sample.lat, sample.lon, extentM, { selectedGtName: sample.name });
   }
 
-  // Materialize a GT sample as the mutable DEM/refined-pose view backing that image. By default the
-  // backing view is not selected in the image list: GT image rows stay immutable and solver outputs
-  // appear as view candidates under that image.
+  // Materialize a GT sample as a solver backing view built from the original dataset metadata.
+  // By default it is not selected in the image list: GT rows stay immutable and solver outputs
+  // appear as pose candidates under that image.
   async openGtView(name, options = {}) {
-    const select = options.select ?? false;
-    const existing = this.gtViewForSample(name);
-    if (existing) {
-      if (select) {
-        this.selectView(existing.id);
+    return this.withLoading("Opening editable view...", async () => {
+      const select = options.select ?? false;
+      const existing = this.gtViewForSample(name);
+      if (existing) {
+        if (select) {
+          this.selectView(existing.id);
+        }
+        return existing;
       }
-      return existing;
-    }
-    const sample = this.gtByName(name);
-    const opensOnCurrentTerrain = this.gtSampleOnCurrentTerrain(sample);
-    const view = await api.openGtView(name);
-    if (opensOnCurrentTerrain) {
-      this.views = [...this.views, view];
-      this.emit("views");
-    } else {
-      await this.refreshSceneState();
-      this.solveCache.clear();
-      this.emitSceneAndViews();
-    }
-    if (select) {
-      this.selectedGtName = null;
+      const sample = this.gtByName(name);
+      const opensOnCurrentTerrain = this.gtSampleOnCurrentTerrain(sample);
+      const view = await api.openGtView(name);
+      if (opensOnCurrentTerrain) {
+        this.views = [...this.views, view];
+        this.emit("views");
+      } else {
+        await this.refreshSceneState();
+        this.solveCache.clear();
+        this.emitSceneAndViews();
+      }
+      if (select) {
+        this.selectedGtName = null;
+        this.emit("gt");
+        this.selectView(view.id);
+        return view;
+      }
+      this.selectedGtName = name;
+      this.selectedViewId = null;
+      this.selectedPoseKey = "gt-depth";
       this.emit("gt");
-      this.selectView(view.id);
+      this.emit("selection");
       return view;
-    }
-    this.selectedGtName = name;
-    this.selectedViewId = null;
-    this.emit("gt");
-    this.emit("selection");
-    return view;
+    });
   }
 
   gtSampleOnCurrentTerrain(sample, marginM = 250) {
@@ -360,8 +382,8 @@ class Store {
     if (!local) {
       return false;
     }
-    const eastM = local.east_m + (sample.de_m ?? 0);
-    const northM = local.north_m + (sample.dn_m ?? 0);
+    const eastM = local.east_m;
+    const northM = local.north_m;
     return (
       eastM >= this.terrain.x_min_m + marginM &&
       eastM <= this.terrain.x_max_m - marginM &&
@@ -395,24 +417,28 @@ class Store {
   }
 
   async runSolve(viewId, strategy, params) {
-    const solve = await api.createSolve(viewId, { strategy, params: params ?? {} });
-    this.solveCache.set(solve.id, solve);
-    const view = await api.getView(viewId);
-    this.views = this.views.map((existing) => (existing.id === viewId ? view : existing));
-    this.selectedSolveId = solve.id;
-    this.selectedPoseKey = `solve:${solve.id}`;
-    this.emit("views");
-    this.emit("selection");
-    this.emit("pose-selection");
-    return solve;
+    return this.withLoading("Running solver...", async () => {
+      const solve = await api.createSolve(viewId, { strategy, params: params ?? {} });
+      this.solveCache.set(solve.id, solve);
+      const view = await api.getView(viewId);
+      this.views = this.views.map((existing) => (existing.id === viewId ? view : existing));
+      this.selectedSolveId = solve.id;
+      this.selectedPoseKey = `solve:${solve.id}`;
+      this.emit("views");
+      this.emit("selection");
+      this.emit("pose-selection");
+      return solve;
+    });
   }
 
   async runSolveJob(viewIds, strategy, params) {
-    return api.createJob({
-      view_ids: viewIds,
-      strategy,
-      params: params ?? {},
-      max_workers: 2,
+    return this.withLoading("Queueing solve job...", () => {
+      return api.createJob({
+        view_ids: viewIds,
+        strategy,
+        params: params ?? {},
+        max_workers: 2,
+      });
     });
   }
 
@@ -421,22 +447,24 @@ class Store {
     this.selectedPoseKey = solveId ? `solve:${solveId}` : "truth";
     this.emit("selection");
     if (solveId && !this.solveCache.has(solveId)) {
-      this.solveCache.set(solveId, await api.getSolve(viewId, solveId));
+      this.solveCache.set(solveId, await this.withLoading("Loading pose details...", () => api.getSolve(viewId, solveId)));
       this.emit("selection");
     }
   }
 
   async deleteSolve(viewId, solveId) {
-    await api.deleteSolve(viewId, solveId);
-    this.solveCache.delete(solveId);
-    const view = await api.getView(viewId);
-    this.views = this.views.map((existing) => (existing.id === viewId ? view : existing));
-    if (this.selectedSolveId === solveId) {
-      this.selectedSolveId = view.solves.length ? view.solves[view.solves.length - 1].id : null;
-      this.selectedPoseKey = this.selectedSolveId ? `solve:${this.selectedSolveId}` : "truth";
-    }
-    this.emit("views");
-    this.emit("selection");
+    return this.withLoading("Deleting solver pose...", async () => {
+      await api.deleteSolve(viewId, solveId);
+      this.solveCache.delete(solveId);
+      const view = await api.getView(viewId);
+      this.views = this.views.map((existing) => (existing.id === viewId ? view : existing));
+      if (this.selectedSolveId === solveId) {
+        this.selectedSolveId = view.solves.length ? view.solves[view.solves.length - 1].id : null;
+        this.selectedPoseKey = this.selectedSolveId ? `solve:${this.selectedSolveId}` : view.source === "gt" ? "gt-depth" : "truth";
+      }
+      this.emit("views");
+      this.emit("selection");
+    });
   }
 
   async selectPose(targetInfo, poseKey) {
@@ -473,6 +501,31 @@ class Store {
         this.emit("pose-selection");
       }
     }
+  }
+
+  async withLoading(message, task) {
+    const loadingId = this._pushLoading(message);
+    try {
+      return await task();
+    } finally {
+      this._popLoading(loadingId);
+    }
+  }
+
+  _pushLoading(message) {
+    const id = this._loadingSeq + 1;
+    this._loadingSeq = id;
+    this._loadingEntries = [...this._loadingEntries, { id, message }];
+    this.loading = { active: true, message };
+    this.emit("loading");
+    return id;
+  }
+
+  _popLoading(id) {
+    this._loadingEntries = this._loadingEntries.filter((entry) => entry.id !== id);
+    const message = this._loadingEntries.at(-1)?.message ?? "";
+    this.loading = { active: this._loadingEntries.length > 0, message };
+    this.emit("loading");
   }
 }
 

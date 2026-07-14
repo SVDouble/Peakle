@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import LocalPoint
+from peakle.domain.projection import ImageProjectionName, azimuths_deg, elevation_rad_from_rows
 from peakle.domain.terrain import TerrainMap
 from peakle.optimization.objective import dense_terrain_points
 from peakle.rendering.pinhole import camera_axes
@@ -36,6 +37,8 @@ def horizon_seeds(
     max_columns: int = 140,
     top_k: int = 20,
     terrain_stride: int = 1,
+    projection: ImageProjectionName = "pinhole",
+    horizontal_fov_deg: float | None = None,
 ) -> list[CameraExtrinsics]:
     """Returns the best `top_k` pose seeds by horizon correlation over the map.
 
@@ -57,7 +60,15 @@ def horizon_seeds(
     """
 
     points = dense_terrain_points(terrain, 1, stride=terrain_stride)
-    offset_count, elev_obs = _observed_descriptor(observed_profile, intrinsics, pitch_deg, n_bins, max_columns)
+    offset_count, elev_obs = _observed_descriptor(
+        observed_profile,
+        intrinsics,
+        pitch_deg,
+        n_bins,
+        max_columns,
+        projection=projection,
+        horizontal_fov_deg=horizontal_fov_deg,
+    )
     bin_width_deg = 360.0 / n_bins
     shifts = np.arange(n_bins)
     shift_index = (shifts[:, None] + offset_count[None, :]) % n_bins  # (n_bins, M)
@@ -92,6 +103,9 @@ def _observed_descriptor(
     pitch_deg: float,
     n_bins: int,
     max_columns: int,
+    *,
+    projection: ImageProjectionName = "pinhole",
+    horizontal_fov_deg: float | None = None,
 ) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
     """Converts the observed outline to yaw-invariant (azimuth-offset, elevation)."""
 
@@ -104,16 +118,35 @@ def _observed_descriptor(
         columns = columns[keep]
         rows = rows[keep]
 
-    origin = CameraExtrinsics(
-        position=LocalPoint(east_m=0.0, north_m=0.0, up_m=0.0), yaw_deg=0.0, pitch_deg=pitch_deg, roll_deg=0.0
-    )
-    right, down, forward = camera_axes(origin)
-    x = (columns - intrinsics.principal_x_px) / intrinsics.focal_length_px
-    y = (rows - intrinsics.principal_y_px) / intrinsics.focal_length_px
-    rays = x[:, None] * right + y[:, None] * down + forward
-    rays /= np.linalg.norm(rays, axis=1, keepdims=True)
-    azimuth_deg = np.degrees(np.arctan2(rays[:, 0], rays[:, 1]))
-    elevation_deg = np.degrees(np.arcsin(np.clip(rays[:, 2], -1.0, 1.0)))
+    if projection == "cyltan":
+        hfov_deg = horizontal_fov_deg or intrinsics.horizontal_fov_deg()
+        azimuth_deg = azimuths_deg(intrinsics.width_px, hfov_deg, 0.0, projection)[columns]
+        elevation_deg = np.degrees(
+            elevation_rad_from_rows(
+                rows,
+                intrinsics.width_px,
+                intrinsics.height_px,
+                hfov_deg,
+                projection,
+                pitch_deg=pitch_deg,
+            )
+        )
+    else:
+        # Preserve the established perspective descriptor, including arbitrary
+        # principal points and focal lengths.
+        origin = CameraExtrinsics(
+            position=LocalPoint(east_m=0.0, north_m=0.0, up_m=0.0),
+            yaw_deg=0.0,
+            pitch_deg=pitch_deg,
+            roll_deg=0.0,
+        )
+        right, down, forward = camera_axes(origin)
+        x = (columns - intrinsics.principal_x_px) / intrinsics.focal_length_px
+        y = (rows - intrinsics.principal_y_px) / intrinsics.focal_length_px
+        rays = x[:, None] * right + y[:, None] * down + forward
+        rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+        azimuth_deg = np.degrees(np.arctan2(rays[:, 0], rays[:, 1]))
+        elevation_deg = np.degrees(np.arcsin(np.clip(rays[:, 2], -1.0, 1.0)))
     offset_count = np.round(azimuth_deg / (360.0 / n_bins)).astype(np.int64)
     return offset_count, elevation_deg
 

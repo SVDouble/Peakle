@@ -300,6 +300,7 @@ def refine_pose(terrain, cam_z, obs, w, h, fov_deg, yaw_label, gt_dt=None):
                 if c < best[0]:
                     best = (c, float(dyaw), float(de), float(dn), dv, rows)
     cons, dyaw, de, dn, dv, rows = best
+    assert rows is not None  # the non-empty coarse grid always supplies a skyline
 
     ccons = None
     if gt_dt is not None:

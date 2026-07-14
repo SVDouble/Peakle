@@ -80,7 +80,11 @@ def fit_outline(
         strategy=strategy,
         truth=truth,
     )
-    report = outline_match(result.observed_profile, result.predicted_profile, result.sample_height)
+    report = outline_match(
+        np.asarray(result.observed_profile, dtype=np.float64),
+        np.asarray(result.predicted_profile, dtype=np.float64),
+        result.sample_height,
+    )
     return result, report
 
 

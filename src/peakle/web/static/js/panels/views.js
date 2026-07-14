@@ -1,17 +1,23 @@
 "use strict";
 
 // Views panel: a left-side library of localized images/crops/photos. GT catalogue rows stay
-// immutable; any mutable DEM/refined-pose backing view and solver outputs live under that view
+// immutable; any materialized solver backing view and solver outputs live under that view
 // as poses.
 
 import { el, formatNumber } from "../format.js";
 import { fuzzySearchScore, hasFuzzyMatch } from "../fuzzy-search.js";
 import { angleDeltaDeg, geoToLocal } from "../geometry.js";
-import { api } from "../api.js";
 
 const PATCH_DEBOUNCE_MS = 250;
 const CORPUS_CAP = 400;
 const PHOTO_MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+const SORT_OPTIONS = [
+  { key: "relevance", label: "Matches", defaultDirection: "desc" },
+  { key: "name", label: "Name", defaultDirection: "asc" },
+  { key: "on-map", label: "Map", defaultDirection: "desc" },
+  { key: "peaks", label: "Peaks", defaultDirection: "desc" },
+  { key: "solves", label: "Poses", defaultDirection: "desc" },
+];
 
 export function setupViewsPanel(store, root) {
   root.classList.add("views-panel", "library-panel");
@@ -19,28 +25,40 @@ export function setupViewsPanel(store, root) {
   let patchTimer = null;
   let editorKey = undefined;
   let runStatus = null;
-  let solveJobTimer = null;
-  let solveJobId = null;
+  let sortKey = "on-map";
+  let sortDirection = "desc";
+  let searching = false;
+  let browseSort = { key: sortKey, direction: sortDirection };
 
   const placeButton = el("button", { type: "button", class: "primary lib-action", text: "Place view" });
   placeButton.addEventListener("click", () => store.setPlacing(!store.placing));
   const gtLab = el("a", { class: "gt-lab-link", href: "/gt", target: "_blank", text: "GT Lab ↗" });
-  const solveFilteredBtn = el("button", {
-    type: "button",
-    class: "secondary lib-action",
-    text: "Solve filtered",
-    title: "Queue pose and metric solving for the filtered GT catalogue views",
+  const benchmarks = el("a", {
+    class: "gt-lab-link",
+    href: "/bench",
+    target: "_blank",
+    text: "Bench ↗",
+    title: "Open pose benchmark results and dataset compatibility statistics",
   });
-  solveFilteredBtn.addEventListener("click", onSolveFiltered);
-  const search = el("input", { class: "lib-search", placeholder: "Fuzzy search views or peaks…", type: "text" });
-  const sortSelect = el("select", { class: "lib-sort", title: "Sort views" }, [
-    el("option", { value: "default", text: "Worst GT first" }),
-    el("option", { value: "name", text: "Name" }),
-    el("option", { value: "on-map", text: "On map first" }),
-    el("option", { value: "quality", text: "Quality" }),
-    el("option", { value: "peaks", text: "Peak relevance" }),
-    el("option", { value: "solves", text: "Most poses" }),
+  const search = el("input", {
+    class: "lib-search",
+    placeholder: "Search views and peaks…",
+    type: "search",
+    "aria-label": "Search views",
+  });
+  const sortButtons = new Map();
+  const sortRail = el("div", { class: "lib-sort-rail", role: "toolbar", "aria-label": "Sort views" });
+  for (const option of SORT_OPTIONS) {
+    const button = el("button", { type: "button", class: "lib-sort-button", text: option.label });
+    button.addEventListener("click", () => activateSort(option));
+    sortButtons.set(option.key, button);
+    sortRail.append(button);
+  }
+  const sortControl = el("div", { class: "lib-sort-control" }, [
+    el("span", { class: "lib-sort-label", text: "Sort" }),
+    sortRail,
   ]);
+  const resultSummary = el("span", { class: "library-summary", "aria-live": "polite" });
   const photoFile = el("input", { class: "photo-file", type: "file", accept: "image/*", required: true });
   const photoLabel = el("input", { class: "photo-field", type: "text", placeholder: "Label" });
   const photoLat = el("input", { class: "photo-field", type: "number", step: "0.000001", min: "-90", max: "90", placeholder: "Lat", required: true });
@@ -48,9 +66,10 @@ export function setupViewsPanel(store, root) {
   const photoFov = el("input", { class: "photo-field", type: "number", step: "0.1", min: "1", max: "179", value: "55", placeholder: "FOV", required: true });
   const photoEye = el("input", { class: "photo-field", type: "number", step: "0.1", min: "0", max: "5000", value: "2", placeholder: "Eye m" });
   const photoSubmit = el("button", { type: "submit", class: "primary", text: "Create view" });
+  const photoCancel = el("button", { type: "button", class: "secondary", text: "Cancel" });
   const photoStatus = el("p", { class: "control-hint" });
   const photoForm = el("form", { class: "photo-import-form", onsubmit: onPhotoSubmit }, [
-    photoFile,
+    labelField("Photo", photoFile, "photo-file-label"),
     el("div", { class: "photo-import-grid" }, [
       labelField("Label", photoLabel),
       labelField("Lat", photoLat),
@@ -58,26 +77,51 @@ export function setupViewsPanel(store, root) {
       labelField("FOV", photoFov),
       labelField("Eye", photoEye),
     ]),
-    photoSubmit,
     photoStatus,
+    el("div", { class: "photo-dialog-actions" }, [photoCancel, photoSubmit]),
   ]);
-  const photoImport = el("details", { class: "photo-import" }, [
-    el("summary", { class: "icon-button add-photo-button", title: "Add photo", text: "+" }),
-    photoForm,
+  const photoDialog = el("dialog", { class: "photo-dialog", "aria-labelledby": "photoDialogTitle", "aria-describedby": "photoDialogDescription" }, [
+    el("div", { class: "photo-dialog-shell" }, [
+      el("h2", { id: "photoDialogTitle", text: "Add photo view" }),
+      el("p", {
+        id: "photoDialogDescription",
+        class: "photo-dialog-description",
+        text: "Choose a mountain photo and provide its approximate location and camera settings.",
+      }),
+      photoForm,
+    ]),
   ]);
-  const hint = el("p", { class: "control-hint" });
+  const addPhotoButton = el("button", { type: "button", class: "secondary lib-action", text: "Add photo" });
+  addPhotoButton.addEventListener("click", () => {
+    photoStatus.textContent = "";
+    photoDialog.showModal();
+    requestAnimationFrame(() => photoFile.focus());
+  });
+  photoCancel.addEventListener("click", () => photoDialog.close());
+  photoDialog.addEventListener("close", () => addPhotoButton.focus());
+  photoDialog.addEventListener("click", (event) => {
+    if (event.target === photoDialog) {
+      photoDialog.close();
+    }
+  });
+  const hint = el("p", { class: "control-hint", role: "status", "aria-live": "polite" });
   const list = el("ul", { class: "lib-list" });
   const scroll = el("div", { class: "lib-scroll" }, [list, hint]);
   const editor = el("div", { class: "view-editor" });
 
   root.replaceChildren(
     el("div", { class: "library-head" }, [
-      el("div", { class: "library-head-row" }, [el("span", { class: "control-eyebrow", text: "Views" }), gtLab]),
-      el("div", { class: "library-actions" }, [placeButton, solveFilteredBtn, photoImport]),
-      el("div", { class: "library-filter-row" }, [search, sortSelect]),
+      el("div", { class: "library-head-row" }, [
+        el("span", { class: "control-eyebrow", text: "Views" }),
+        el("nav", { class: "library-head-links", "aria-label": "View tools" }, [gtLab, benchmarks]),
+      ]),
+      el("div", { class: "library-actions" }, [placeButton, addPhotoButton]),
+      search,
+      el("div", { class: "library-list-toolbar" }, [resultSummary, sortControl]),
     ]),
     scroll,
     editor,
+    photoDialog,
   );
 
   // --- unified view model -------------------------------------------------
@@ -95,56 +139,85 @@ export function setupViewsPanel(store, root) {
       .map((s) => ({ kind: "gt", key: `g:${s.name}`, provider: "gt", label: s.name, sample: s, peaks: s.visible_peaks ?? [] }))
       .map((item) => itemWithSearchScore(item, filter))
       .filter((item) => matchesFilter(item, filter));
-    return { views: sortItems(views, filter), corpus: sortItems(corpus, filter) };
+    return {
+      rows: sortItems([...views, ...corpus]),
+      viewCount: views.length,
+      corpusCount: corpus.length,
+    };
   }
 
-  function sortItems(rows, filter) {
-    const choice = sortSelect.value;
-    if (!filter && choice === "default") {
-      return rows;
+  function sortItems(rows) {
+    return [...rows].sort(compareItems);
+  }
+
+  function compareItems(a, b) {
+    const direction = sortDirection === "asc" ? 1 : -1;
+    let result = 0;
+    if (sortKey === "relevance") {
+      result = a.searchScore - b.searchScore;
+    } else if (sortKey === "name") {
+      result = a.label.localeCompare(b.label);
+    } else if (sortKey === "on-map") {
+      result = Number(isItemOnMap(a)) - Number(isItemOnMap(b));
+    } else if (sortKey === "peaks") {
+      result = peakWeight(a) - peakWeight(b);
+    } else if (sortKey === "solves") {
+      result = solveCount(a) - solveCount(b);
     }
-    return [...rows].sort((a, b) => {
-      if (filter) {
-        const scoreDelta = b.searchScore - a.searchScore;
-        if (Math.abs(scoreDelta) > 0.05) {
-          return scoreDelta;
-        }
+    return direction * result || a.label.localeCompare(b.label);
+  }
+
+  function activateSort(option) {
+    if (sortKey === option.key) {
+      if (option.key !== "relevance") {
+        sortDirection = sortDirection === "asc" ? "desc" : "asc";
       }
-      return compareItems(a, b, choice);
-    });
+    } else {
+      sortKey = option.key;
+      sortDirection = option.defaultDirection;
+    }
+    if (!searching) {
+      browseSort = { key: sortKey, direction: sortDirection };
+    }
+    updateSortControls();
+    renderList();
   }
 
-  function compareItems(a, b, choice) {
-    if (choice === "name") {
-      return a.label.localeCompare(b.label);
+  function sortDescription(key, direction) {
+    if (key === "relevance") {
+      return "Best matches first";
     }
-    if (choice === "on-map") {
-      return Number(isItemOnMap(b)) - Number(isItemOnMap(a)) || worstMetric(b) - worstMetric(a) || a.label.localeCompare(b.label);
+    if (key === "name") {
+      return direction === "asc" ? "Name A to Z" : "Name Z to A";
     }
-    if (choice === "quality") {
-      return qualityRank(a) - qualityRank(b) || worstMetric(b) - worstMetric(a) || a.label.localeCompare(b.label);
+    if (key === "on-map") {
+      return direction === "desc" ? "On-map views first" : "Off-map views first";
     }
-    if (choice === "peaks") {
-      return peakWeight(b) - peakWeight(a) || a.label.localeCompare(b.label);
+    if (key === "peaks") {
+      return direction === "desc" ? "Most relevant peaks first" : "Least relevant peaks first";
     }
-    if (choice === "solves") {
-      return solveCount(b) - solveCount(a) || a.label.localeCompare(b.label);
+    return direction === "desc" ? "Most poses first" : "Fewest poses first";
+  }
+
+  function updateSortControls() {
+    for (const option of SORT_OPTIONS) {
+      const button = sortButtons.get(option.key);
+      const active = sortKey === option.key;
+      button.hidden = option.key === "relevance" && !searching;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+      const direction = active ? sortDirection : option.defaultDirection;
+      button.title = `${sortDescription(option.key, direction)}${active && option.key !== "relevance" ? "; click to reverse" : ""}`;
+      button.setAttribute("aria-label", button.title);
+      button.replaceChildren(
+        el("span", { text: option.label }),
+        ...(active ? [el("span", { class: "lib-sort-direction", text: direction === "asc" ? "↑" : "↓" })] : []),
+      );
     }
-    return 0;
   }
 
   function isItemOnMap(item) {
     return item.sample ? inBounds(item.sample) : true;
-  }
-
-  function worstMetric(item) {
-    const s = item.sample;
-    return s ? Math.max(s.sky_cons_px ?? 0, s.pfm_cons_px ?? 0, s.contour_cons_px ?? 0) : 0;
-  }
-
-  function qualityRank(item) {
-    const q = item.sample?.quality ?? (item.view?.source === "gt" ? "CLEAN" : "");
-    return q === "CLEAN" ? 0 : q === "SUSPECT" ? 2 : 1;
   }
 
   function peakWeight(item) {
@@ -188,16 +261,8 @@ export function setupViewsPanel(store, root) {
     return el("span", { class: `provider-chip ${provider}`, text: label });
   }
 
-  function labelField(label, input) {
-    return el("label", { class: "photo-label" }, [el("span", { text: label }), input]);
-  }
-
-  function metricSpan(label, value, gate) {
-    if (value === null || value === undefined) {
-      return "";
-    }
-    const text = Math.abs(value) >= 10 ? Math.round(value) : value.toFixed(1);
-    return `<span class="gt-metric${value > gate ? " over" : ""}"><span>${label}</span><b>${text}</b></span>`;
+  function labelField(label, input, extraClass = "") {
+    return el("label", { class: `photo-label${extraClass ? ` ${extraClass}` : ""}` }, [el("span", { text: label }), input]);
   }
 
   function viewPeakTags(view, limit = 6) {
@@ -245,11 +310,12 @@ export function setupViewsPanel(store, root) {
     const view = item.view;
     const selected = item.key === selectedKey();
     return el("li", { class: selected ? "lib-row selected" : "lib-row" }, [
-      providerChip(item.provider),
-      el("div", { class: "lib-main" }, [
-        el("button", { type: "button", class: "lib-name", text: view.label, onclick: () => store.selectView(view.id) }),
-        libPeaks(item.peaks, `${view.solves.length} solver pose${view.solves.length === 1 ? "" : "s"}`),
+      el("div", { class: "lib-row-head" }, [
+        providerChip(item.provider),
+        el("button", { type: "button", class: "lib-name", text: rowTitle(item), title: view.label, onclick: () => store.selectView(view.id) }),
       ]),
+      rowDetail(item, view.label),
+      el("span", { class: "gt-metrics compact", text: `${view.solves.length} pose${view.solves.length === 1 ? "" : "s"}` }),
     ]);
   }
 
@@ -261,95 +327,50 @@ export function setupViewsPanel(store, root) {
       store.selectGtSample(s.name, { focus: true });
     };
     const chips =
-      `<span class="chip ${s.quality}">${s.quality}</span>` +
-      metricSpan("sky", s.sky_cons_px, 15) +
-      metricSpan("ct", s.contour_cons_px, 25) +
+      `<span class="source-tag">${s.manual ? "MANUAL" : "AUTO"}</span>` +
       (inBounds(s) ? '<span class="on-map">on map</span>' : "");
     return el("li", { class: selected ? "lib-row selected" : "lib-row", onclick: select }, [
-      providerChip("gt"),
-      el("div", { class: "lib-main" }, [
-        el("button", { type: "button", class: "lib-name", text: s.name, onclick: select }),
-        libPeaks(item.peaks),
-        el("span", { class: "gt-metrics", html: chips }),
+      el("div", { class: "lib-row-head" }, [
+        providerChip("gt"),
+        el("button", { type: "button", class: "lib-name", text: rowTitle(item), title: s.name, onclick: select }),
       ]),
+      rowDetail(item, s.name),
+      el("span", { class: "gt-metrics", html: chips }),
     ]);
   }
 
-  function libPeaks(peaks, fallback = "") {
-    const names = (peaks ?? []).slice(0, 4).map((peak) => peak.name);
-    return el("span", { class: "lib-peaks", text: names.length ? names.join(" · ") : fallback });
+  function rowTitle(item) {
+    const names = (item.peaks ?? []).slice(0, 2).map((peak) => peak.name);
+    return names.length ? names.join(" · ") : item.label;
+  }
+
+  function rowDetail(item, fallback = "") {
+    const names = (item.peaks ?? []).slice(2, 6).map((peak) => peak.name);
+    const detail = names.length ? `${names.join(" · ")} · ${fallback}` : fallback;
+    return el("span", { class: "lib-peaks", text: detail, title: detail });
   }
 
   function renderList() {
-    const { views, corpus } = items();
-    const rows = [];
-    for (const item of views) {
-      rows.push(viewRow(item));
-    }
-    if (views.length && corpus.length) {
-      rows.push(el("li", { class: "lib-divider", text: "GT provider" }));
-    }
-    const onMap = corpus.filter((c) => inBounds(c.sample)).length;
-    for (const item of corpus.slice(0, CORPUS_CAP)) {
-      rows.push(gtRow(item));
-    }
-    list.replaceChildren(...rows);
-    if (!views.length && !corpus.length) {
+    const { rows: sortedRows, viewCount, corpusCount } = items();
+    let shownCorpus = 0;
+    const visibleRows = sortedRows.filter((item) => {
+      if (item.kind !== "gt") {
+        return true;
+      }
+      shownCorpus += 1;
+      return shownCorpus <= CORPUS_CAP;
+    });
+    list.replaceChildren(...visibleRows.map((item) => (item.kind === "gt" ? gtRow(item) : viewRow(item))));
+    if (!sortedRows.length) {
       list.append(el("li", { class: "view-empty", text: store.gtSamples ? "No views match." : "Loading views…" }));
     }
-    const capped = corpus.length > CORPUS_CAP ? ` · showing worst ${CORPUS_CAP}` : "";
-    hint.textContent = corpus.length
-      ? `${views.length} placed · ${corpus.length} GT (${onMap} on the current map)${capped}`
-      : `${views.length} view${views.length === 1 ? "" : "s"}`;
-  }
-
-  // --- queued catalogue view solving ---------------------------------------
-
-  async function pollSolveJob() {
-    if (!solveJobId) {
-      return;
-    }
-    try {
-      const job = await api.getJob(solveJobId);
-      const finished = (job.done ?? 0) + (job.failed ?? 0);
-      const running = (job.running_tasks ?? []).map((task) => task.label).join(", ");
-      if (job.status === "queued" || job.status === "running") {
-        hint.textContent = `solving ${finished}/${job.total} — ${running || job.status}`;
-        solveJobTimer = setTimeout(pollSolveJob, 3000);
-        return;
-      }
-      solveFilteredBtn.disabled = false;
-      solveFilteredBtn.textContent = "Solve filtered";
-      solveJobId = null;
-      store.gtSamples = null;
-      await store.loadGtSamples();
-      hint.textContent =
-        job.failed > 0 ? `solve job finished with ${job.failed} failed task${job.failed === 1 ? "" : "s"}` : "solve job finished";
-    } catch {
-      solveJobTimer = setTimeout(pollSolveJob, 5000);
-    }
-  }
-
-  async function onSolveFiltered() {
-    const names = items().corpus.map((item) => item.sample.name).slice(0, 50);
-    if (!names.length) {
-      return;
-    }
-    if (names.length > 1 && !window.confirm(`Solve ${names.length} GT catalogue views (~${Math.round(names.length * 0.6)} min)?`)) {
-      return;
-    }
-    solveFilteredBtn.disabled = true;
-    solveFilteredBtn.textContent = "Solving…";
-    try {
-      const job = await api.createJob({ view_ids: names, max_workers: 2 });
-      solveJobId = job.id;
-      clearTimeout(solveJobTimer);
-      pollSolveJob();
-    } catch (error) {
-      solveFilteredBtn.disabled = false;
-      solveFilteredBtn.textContent = "Solve filtered";
-      hint.textContent = error.message;
-    }
+    const onMap = sortedRows.filter((item) => item.kind === "gt" && inBounds(item.sample)).length;
+    const shown = visibleRows.length;
+    const total = sortedRows.length;
+    resultSummary.textContent = total > shown ? `${shown} of ${total} views` : `${total} view${total === 1 ? "" : "s"}`;
+    resultSummary.title = corpusCount
+      ? `${viewCount} placed · ${corpusCount} GT · ${onMap} on the current map`
+      : `${viewCount} placed view${viewCount === 1 ? "" : "s"}`;
   }
 
   async function onPhotoSubmit(event) {
@@ -381,8 +402,10 @@ export function setupViewsPanel(store, root) {
         eye_height_m: eye,
         label: photoLabel.value.trim() || file.name.replace(/\.[^.]+$/, ""),
       });
-      photoStatus.textContent = `Created ${view.label}.`;
-      photoImport.open = false;
+      photoDialog.close();
+      photoForm.reset();
+      photoStatus.textContent = "";
+      hint.textContent = `Created ${view.label}.`;
     } catch (error) {
       photoStatus.textContent = error.message;
     } finally {
@@ -534,14 +557,27 @@ export function setupViewsPanel(store, root) {
     }
   }
 
-  search.addEventListener("input", renderList);
-  sortSelect.addEventListener("change", renderList);
+  search.addEventListener("input", () => {
+    const nextSearching = Boolean(search.value.trim());
+    if (nextSearching && !searching) {
+      browseSort = { key: sortKey, direction: sortDirection };
+      sortKey = "relevance";
+      sortDirection = "desc";
+    } else if (!nextSearching && searching && sortKey === "relevance") {
+      sortKey = browseSort.key;
+      sortDirection = browseSort.direction;
+    }
+    searching = nextSearching;
+    updateSortControls();
+    renderList();
+  });
   store.on("placing", renderPlacing);
   store.on("views", render);
   store.on("selection", render);
   store.on("gt", render);
   store.on("scene", render);
   store.loadGtSamples();
+  updateSortControls();
   renderPlacing();
   render();
 }

@@ -307,16 +307,18 @@ export function setupMapPanel(store, root) {
           layersSample: sample,
         });
       }
-      rows.push({
-        key: "truth",
-        role: view.source === "gt" ? "DEM" : "Pose",
-        name: view.source === "gt" ? "DEM @ refined pose" : "Baseline pose",
-        detail: `${formatNumber(view.true_extrinsics.yaw_deg, "deg")} · ${formatNumber(view.true_extrinsics.pitch_deg, "deg")}`,
-        pose: cam.scenePoseFromLocal(view.true_extrinsics, store.terrain),
-        label: `${view.label} · ${view.source === "gt" ? "DEM @ refined pose" : "Baseline pose"}`,
-        photoSrc: view.photo_url ?? null,
-        layersSample: sample,
-      });
+      if (view.source !== "gt") {
+        rows.push({
+          key: "truth",
+          role: "Pose",
+          name: "Baseline pose",
+          detail: `${formatNumber(view.true_extrinsics.yaw_deg, "deg")} · ${formatNumber(view.true_extrinsics.pitch_deg, "deg")}`,
+          pose: cam.scenePoseFromLocal(view.true_extrinsics, store.terrain),
+          label: `${view.label} · Baseline pose`,
+          photoSrc: view.photo_url ?? null,
+          layersSample: sample,
+        });
+      }
       for (const summary of view.solves) {
         rows.push({
           key: `solve:${summary.id}`,
@@ -346,18 +348,6 @@ export function setupMapPanel(store, root) {
         detail: `${formatNumber(sample.gt_yaw_deg ?? sample.yaw_deg, "deg")} · ${formatNumber(sample.gt_pitch_deg ?? 0, "deg")}`,
         pose: cam?.scenePose(store.terrain, "gtDepth"),
         label: `${sample.name} · Ground truth pose`,
-        photoSrc: cam?.photoSrc ?? null,
-        layersSample: cam?.hasLayers ? sample : null,
-      },
-      {
-        key: "truth",
-        role: "DEM",
-        name: "DEM @ refined pose",
-        detail: backingView?.true_extrinsics
-          ? `${formatNumber(backingView.true_extrinsics.yaw_deg, "deg")} · ${formatNumber(backingView.true_extrinsics.pitch_deg, "deg")}`
-          : `${sample.quality} · fov ${formatNumber(sample.fov_deg, "deg")}`,
-        pose: backingView?.true_extrinsics ? cam?.scenePoseFromLocal(backingView.true_extrinsics, store.terrain) : cam?.scenePose(store.terrain, "true"),
-        label: `${sample.name} · DEM @ refined pose`,
         photoSrc: cam?.photoSrc ?? null,
         layersSample: cam?.hasLayers ? sample : null,
       },
@@ -938,7 +928,7 @@ export function setupMapPanel(store, root) {
     viewport.style.top = `${box.top}px`;
     viewport.style.width = `${box.width}px`;
     viewport.style.height = `${box.height}px`;
-    renderer.setSize(box.width, box.height, false);
+    renderer.setSize(box.width, box.height, true);
     labelRenderer.setSize(box.width, box.height);
     camera.aspect = box.width / box.height;
     applyPovZoom();

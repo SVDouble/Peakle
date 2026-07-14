@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "peakle"
 version = "0.1.0"
-description = "Synthetic mountain peak annotation demo."
+description = "Mountain-view camera pose localization and terrain-matching workbench."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

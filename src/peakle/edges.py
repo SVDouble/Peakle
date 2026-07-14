@@ -93,17 +93,21 @@ class TeedEdges:
     mean_bgr = np.array([104.007, 116.669, 122.679], dtype=np.float32)
 
     def __init__(self, repo_dir: str, ckpt: str) -> None:
+        import importlib  # noqa: PLC0415
         import sys  # noqa: PLC0415
 
         import torch  # noqa: PLC0415
 
         if repo_dir not in sys.path:
             sys.path.insert(0, repo_dir)
-        from ted import TED  # noqa: PLC0415 - from the TEED repo
+        # TEED is loaded from the optional, user-supplied repository above. A
+        # dynamic import keeps that dependency optional and out of static module
+        # resolution without changing the runtime lookup.
+        model_type = importlib.import_module("ted").TED
 
         self._torch = torch
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._model = TED().to(self._device).eval()
+        self._model = model_type().to(self._device).eval()
         self._model.load_state_dict(torch.load(ckpt, map_location=self._device))
 
     def detect(self, rgb: NDArray[np.float64]) -> NDArray[np.float64]:

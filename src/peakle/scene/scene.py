@@ -8,12 +8,13 @@ in memory for the life of the server process (one scene per server).
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from peakle.config import AppSettings, PoseNoiseSettings
 from peakle.contours import DEFAULT_DETECTOR, ContourDetector
@@ -92,7 +93,11 @@ class View(BaseModel):
         true_extrinsics: Baseline pose (None for a real photo with no known pose).
         eye_height_m: Baseline pose height above the terrain surface.
         prior: Fixed pose prior shared by every solver run for this view.
-        contour: Detected skyline contour.
+        contour: Legacy/default skyline contour used by older clients.
+        evidence_contours: Explicit solver evidence tracks keyed by source id.
+        evidence_metadata: Availability and provenance for each evidence track.
+        default_evidence_source: Evidence track selected when a solve omits one.
+        pitch_comparable: Whether physical pitch errors are meaningful for this image.
         render_arrays: In-memory render outputs (image, mask, profile).
         solves: Solver-generated pose candidates keyed by id.
     """
@@ -107,6 +112,10 @@ class View(BaseModel):
     eye_height_m: float
     prior: PosePrior | None
     contour: SkylineContour
+    evidence_contours: dict[str, SkylineContour] = Field(default_factory=dict)
+    evidence_metadata: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    default_evidence_source: str = "view_contour"
+    pitch_comparable: bool = True
     render_arrays: RenderArrays
     solves: dict[str, Solve] = {}
     # A view can carry a reference photograph and a known/prior pose. A placed synthetic view has
@@ -115,6 +124,9 @@ class View(BaseModel):
     source: str = "placed"
     gt_name: str | None = None
     reference_photo: Any = None  # PIL.Image for GT-derived views, else None
+    # Hash of the exact terrain grid and solver stride used to produce pose results.
+    # Persisted solves are rejected when this changes.
+    terrain_fingerprint: str | None = None
 
 
 class Scene:
@@ -133,6 +145,8 @@ class Scene:
     ) -> None:
         self.config = config
         self.terrain = terrain
+        self.high_resolution_patch: Any = None
+        self.terrain_fingerprint = _terrain_solver_fingerprint(terrain, terrain_stride, None)
         self.peaks = peaks
         self.intrinsics = intrinsics
         self.pose_noise = pose_noise
@@ -203,6 +217,8 @@ class Scene:
                 default_strategy=default_strategy,
             )
             self.terrain = _build_terrain(self.config, self._terrain_spec)
+            self.high_resolution_patch = None
+            self.terrain_fingerprint = _terrain_solver_fingerprint(self.terrain, self.terrain_stride, None)
             self.peaks = self._detect_peaks(self.terrain)
             self.intrinsics = build_intrinsics(image_width, image_height, horizontal_fov_deg)
             self.views = {}
@@ -216,10 +232,19 @@ class Scene:
         hand-downloaded tiles, while the Copernicus mosaic covers the whole corpus.
         """
 
-        from peakle.terrain.copernicus import load_copernicus_terrain
+        from peakle.terrain.copernicus import focused_grid_for_extent, load_copernicus_terrain
 
         with self._mutation_lock:
-            self.terrain = load_copernicus_terrain(lat_deg, lon_deg, extent_m=extent_m)
+            # Keep the solver/render source at native GLO-30 spacing. The API
+            # independently decimates this grid for the browser mesh.
+            native_grid = focused_grid_for_extent(extent_m, max_grid=2048)
+            self.terrain = load_copernicus_terrain(lat_deg, lon_deg, extent_m=extent_m, grid=native_grid)
+            self.high_resolution_patch = _cached_high_resolution_patch(lat_deg, lon_deg)
+            self.terrain_fingerprint = _terrain_solver_fingerprint(
+                self.terrain,
+                self.terrain_stride,
+                self.high_resolution_patch,
+            )
             self._geo_focused = True
             self.peaks = self._detect_peaks(self.terrain)
             self.views = {}
@@ -272,9 +297,10 @@ class Scene:
                 pitch_deg=truth.pitch_deg if pitch_deg is None else pitch_deg,
                 roll_deg=0.0,
             )
-            # Rebuild with the VIEW's own intrinsics/source/photo (a GT view keeps its sample intrinsics
-            # and photograph when its pose is edited); the contour is re-detected from the new render
-            # for placed views, but a GT view keeps its photo-derived observed contour.
+            # Rebuild with the VIEW's own intrinsics/source/photo. Photo-backed views keep their
+            # immutable image evidence when the candidate pose is edited; placed synthetic views
+            # get a newly rendered/detected contour.
+            keep_evidence = current.source in {"gt", "photo"}
             rebuilt = self._construct_view(
                 view_id,
                 label if label is not None else current.label,
@@ -282,7 +308,11 @@ class Scene:
                 extrinsics,
                 eye,
                 image_camera=current.image_camera,
-                contour=current.contour if current.source == "gt" else None,
+                contour=current.contour if keep_evidence else None,
+                evidence_contours=current.evidence_contours if keep_evidence else None,
+                evidence_metadata=current.evidence_metadata if keep_evidence else None,
+                default_evidence_source=current.default_evidence_source if keep_evidence else None,
+                pitch_comparable=current.pitch_comparable,
                 source=current.source,
                 gt_name=current.gt_name,
                 reference_photo=current.reference_photo,
@@ -331,19 +361,33 @@ class Scene:
         seed = params.get("seed")
         use_position_prior = bool(params.get("position_prior", True))
         use_orientation_prior = bool(params.get("orientation_prior", True))
+        prior_source = str(params.get("prior_source") or "metadata")
         with self._mutation_lock:
             view = self.views[view_id]
             if view.prior is None:
                 msg = f"view {view_id!r} has no prior to solve from"
                 raise ValueError(msg)
             terrain = self.terrain
+            terrain_patch = self.high_resolution_patch
             terrain_stride = self.terrain_stride
-            contour = view.contour
+            evidence_source = str(params.get("evidence_source") or view.default_evidence_source)
+            contour = _resolve_evidence_contour(view, evidence_source)
+            evidence_provenance = dict(view.evidence_metadata.get(evidence_source, {}))
             intrinsics = view.intrinsics
-            prior = view.prior
+            prior = _resolve_solve_prior(view, prior_source)
             truth = view.true_extrinsics
             projection = view.image_camera.projection
             horizontal_fov_deg = view.image_camera.horizontal_fov_deg
+            pitch_comparable = view.pitch_comparable
+
+        # Persist the resolved sources, including defaults, so a result always says exactly which
+        # prior and image evidence produced it.
+        params["prior_source"] = prior_source
+        params["evidence_source"] = evidence_source
+        params["evidence_provenance"] = evidence_provenance
+        params["evidence_contour_sha256"] = hashlib.sha256(contour.model_dump_json().encode()).hexdigest()
+        params["pitch_comparable"] = pitch_comparable
+        params["terrain_provenance"] = _solver_terrain_provenance(terrain, terrain_patch)
 
         result = solve_pose(
             terrain=terrain,
@@ -358,7 +402,12 @@ class Scene:
             use_orientation_prior=use_orientation_prior,
             projection=projection,
             horizontal_fov_deg=horizontal_fov_deg,
+            terrain_patch=terrain_patch,
         )
+        if truth is not None and not pitch_comparable:
+            metrics = result.estimate.metrics.model_copy(update={"pitch_error_deg": None})
+            estimate = result.estimate.model_copy(update={"metrics": metrics})
+            result = result.model_copy(update={"estimate": estimate})
         with self._mutation_lock:
             if self.views.get(view_id) is not view:
                 msg = f"view {view_id!r} changed before the solve finished"
@@ -386,14 +435,18 @@ class Scene:
         gt_name: str | None = None,
         label: str | None = None,
         image_camera: CameraModel | None = None,
+        prior: PosePrior | None = None,
+        evidence_contours: dict[str, SkylineContour] | None = None,
+        evidence_metadata: dict[str, dict[str, Any]] | None = None,
+        default_evidence_source: str | None = None,
+        pitch_comparable: bool = True,
     ) -> View:
         """Add a photo-backed View at a known position (call after focus_geo).
 
         Backs both a materialized GT sample (``source="gt"``) and an arbitrary uploaded photo
-        (``source="photo"``): the view carries the photograph and the observed skyline extracted
-        from it, with an EXACT-position prior (the position is known — GPS — so the horizon solver
-        recovers orientation there; a noisy prior would flip the yaw). From here it is an ordinary
-        View — it lists, POVs, adjusts and solves like any placed view.
+        (``source="photo"``). Callers may provide an explicit prior; uploaded photos otherwise get
+        an exact-position, broad-orientation prior. From here it is an ordinary View—it lists,
+        POVs, adjusts and solves like any placed view.
         """
 
         with self._mutation_lock:
@@ -402,15 +455,16 @@ class Scene:
             eye_height_m = extrinsics.position.up_m - self.terrain.elevation_at(
                 extrinsics.position.east_m, extrinsics.position.north_m
             )
-            prior = PosePrior(
-                position=extrinsics.position,
-                yaw_deg=extrinsics.yaw_deg,
-                pitch_deg=extrinsics.pitch_deg,
-                horizontal_sigma_m=1.0,
-                vertical_sigma_m=1.0,
-                yaw_sigma_deg=120.0 if source == "photo" else 1.0,
-                pitch_sigma_deg=20.0 if source == "photo" else 1.0,
-            )
+            if prior is None:
+                prior = PosePrior(
+                    position=extrinsics.position,
+                    yaw_deg=extrinsics.yaw_deg,
+                    pitch_deg=extrinsics.pitch_deg,
+                    horizontal_sigma_m=1.0,
+                    vertical_sigma_m=1.0,
+                    yaw_sigma_deg=120.0,
+                    pitch_sigma_deg=20.0,
+                )
             view = self._construct_view(
                 view_id,
                 label or gt_name or f"Photo {self._view_counter}",
@@ -423,6 +477,10 @@ class Scene:
                 gt_name=gt_name,
                 reference_photo=reference_photo,
                 prior=prior,
+                evidence_contours=evidence_contours,
+                evidence_metadata=evidence_metadata,
+                default_evidence_source=default_evidence_source,
+                pitch_comparable=pitch_comparable,
             )
             self.views[view_id] = view
             return view
@@ -436,6 +494,11 @@ class Scene:
         reference_photo: Any,
         label: str | None = None,
         image_camera: CameraModel | None = None,
+        prior: PosePrior | None = None,
+        evidence_contours: dict[str, SkylineContour] | None = None,
+        evidence_metadata: dict[str, dict[str, Any]] | None = None,
+        default_evidence_source: str = "photo_auto",
+        pitch_comparable: bool = False,
     ) -> View:
         """Materialize a GT corpus sample as a scene View (thin wrapper over add_backed_view)."""
 
@@ -448,6 +511,11 @@ class Scene:
             gt_name=name,
             label=label or name,
             image_camera=image_camera,
+            prior=prior,
+            evidence_contours=evidence_contours,
+            evidence_metadata=evidence_metadata,
+            default_evidence_source=default_evidence_source,
+            pitch_comparable=pitch_comparable,
         )
 
     def _build_view(
@@ -483,12 +551,28 @@ class Scene:
         gt_name: str | None = None,
         reference_photo: Any = None,
         prior: PosePrior | None = None,
+        evidence_contours: dict[str, SkylineContour] | None = None,
+        evidence_metadata: dict[str, dict[str, Any]] | None = None,
+        default_evidence_source: str | None = None,
+        pitch_comparable: bool = True,
     ) -> View:
         """Render the DEM at ``extrinsics`` and assemble a View (contour detected if not given)."""
 
         render = self.renderer.render(self.terrain, intrinsics, extrinsics)
         if prior is None:
             prior = self._view_prior(view_id, extrinsics)
+        selected_contour = contour if contour is not None else self.detector.detect(render)
+        selected_source = default_evidence_source or _default_evidence_source(source)
+        tracks = dict(evidence_contours) if evidence_contours is not None else {selected_source: selected_contour}
+        metadata = dict(evidence_metadata or {})
+        metadata.setdefault(
+            selected_source,
+            {
+                "available": selected_source in tracks,
+                "diagnostic": False,
+                "source": selected_contour.source or selected_source,
+            },
+        )
         return View(
             id=view_id,
             label=label,
@@ -497,11 +581,16 @@ class Scene:
             true_extrinsics=extrinsics,
             eye_height_m=eye_height_m,
             prior=prior,
-            contour=contour if contour is not None else self.detector.detect(render),
+            contour=selected_contour,
+            evidence_contours=tracks,
+            evidence_metadata=metadata,
+            default_evidence_source=selected_source,
+            pitch_comparable=pitch_comparable,
             render_arrays=render,
             source=source,
             gt_name=gt_name,
             reference_photo=reference_photo,
+            terrain_fingerprint=self.terrain_fingerprint,
         )
 
     def _detect_peaks(self, terrain: TerrainMap) -> list[Peak]:
@@ -538,3 +627,123 @@ def _solve_index(solve_id: str) -> int:
         return int(solve_id.rsplit("-", 1)[-1])
     except ValueError:
         return 0
+
+
+def _default_evidence_source(view_source: str) -> str:
+    if view_source == "photo":
+        return "photo_auto"
+    if view_source == "gt":
+        return "photo_auto"
+    return "rendered_skyline"
+
+
+def _resolve_evidence_contour(view: View, source: str) -> SkylineContour:
+    """Resolve one explicitly named contour without substituting another track."""
+
+    normalized = source.strip()
+    metadata = view.evidence_metadata.get(normalized, {})
+    contour = view.evidence_contours.get(normalized)
+    # Compatibility for views constructed before evidence tracks were introduced. New scene
+    # constructors always populate ``evidence_contours``.
+    if contour is None and not view.evidence_contours and normalized in {"view_contour", "rendered_skyline"}:
+        contour = view.contour
+    if metadata.get("available") is False or contour is None or not contour.points:
+        available = sorted(
+            key
+            for key, candidate in view.evidence_contours.items()
+            if candidate.points and view.evidence_metadata.get(key, {}).get("available") is not False
+        )
+        suffix = f"; available sources: {', '.join(available)}" if available else "; no usable evidence is available"
+        msg = f"evidence source {normalized!r} is unavailable for view {view.id!r}{suffix}"
+        raise ValueError(msg)
+    return contour
+
+
+def _resolve_solve_prior(view: View, source: str) -> PosePrior:
+    """Resolve the requested prior source to a concrete PosePrior.
+
+    The solve persists this resolved prior, so later debugging does not depend on
+    mutable UI state. ``metadata`` is the view's original prior; ``pose:truth``
+    starts a non-GT view from its synthetic/baseline pose; ``pose:solve:<id>`` starts from
+    a previous solver pose while reusing the view prior's uncertainty.
+    """
+
+    base = view.prior
+    if base is None:
+        msg = f"view {view.id!r} has no prior"
+        raise ValueError(msg)
+    normalized = source.strip()
+    if normalized in {"", "metadata", "view", "prior"}:
+        return base
+    if normalized in {"truth", "baseline", "refined", "pose:truth"}:
+        if view.source == "gt":
+            msg = "GT evaluation reference cannot be reused as a solver prior"
+            raise ValueError(msg)
+        if view.true_extrinsics is None:
+            msg = f"view {view.id!r} has no baseline pose for prior source {source!r}"
+            raise ValueError(msg)
+        return _prior_from_extrinsics(base, view.true_extrinsics)
+    solve_id = normalized.removeprefix("pose:")
+    if solve_id.startswith("solve:"):
+        solve_id = solve_id.removeprefix("solve:")
+    if solve_id in view.solves:
+        return _prior_from_extrinsics(base, view.solves[solve_id].estimate.extrinsics)
+    msg = f"unknown prior source {source!r} for view {view.id!r}"
+    raise ValueError(msg)
+
+
+def _prior_from_extrinsics(template: PosePrior, extrinsics: CameraExtrinsics) -> PosePrior:
+    return PosePrior(
+        position=extrinsics.position,
+        yaw_deg=extrinsics.yaw_deg,
+        pitch_deg=extrinsics.pitch_deg,
+        horizontal_sigma_m=template.horizontal_sigma_m,
+        vertical_sigma_m=template.vertical_sigma_m,
+        yaw_sigma_deg=template.yaw_sigma_deg,
+        pitch_sigma_deg=template.pitch_sigma_deg,
+    )
+
+
+def _terrain_solver_fingerprint(terrain: TerrainMap, terrain_stride: int, terrain_patch: Any = None) -> str:
+    """Hash the exact terrain geometry and sampling policy consumed by a solve."""
+
+    digest = hashlib.sha256()
+    digest.update(terrain.spec.model_dump_json().encode())
+    digest.update(str(terrain_stride).encode())
+    for values in (terrain.x_m, terrain.y_m, terrain.elevation_m):
+        digest.update(np.ascontiguousarray(values, dtype=np.float64).view(np.uint8))
+    if terrain_patch is not None:
+        digest.update(b"native-near-field-patch")
+        for values in (terrain_patch.x_m, terrain_patch.y_m, terrain_patch.elevation_m):
+            digest.update(np.ascontiguousarray(values, dtype=np.float64).view(np.uint8))
+    return digest.hexdigest()
+
+
+def _solver_terrain_provenance(terrain: TerrainMap, terrain_patch: Any = None) -> dict[str, Any]:
+    far_spacing_m = float(min(abs(terrain.x_m[1] - terrain.x_m[0]), abs(terrain.y_m[1] - terrain.y_m[0])))
+    near_spacing_m = None
+    if terrain_patch is not None and len(terrain_patch.x_m) > 1 and len(terrain_patch.y_m) > 1:
+        near_spacing_m = float(
+            min(abs(terrain_patch.x_m[1] - terrain_patch.x_m[0]), abs(terrain_patch.y_m[1] - terrain_patch.y_m[0]))
+        )
+    return {
+        "far_grid_spacing_m": round(far_spacing_m, 3),
+        "native_near_patch": terrain_patch is not None,
+        "near_grid_spacing_m": round(near_spacing_m, 3) if near_spacing_m is not None else None,
+        "native_near_patch_used_by": ["horizon", "cmaes_horizon_seed"] if terrain_patch is not None else [],
+        "full_pose_objective_uses_native_near_patch": False,
+    }
+
+
+def _cached_high_resolution_patch(lat_deg: float, lon_deg: float) -> Any:
+    """Load the finest cached Swiss terrain without triggering network access."""
+
+    from peakle.localize.paths import SWISS_DIR
+    from peakle.localize.swissdem import in_switzerland, load_swiss_patch
+
+    if not in_switzerland(lat_deg, lon_deg):
+        return None
+    try:
+        return load_swiss_patch(SWISS_DIR, lat_deg, lon_deg, res=2.0, radius_m=4500.0)
+    except Exception:
+        return None

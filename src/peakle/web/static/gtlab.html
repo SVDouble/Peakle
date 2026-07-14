@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>peakle · GT Lab</title>
+<link rel="icon" href="data:,">
 <style>
 :root { --bg:#101211; --panel:#181b1a; --line:#2a2e2c; --ink:#e8eae8; --ink2:#9aa09c;
   --accent:#3987e5; --good:#0ca30c; --warn:#fab219; --bad:#e34948; }
@@ -52,7 +53,7 @@ kbd { background:var(--line); border-radius:3px; padding:0 5px; font-size:11px; 
 <aside>
   <header>
     <h1>GT Lab — dataset debugger</h1>
-    <div class="sub">GT observation/PFM (warm colors) vs our DEM reconstruction (cool colors). <kbd>j</kbd>/<kbd>k</kbd> next/prev. Sorted worst-first.</div>
+    <div class="sub">Source-depth/PFM reference plus opt-in GT-v2 diagnostics. <kbd>j</kbd>/<kbd>k</kbd> next/prev. Sorted worst-first.</div>
   </header>
   <input id="search" placeholder="filter samples…">
   <ul id="samples"></ul>
@@ -60,8 +61,9 @@ kbd { background:var(--line); border-radius:3px; padding:0 5px; font-size:11px; 
 <main>
   <div id="stage-wrap"><div id="stage"><img class="base" id="photo" alt="photo"></div></div>
   <div id="controls">
-    <div class="group" id="g-gt"><b>Ground truth (from GT depth)</b></div>
-    <div class="group" id="g-dem"><b>DEM @ refined pose</b></div>
+    <div class="group" id="g-pfm"><b>Source-depth reference</b></div>
+    <div class="group" id="g-gt"><b>GT-v2 outline diagnostics</b></div>
+    <div class="group" id="g-dem"><b>GT-v2 reconstruction diagnostic</b></div>
     <div class="group"><b>Depth masks</b>
       <label class="toggle"><input type="checkbox" data-layer="gt_depth"><span class="swatch" style="background:#5aa0d0"></span>GT depth</label>
       <label class="toggle"><input type="checkbox" data-layer="dem_depth"><span class="swatch" style="background:#2a5a80"></span>DEM depth</label>
@@ -81,18 +83,18 @@ const COLORS = {
 };
 const PFM_COLOR = "#ffd84a";
 COLORS.gt.occ = "#ff961e";
-const DEFAULTS = new Set(["gt_sky", "pfm_sky", "gt_occ", "dem_sky", "dem_occ"]);
+const DEFAULTS = new Set(["pfm_sky"]);
 let samples = [], current = null;
 const stage = document.getElementById("stage"), photo = document.getElementById("photo");
 const layerImgs = {};
 
 function buildToggles() {
-  const gtHost = document.getElementById("g-gt");
+  const pfmHost = document.getElementById("g-pfm");
   const pfmLab = document.createElement("label");
   pfmLab.className = "toggle";
   pfmLab.innerHTML = `<input type="checkbox" data-layer="pfm_sky" checked>` +
-    `<span class="swatch" style="background:${PFM_COLOR}"></span>PFM/depth skyline`;
-  gtHost.appendChild(pfmLab);
+    `<span class="swatch" style="background:${PFM_COLOR}"></span>source-depth / PFM skyline`;
+  pfmHost.appendChild(pfmLab);
   for (const src of ["gt", "dem"]) {
     const host = document.getElementById(`g-${src}`);
     for (const [fam, label] of FAMS) {
@@ -201,7 +203,8 @@ document.addEventListener("keydown", (e) => {
   buildToggles();
   samples = await (await fetch("/api/gt/samples")).json();
   renderList();
-  if (samples.length) select(samples[0].name);
+  const requested = new URLSearchParams(location.search).get("sample");
+  if (samples.length) select(samples.some((sample) => sample.name === requested) ? requested : samples[0].name);
 })();
 </script>
 </body>

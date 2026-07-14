@@ -13,7 +13,7 @@ from PIL import Image, ImageOps
 from peakle.domain.camera import CameraExtrinsics
 from peakle.domain.contours import ImagePoint, SkylineContour
 from peakle.domain.coordinates import LocalPoint
-from peakle.localize.extract import extract_candidates
+from peakle.localize.extract import best_skyline_candidate, extract_candidates
 from peakle.scene.scene import Scene, View
 from peakle.scene.state import build_intrinsics
 from peakle.web.payloads import view_payload
@@ -221,11 +221,17 @@ def _load_photo(image_bytes: bytes) -> Image.Image:
 
 def _extract_photo_contour(photo: Image.Image) -> SkylineContour:
     rgb = np.asarray(photo, dtype=np.uint8)
-    candidates = sorted(extract_candidates(rgb).values(), key=lambda c: c.coverage, reverse=True)
-    if not candidates or candidates[0].coverage < MIN_SKYLINE_COVERAGE:
+    selected = best_skyline_candidate(extract_candidates(rgb), min_coverage=MIN_SKYLINE_COVERAGE)
+    if selected is None:
         raise HTTPException(status_code=422, detail="no usable skyline found in photo")
-    rows = candidates[0].rows
+    source, candidate = selected
+    rows = candidate.rows
     points = [
         ImagePoint(x_px=float(col), y_px=float(rows[col])) for col in range(photo.width) if np.isfinite(rows[col])
     ]
-    return SkylineContour(image_width_px=photo.width, image_height_px=photo.height, points=points, source="photo")
+    return SkylineContour(
+        image_width_px=photo.width,
+        image_height_px=photo.height,
+        points=points,
+        source=f"photo:{source}",
+    )

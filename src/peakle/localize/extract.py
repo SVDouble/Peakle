@@ -1,15 +1,17 @@
 """Photo skyline extraction with a self-assessment signal.
 
-Two INDEPENDENTLY parameterised sky detectors run on every photo; where they disagree about the
-skyline row, the extraction is untrustworthy at that column.  The aggregate ``agreement`` is a
+Every photo contour is derived from an explicit sky/terrain segmentation first.  Learned
+segmenters (SAM3, then MobileSAM/SAM2) are used when available; deterministic colour sky masks are
+always produced as a local fallback and as cross-checks.  Where independent masks disagree about
+the skyline row, the extraction is untrustworthy at that column.  The aggregate ``agreement`` is a
 garbage-input detector: it is computed WITHOUT ground truth, so it works on any photo, and it is
 validated against GT skylines on the GeoPose3K benchmark.
 
 Hard-won details encoded here:
 - test blue-DOMINANCE, not blueness (sunlit snow is bright and blue);
 - keep only the sky component connected to the top of the VALID image area — warped crops
-  (GeoPose3K cylindrical reprojections) have black borders, so "top of the image" is per-column
-  the first non-border pixel, NOT row 0;
+  (GeoPose3K cylindrical reprojections) have black borders, often with titles/watermarks, so the
+  valid area is the largest non-border component, not every non-black pixel;
 - never binary-close the raw mask (it erodes the top border to non-sky).
 
 ``extract_skyline_from_mask`` accepts an externally computed sky mask (e.g. a SAM3 segmenter's)
@@ -20,9 +22,23 @@ giving a cross-model consistency signal.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from scipy.ndimage import binary_fill_holes, label, median_filter
+
+SEGMENTER_KINDS = ("sam3", "mobile_sam", "sam2")
+SEGMENTER_PRIORITY = {
+    "sam3": 50,
+    "mobile_sam": 45,
+    "mobilesam": 45,
+    "sam2": 45,
+    "sam2.1": 45,
+    "dexined": 35,
+    "color": 25,
+    "blue": 10,
+    "bright": 10,
+}
 
 
 @dataclass
@@ -37,9 +53,22 @@ class ExtractedSkyline:
 
 
 def _valid_mask(rgb: np.ndarray) -> np.ndarray:
-    """Non-border pixels.  Warped crops pad with (near-)black; treat those as outside the image."""
+    """Main non-border image component.
 
-    return rgb.astype(int).sum(axis=2) > 40
+    Warped crops pad with near-black bands, and some samples add title/watermark text inside those
+    bands.  Treating that text as valid lets it seed the "top-connected sky" component; the next
+    real sky pixel below then becomes a false skyline.  Keep only the largest non-black component,
+    which is the actual crop content.
+    """
+
+    valid = rgb.astype(int).sum(axis=2) > 40
+    lab, n_labels = label(valid)
+    if n_labels <= 1:
+        return valid
+    counts = np.bincount(lab.ravel())
+    counts[0] = 0
+    main = int(np.argmax(counts))
+    return lab == main
 
 
 def _skyline_from_sky_mask(sky: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -80,6 +109,40 @@ def _color_sky_masks(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return sky_a, sky_b
 
 
+@lru_cache(maxsize=len(SEGMENTER_KINDS))
+def _available_segmenter(kind: str):
+    """Explicitly requested learned segmenter, or None when unavailable."""
+
+    try:
+        from peakle.segmenters import load_segmenter
+    except Exception:  # noqa: BLE001 - optional segmentation backends are not core deps
+        return None
+    return load_segmenter(kind)
+
+
+def _segmented_sky_masks(rgb: np.ndarray, backend: str = "color") -> dict[str, np.ndarray]:
+    """Sky masks used to compute contours.
+
+    This is the single photo-side segmentation stage.  All downstream contours are rows extracted
+    from one of these masks; no raw-image contour is accepted without a preceding sky/terrain mask.
+    """
+
+    masks: dict[str, np.ndarray] = {}
+    if backend in SEGMENTER_KINDS:
+        segmenter = _available_segmenter(backend)
+    else:
+        segmenter = None
+    if segmenter is not None:
+        try:
+            masks[segmenter.name] = segmenter.sky_mask(rgb.astype(np.float64) / 255.0).astype(bool)
+        except Exception:  # noqa: BLE001 - keep the app usable if an optional model fails at runtime
+            masks.pop(segmenter.name, None)
+    sky_a, sky_b = _color_sky_masks(rgb)
+    masks["blue"] = sky_a
+    masks["bright"] = sky_b
+    return masks
+
+
 def _fuse(rows_a: np.ndarray, rows_b: np.ndarray) -> tuple[np.ndarray, float]:
     both = np.isfinite(rows_a) & np.isfinite(rows_b)
     agree_mask = both & (np.abs(rows_a - rows_b) <= 3.0)
@@ -97,7 +160,7 @@ def _fuse(rows_a: np.ndarray, rows_b: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def extract_skyline(rgb: np.ndarray) -> ExtractedSkyline:
-    """Colour/brightness skyline with a two-detector agreement score."""
+    """Fallback colour-segmentation skyline with a two-mask agreement score."""
 
     valid = _valid_mask(rgb)
     sky_a, sky_b = _color_sky_masks(rgb)
@@ -196,32 +259,68 @@ def learned_skyline(rgb: np.ndarray) -> ExtractedSkyline | None:
     return ExtractedSkyline(rows=rows, coverage=float(np.isfinite(rows).mean()), agreement=agreement)
 
 
-def extract_candidates(rgb: np.ndarray) -> dict[str, ExtractedSkyline]:
+def extract_candidates(rgb: np.ndarray, backend: str = "color") -> dict[str, ExtractedSkyline]:
     """Independent skyline hypotheses for multi-hypothesis solving.
 
-    No image-side fusion can decide between them reliably (a haze boundary fools the blue
-    detector, clouds fool the bright detector, each on different photos) — solve each candidate
-    against the DEM and let the chamfer/alias diagnostics arbitrate.  Both candidates share the
-    ``agreement`` score so the disagreement signal survives into the solve records.
+    The first stage is always segmentation: each candidate starts as a sky mask, and only then is
+    converted into a skyline row profile.  No image-side fusion can decide between masks reliably
+    (a haze boundary fools the blue detector, clouds fool the bright detector, each on different
+    photos), so solve candidates separately against the DEM and let chamfer/alias diagnostics
+    arbitrate.  Candidates share an ``agreement`` score so disagreement survives into solve records.
     """
 
+    if backend not in {"color", "dexined", *SEGMENTER_KINDS}:
+        msg = f"unknown skyline extraction backend {backend!r}"
+        raise ValueError(msg)
     valid = _valid_mask(rgb)
-    sky_a, sky_b = _color_sky_masks(rgb)
-    rows_a = _skyline_from_sky_mask(sky_a, valid)
-    rows_b = _skyline_from_sky_mask(sky_b, valid)
+    masks = _segmented_sky_masks(rgb, backend)
+    rows_by_name = {name: _skyline_from_sky_mask(mask, valid) for name, mask in masks.items()}
+    rows_a = rows_by_name.get("blue", np.full(rgb.shape[1], np.nan))
+    rows_b = rows_by_name.get("bright", np.full(rgb.shape[1], np.nan))
     both = np.isfinite(rows_a) & np.isfinite(rows_b)
     agreement = float((both & (np.abs(rows_a - rows_b) <= 3.0)).sum() / max(both.sum(), 1)) if both.any() else 0.0
+    fused_rows, fused_agreement = _fuse(rows_a, rows_b)
     out = {
-        "blue": ExtractedSkyline(rows=rows_a, coverage=float(np.isfinite(rows_a).mean()), agreement=agreement),
-        "bright": ExtractedSkyline(rows=rows_b, coverage=float(np.isfinite(rows_b).mean()), agreement=agreement),
+        "color": ExtractedSkyline(
+            rows=fused_rows,
+            coverage=float(np.isfinite(fused_rows).mean()),
+            agreement=fused_agreement,
+        )
     }
-    try:
-        learned = learned_skyline(rgb)
-    except Exception:
-        learned = None
-    if learned is not None:
-        out["dexined"] = learned
+    for name, rows in rows_by_name.items():
+        out[name] = ExtractedSkyline(rows=rows, coverage=float(np.isfinite(rows).mean()), agreement=agreement)
+    if backend == "dexined":
+        try:
+            learned = learned_skyline(rgb)
+        except Exception:
+            learned = None
+        if learned is not None:
+            out["dexined"] = learned
     return out
+
+
+def best_skyline_candidate(
+    candidates: dict[str, ExtractedSkyline],
+    min_coverage: float = 0.10,
+) -> tuple[str, ExtractedSkyline] | None:
+    """Pick the preferred no-GT skyline candidate for photo import.
+
+    Prefer learned segmentation when present, then learned edge tracing, then fused colour
+    segmentation.  Coverage still matters, but it no longer lets a bad border/sky candidate beat a
+    better segmentation-backed candidate just because it covers a few more columns.
+    """
+
+    usable = [(name, candidate) for name, candidate in candidates.items() if candidate.coverage >= min_coverage]
+    if not usable:
+        return None
+    return max(
+        usable,
+        key=lambda item: (
+            SEGMENTER_PRIORITY.get(item[0], 0),
+            item[1].agreement,
+            item[1].coverage,
+        ),
+    )
 
 
 def extract_skyline_from_mask(sky_mask: np.ndarray, rgb: np.ndarray) -> ExtractedSkyline:

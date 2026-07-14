@@ -15,7 +15,9 @@ ASSETS: Path | None = None  # the report asset dir; set by main() (uri/img read 
 
 
 def uri(name: str) -> str:
-    p = ASSETS / name
+    assets = ASSETS
+    assert assets is not None  # main() initializes the report directory before rendering
+    p = assets / name
     mime = "image/png" if p.suffix == ".png" else "image/jpeg"
     return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}"
 

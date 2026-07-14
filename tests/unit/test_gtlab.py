@@ -5,6 +5,7 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+from PIL import Image
 
 from peakle.domain.coordinates import LocalPoint
 from peakle.web.api import gtlab
@@ -56,6 +57,126 @@ def test_rows_contour_uses_finite_in_frame_rows() -> None:
 
     assert contour.source == "gt_skyline"
     assert [(p.x_px, p.y_px) for p in contour.points] == [(0.0, 10.0), (3.0, 20.5), (5.0, 8.0)]
+
+
+def test_open_gt_view_separates_photo_default_from_pfm_oracle(monkeypatch, tmp_path) -> None:
+    photo_path = tmp_path / "photo.jpg"
+    Image.new("RGB", (8, 4), (100, 140, 180)).save(photo_path)
+    sample = SimpleNamespace(
+        name="sample-a",
+        photo_path=photo_path,
+        depth_path=tmp_path / "depth.pfm",
+        lat=46.0,
+        lon=7.0,
+        elev_m=1500.0,
+        yaw_gt_deg=42.0,
+        pitch_gt_deg=3.0,
+        roll_gt_deg=2.0,
+    )
+    rec = {
+        "name": "sample-a",
+        "width": 8,
+        "height": 4,
+        "fov_deg": 50.0,
+        "yaw_deg": 170.0,
+        "de_m": 120.0,
+        "dn_m": -80.0,
+        "cam_z_m": 3100.0,
+        "dv_px": 40.0,
+    }
+
+    class Frame:
+        def geo_to_local(self, _point):
+            return LocalPoint(east_m=5.0, north_m=6.0, up_m=0.0)
+
+    terrain = SimpleNamespace(
+        frame=Frame(),
+        x_m=np.asarray([-100.0, 100.0]),
+        y_m=np.asarray([-100.0, 100.0]),
+        elevation_at=lambda _east, _north: 2000.0,
+    )
+
+    class Scene:
+        def __init__(self):
+            self.terrain = terrain
+            self.captured = None
+
+        def add_gt_view(self, *args, **kwargs):
+            self.captured = (args, kwargs)
+            return "view"
+
+    scene = Scene()
+    monkeypatch.setattr(gtlab, "_index", lambda: {"sample-a": rec})
+    monkeypatch.setattr(gtlab, "load_sample", lambda _path: sample)
+    monkeypatch.setattr(gtlab, "resampled_oracle_skyline", lambda *_args: np.asarray([1.0] * 8))
+    photo_candidate = SimpleNamespace(rows=np.asarray([2.0] * 8), coverage=1.0, agreement=0.75)
+    monkeypatch.setattr(gtlab, "extract_candidates", lambda *_args, **_kwargs: {"color": photo_candidate})
+
+    assert gtlab._open_gt_view(scene, "sample-a") == "view"
+    args, kwargs = scene.captured
+    extrinsics = args[2]
+    contour = args[3]
+    prior = kwargs["prior"]
+    assert extrinsics.yaw_deg == 42.0
+    assert extrinsics.pitch_deg == 3.0
+    assert extrinsics.position == LocalPoint(east_m=5.0, north_m=6.0, up_m=1500.0)
+    assert contour.source == "photo_auto:color"
+    assert prior.position == extrinsics.position
+    assert prior.horizontal_sigma_m == 200.0
+    assert prior.yaw_sigma_deg == 15.0
+    assert kwargs["default_evidence_source"] == "photo_auto"
+    assert kwargs["pitch_comparable"] is False
+    assert kwargs["evidence_contours"]["photo_auto"].source == "photo_auto:color"
+    assert kwargs["evidence_contours"]["pfm_oracle"].source == "pfm_oracle"
+    assert kwargs["evidence_metadata"]["photo_auto"]["selection_uses_ground_truth"] is False
+    assert kwargs["evidence_metadata"]["pfm_oracle"]["diagnostic"] is True
+
+
+def test_open_gt_view_does_not_fall_back_when_photo_evidence_is_unavailable(monkeypatch, tmp_path) -> None:
+    photo_path = tmp_path / "photo.jpg"
+    Image.new("RGB", (8, 4), (100, 140, 180)).save(photo_path)
+    sample = SimpleNamespace(
+        photo_path=photo_path,
+        depth_path=tmp_path / "depth.pfm",
+        lat=46.0,
+        lon=7.0,
+        elev_m=1500.0,
+        yaw_gt_deg=42.0,
+        pitch_gt_deg=3.0,
+        roll_gt_deg=0.0,
+    )
+    rec = {"name": "sample-a", "width": 8, "height": 4, "fov_deg": 50.0}
+
+    class Frame:
+        def geo_to_local(self, _point):
+            return LocalPoint(east_m=0.0, north_m=0.0, up_m=0.0)
+
+    terrain = SimpleNamespace(
+        frame=Frame(),
+        x_m=np.asarray([-1.0, 1.0]),
+        y_m=np.asarray([-1.0, 1.0]),
+    )
+
+    class Scene:
+        def __init__(self):
+            self.terrain = terrain
+            self.kwargs = None
+
+        def add_gt_view(self, *_args, **kwargs):
+            self.kwargs = kwargs
+            return "view"
+
+    scene = Scene()
+    monkeypatch.setattr(gtlab, "_index", lambda: {"sample-a": rec})
+    monkeypatch.setattr(gtlab, "load_sample", lambda _path: sample)
+    monkeypatch.setattr(gtlab, "resampled_oracle_skyline", lambda *_args: np.asarray([1.0] * 8))
+    monkeypatch.setattr(gtlab, "extract_candidates", lambda *_args, **_kwargs: {})
+
+    assert gtlab._open_gt_view(scene, "sample-a") == "view"
+    assert scene.kwargs["default_evidence_source"] == "photo_auto"
+    assert "photo_auto" not in scene.kwargs["evidence_contours"]
+    assert scene.kwargs["evidence_metadata"]["photo_auto"]["available"] is False
+    assert "pfm_oracle" in scene.kwargs["evidence_contours"]
 
 
 def test_scene_rows_uses_current_terrain_frame_and_refined_offsets(monkeypatch) -> None:

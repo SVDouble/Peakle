@@ -284,9 +284,11 @@ function createPeakGlyphTexture() {
   element.height = size;
   const context = element.getContext("2d");
   context.beginPath();
-  context.moveTo(size * 0.5, size * 0.12);
-  context.lineTo(size * 0.86, size * 0.82);
-  context.lineTo(size * 0.14, size * 0.82);
+  // The texture is uploaded without WebGL's deprecated unpack y-flip flag. Draw the glyph
+  // inverted on the source canvas so the sprite still appears point-up in texture coordinates.
+  context.moveTo(size * 0.5, size * 0.88);
+  context.lineTo(size * 0.86, size * 0.18);
+  context.lineTo(size * 0.14, size * 0.18);
   context.closePath();
   context.fillStyle = "#e2483a";
   context.fill();
@@ -296,6 +298,8 @@ function createPeakGlyphTexture() {
   context.stroke();
   const texture = new THREE.CanvasTexture(element);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = false;
+  texture.premultiplyAlpha = false;
   return texture;
 }
 

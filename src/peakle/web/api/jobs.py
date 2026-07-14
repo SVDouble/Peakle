@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from peakle.scene.scene import Scene
-from peakle.web.api import gtlab
 from peakle.web.jobs import JobQueue
 from peakle.web.payloads import solve_summary
 from peakle.web.schemas import JobCreateRequest
@@ -44,8 +43,8 @@ async def get_job(job_id: str, request: Request) -> dict[str, Any]:
 async def create_job(body: JobCreateRequest, request: Request) -> dict[str, Any]:
     """Enqueue solving for one or more views.
 
-    A view id may be a loaded mutable scene view id or a GT catalogue view name. The resolver picks
-    the correct backing implementation.
+    Targets must be loaded scene views. Catalogue-wide pose evaluation belongs to the immutable
+    benchmark runner; it must not mutate/rebuild GT records as a side effect of a solve request.
     """
 
     view_ids = _unique_ids(body.view_ids)
@@ -55,15 +54,14 @@ async def create_job(body: JobCreateRequest, request: Request) -> dict[str, Any]
     scene = _scene(request)
     async with request.app.state.scene_lock:
         loaded_view_ids = set(scene.views)
-    index = gtlab._index()
-    catalogue_view_ids = set(index)
-
-    loaded_targets = [view_id for view_id in view_ids if view_id in loaded_view_ids]
-    unknown = [view_id for view_id in view_ids if view_id not in loaded_view_ids and view_id not in catalogue_view_ids]
-    if unknown:
-        raise HTTPException(status_code=404, detail=f"unknown views: {unknown[:5]}")
-    if loaded_targets and body.strategy is None:
-        raise HTTPException(status_code=400, detail="strategy is required for loaded view targets")
+    unloaded = [view_id for view_id in view_ids if view_id not in loaded_view_ids]
+    if unloaded:
+        raise HTTPException(
+            status_code=400,
+            detail=f"catalogue targets must be opened as views or run through the benchmark: {unloaded[:5]}",
+        )
+    if body.strategy is None:
+        raise HTTPException(status_code=400, detail="strategy is required")
 
     strategy = body.strategy
     params = dict(body.params)
@@ -71,14 +69,12 @@ async def create_job(body: JobCreateRequest, request: Request) -> dict[str, Any]
 
     def solve(payload: dict[str, Any]) -> dict[str, Any]:
         view_id = str(payload["view_id"])
-        if view_id in scene.views:
-            if strategy is None:
-                msg = "strategy is required for loaded view targets"
-                raise ValueError(msg)
-            result = scene.run_solve(view_id, strategy, params)
-            solution_store.save(scene.views[view_id], result)
-            return {"view_id": view_id, "pose": solve_summary(result)}
-        return {"view_id": view_id, "pose": _solve_catalogue_view(view_id)}
+        if strategy is None:  # guarded above; keeps the closure type-safe
+            msg = "strategy is required"
+            raise ValueError(msg)
+        result = scene.run_solve(view_id, strategy, params)
+        solution_store.save(scene.views[view_id], result)
+        return {"view_id": view_id, "pose": solve_summary(result)}
 
     tasks = [{"label": view_id, "payload": {"view_id": view_id}} for view_id in view_ids]
     return _queue(request).submit(
@@ -88,21 +84,6 @@ async def create_job(body: JobCreateRequest, request: Request) -> dict[str, Any]
         params={"view_ids": view_ids, "strategy": strategy, "params": params},
         max_workers=body.max_workers,
     )
-
-
-def _solve_catalogue_view(name: str) -> dict[str, Any]:
-    from peakle.localize.gtbuild import build_one
-
-    rec = build_one(name).to_dict()
-    return {
-        "name": rec["name"],
-        "quality": rec.get("quality"),
-        "sky_cons_px": rec.get("sky_cons_px"),
-        "pfm_cons_px": rec.get("pfm_cons_px"),
-        "contour_cons_px": rec.get("contour_cons_px"),
-        "obs_source": rec.get("obs_source"),
-        "reasons": rec.get("reasons", []),
-    }
 
 
 def _unique_ids(view_ids: list[str]) -> list[str]:

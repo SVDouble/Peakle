@@ -77,6 +77,7 @@ def build_tile(rec: dict, out: Path, do_polish: bool) -> dict:
 
     im = Image.fromarray(np.clip(rgb.astype(float) * 1.15, 0, 255).astype(np.uint8))
     px = im.load()
+    assert px is not None  # this in-memory RGB image always exposes pixel access
     dem_rows = fit["rows"] + fit["dv"]
     obs_arr = obs
     # GT internal contours (from the GT depth itself) — the reference the DEM contours must match

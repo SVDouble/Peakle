@@ -59,15 +59,15 @@ export function buildLayout(rootElement) {
       type: "branch",
       size: leftWidth,
       data: [
-        leaf(Math.round(height * 0.6), panel("views"), panel("config")),
-        leaf(Math.round(height * 0.4), panel("overview")),
+        leaf(Math.round(height * 0.64), panel("views"), panel("config")),
+        leaf(Math.round(height * 0.36), panel("overview")),
       ],
     },
     leaf(mapWidth, panel("map")),
     {
       type: "branch",
       size: rightWidth,
-      data: [leaf(Math.round(height * 0.58), panel("camera")), leaf(Math.round(height * 0.42), panel("solve"))],
+      data: [leaf(Math.round(height * 0.55), panel("camera")), leaf(Math.round(height * 0.45), panel("solve"))],
     },
   ];
 

@@ -20,6 +20,7 @@ from scipy.optimize import differential_evolution, minimize
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.contours import SkylineContour
 from peakle.domain.pose import FitMetrics, PoseEstimate, PosePrior
+from peakle.domain.projection import ImageProjectionName
 from peakle.domain.terrain import TerrainMap
 from peakle.optimization.contour_database import contour_database_seeds
 from peakle.optimization.horizon import horizon_seeds
@@ -39,43 +40,50 @@ STRATEGIES = ("horizon", "contourdb", "cmaes", "powell", "nelder", "evolution", 
 AVAILABLE_STRATEGIES = [
     {
         "name": "horizon",
-        "label": "Horizon (validated)",
-        "blurb": "The ray-cast 360 deg horizon solver validated on GeoPose3K: median-centered "
-        "shift chamfer with top-K basin polish and honesty diagnostics "
-        "(alias ratio, SNR, verdict). Solves yaw/pitch at the prior position.",
+        "label": "Horizon (orientation baseline)",
+        "projections": ["pinhole", "cyltan"],
+        "blurb": "The only current strategy with credible real-data evidence. It solves effective crop "
+        "orientation at the supplied position; its confidence remains uncalibrated.",
     },
     {
         "name": "contourdb",
-        "label": "Contour DB (seeded)",
+        "label": "Contour DB (experimental)",
+        "projections": ["pinhole", "cyltan"],
         "blurb": "Precomputes compact skyline snapshots from ring viewpoints around the massif, ranks them by "
         "normalized contour shape/depth, then locally refines the best matches with the selected priors.",
     },
     {
         "name": "cmaes",
-        "label": "CMA-ES (adaptive)",
+        "label": "CMA-ES (experimental)",
+        "projections": ["pinhole", "cyltan"],
         "blurb": "Covariance Matrix Adaptation Evolution Strategy over the full 5-DOF pose. "
         "Better suited to coupled position/yaw/pitch basins than fixed simplex or direction-set search, "
         "then polished locally.",
     },
     {
         "name": "powell",
-        "label": "Powell (local)",
+        "label": "Powell (experimental)",
+        "projections": ["pinhole", "cyltan"],
         "blurb": "Coarse pose scan around the prior, then Powell direction-set refinement.",
     },
     {
         "name": "nelder",
-        "label": "Nelder-Mead (local)",
+        "label": "Nelder-Mead (experimental)",
+        "projections": ["pinhole", "cyltan"],
         "blurb": "Derivative-free simplex refining the full pose from the prior.",
     },
     {
         "name": "evolution",
-        "label": "Differential evolution",
+        "label": "Differential evolution (experimental)",
+        "projections": ["pinhole", "cyltan"],
         "blurb": "Population-based search across the bounded pose box around the prior.",
     },
     {
         "name": "global",
-        "label": "Global (no prior)",
-        "blurb": "Prior-free: 360 deg horizon correlation across the whole map for position + yaw, then local refine.",
+        "label": "Regional skyline grid (experimental)",
+        "projections": ["pinhole", "cyltan"],
+        "blurb": "No pose prior, but requires a supplied terrain window. Seeds a 20×20 position grid with "
+        "a fixed 2 m camera height and zero crop-pitch nuisance, then refines locally. Not country-scale.",
     },
 ]
 
@@ -133,7 +141,9 @@ class PoseSolveResult(BaseModel):
         candidates: Distinct plausible poses (best first). For a prior-free search
             of an ambiguous outline this holds every well-separated location that
             fits; for prior-based strategies it is just the single estimate.
-        trace: Ordered convergence frames.
+        trace: Ordered, uniformly sampled convergence frames. Derived debug views
+            can be reconstructed from each frame's pose/profile plus the terrain
+            and camera model.
     """
 
     strategy: str
@@ -160,8 +170,9 @@ def solve_pose(
     seed: int | None = None,
     use_position_prior: bool = True,
     use_orientation_prior: bool = True,
-    projection: str = "pinhole",
+    projection: ImageProjectionName = "pinhole",
     horizontal_fov_deg: float | None = None,
+    terrain_patch: Any = None,
 ) -> PoseSolveResult:
     """Recovers a full camera pose from an observed contour and a prior.
 
@@ -176,9 +187,11 @@ def solve_pose(
         seed: Optional seed for stochastic strategies.
         use_position_prior: Whether to keep the position prior penalty/bounds.
         use_orientation_prior: Whether to keep yaw/pitch prior penalty/bounds.
-        projection: Crop geometry for the `horizon` strategy ("pinhole" for a
-            synthetic camera, "cyltan" for a GeoPose3K crop / materialized GT view).
+        projection: Image geometry ("pinhole" for a synthetic camera,
+            "cyltan" for a GeoPose3K crop / materialized GT view).
         horizontal_fov_deg: Image camera horizontal FOV. Defaults to the pinhole intrinsics FOV.
+        terrain_patch: Optional native-resolution near-field terrain patch used by ray-cast horizon
+            solves. Full-pose point objectives do not consume it yet and must disclose that limitation.
 
     Returns:
         The estimated pose, fit metrics, and a convergence trace.
@@ -186,6 +199,9 @@ def solve_pose(
 
     if strategy not in STRATEGIES:
         msg = f"unknown strategy {strategy!r}; expected one of {STRATEGIES}"
+        raise ValueError(msg)
+    if projection not in {"pinhole", "cyltan"}:
+        msg = f"unsupported image projection {projection!r}; expected 'pinhole' or 'cyltan'"
         raise ValueError(msg)
 
     if strategy == "horizon":
@@ -197,6 +213,7 @@ def solve_pose(
             truth,
             projection=projection,
             horizontal_fov_deg=horizontal_fov_deg,
+            terrain_patch=terrain_patch,
         )
 
     renderer = SyntheticRenderer()
@@ -223,6 +240,8 @@ def solve_pose(
         terrain_stride=objective_stride,
         use_position_prior=use_position_prior,
         use_orientation_prior=use_orientation_prior,
+        projection=projection,
+        horizontal_fov_deg=horizontal_fov_deg,
     )
     traced = _TracedSolve(objective, terrain, renderer, reduced, trace_stride)
     cma_start_theta = None
@@ -234,6 +253,7 @@ def solve_pose(
             prior,
             projection=projection,
             horizontal_fov_deg=horizontal_fov_deg,
+            terrain_patch=terrain_patch,
         )
 
     if strategy == "powell":
@@ -255,10 +275,14 @@ def solve_pose(
     if truth is not None:
         estimate = add_synthetic_truth_metrics(estimate, truth)
 
-    # Reduced predicted outline (accurate triangle skyline) drives the plot and
-    # the match metric; the crisp full-width overlay uses the fast skyline.
-    predicted_reduced = renderer.skyline_profile(terrain, reduced, estimate.extrinsics, stride=1)
-    predicted_full = renderer.fast_skyline(objective._points, intrinsics, estimate.extrinsics)
+    # A pinhole view keeps the accurate triangle skyline for the reduced plot.
+    # Cylindrical crops must use the same point projection as the objective;
+    # passing them through the perspective rasterizer changes both axes.
+    if projection == "cyltan":
+        predicted_reduced = objective.predict_profile(estimate.extrinsics)
+    else:
+        predicted_reduced = renderer.skyline_profile(terrain, reduced, estimate.extrinsics, stride=1)
+    predicted_full = objective.predict_profile(estimate.extrinsics, intrinsics)
 
     if traced.candidates:
         candidates = [
@@ -288,15 +312,18 @@ def _solve_horizon(
     intrinsics: CameraIntrinsics,
     prior: PosePrior,
     truth: CameraExtrinsics | None,
-    projection: str = "pinhole",
+    projection: ImageProjectionName = "pinhole",
     horizontal_fov_deg: float | None = None,
+    terrain_patch: Any = None,
 ) -> PoseSolveResult:
-    """The validated peakle.localize horizon solver, adapted to the workbench.
+    """The orientation-only peakle.localize horizon baseline, adapted to the workbench.
 
     Orientation-only by design: the 360° elevation profile is computed once at the
     prior position and every (yaw, pitch) hypothesis is a resampling of it, scored
     with the median-centered shift chamfer + top-K basin polish. Its honesty
-    diagnostics (alias ratio, SNR, verdict) ride along in ``diagnostics``.
+    diagnostics (alias ratio, SNR, uncalibrated verdict) ride along in
+    ``diagnostics``.  The current real-data matrix supports using this method as a
+    yaw baseline at a supplied position; it does not validate a full camera pose.
 
     ``projection`` is "pinhole" for a synthetic placed camera and "cyltan" for a
     GeoPose3K crop (a materialized GT view) — the crop geometry is truly cylindrical
@@ -320,6 +347,7 @@ def _solve_horizon(
         step=max(grid_step / 2.0, 10.0),
         cam_e=position.east_m,
         cam_n=position.north_m,
+        patch=terrain_patch,
     )
     solve = solve_orientation(obs, height, profile, fov_deg=hfov_deg, projection=projection, pitch_bounds=pitch_bounds)
 
@@ -337,7 +365,10 @@ def _solve_horizon(
         iterations=1,
         success=True,
         message=f"verdict {solve.verdict}",
-        confidence=0.9 if solve.verdict == "CONFIRMED" else 0.4,
+        # The old CONFIRMED thresholds were fitted against the retired GT-v2
+        # reconstruction.  Preserve the diagnostic verdict in ``message`` for
+        # traceability, but do not expose it as calibrated confidence.
+        confidence=0.0,
         position_error_m=None,
         yaw_error_deg=None,
         pitch_error_deg=None,
@@ -394,8 +425,9 @@ def _horizon_orientation_start(
     contour: SkylineContour,
     intrinsics: CameraIntrinsics,
     prior: PosePrior,
-    projection: str,
+    projection: ImageProjectionName,
     horizontal_fov_deg: float | None,
+    terrain_patch: Any = None,
 ) -> NDArray[np.float64] | None:
     """Returns a 5-DOF theta seeded with horizon yaw/pitch, or `None` if rejected."""
 
@@ -412,6 +444,7 @@ def _horizon_orientation_start(
         step=max(grid_step / 2.0, 10.0),
         cam_e=position.east_m,
         cam_n=position.north_m,
+        patch=terrain_patch,
     )
     solve = solve_orientation(
         contour.to_profile(),
@@ -471,7 +504,10 @@ class _TracedSolve:
 
     def record(self, *_args: object) -> None:
         extrinsics = self.objective.extrinsics_from_theta(self.best_theta)
-        profile = self.renderer.skyline_profile(self.terrain, self.reduced, extrinsics, stride=self.terrain_stride)
+        if self.objective.projection == "cyltan":
+            profile = self.objective.predict_profile(extrinsics)
+        else:
+            profile = self.renderer.skyline_profile(self.terrain, self.reduced, extrinsics, stride=self.terrain_stride)
         self.frames.append(
             SolveFrame(
                 east_m=extrinsics.position.east_m,
@@ -602,7 +638,7 @@ def _cma_scales(objective: PoseObjective, bounds: list[tuple[float, float]]) -> 
 
 
 def _run_global(traced: _TracedSolve) -> None:
-    """Prior-free localization: horizon-correlation seeds, then local refine.
+    """Regional localization without a pose prior: horizon seeds, then local refine.
 
     Finds the best whole-map (position, yaw) candidates by correlating the
     observed outline against each candidate's 360 deg terrain horizon, then
@@ -610,23 +646,23 @@ def _run_global(traced: _TracedSolve) -> None:
     """
 
     objective = traced.objective
-    prior = objective.prior
     terrain = objective.terrain
-    eye_height_m = float(
-        np.clip(prior.position.up_m - terrain.elevation_at(prior.position.east_m, prior.position.north_m), 2.0, 4000.0)
-    )
     seeds = horizon_seeds(
         terrain,
         objective.observed_profile,
         objective.intrinsics,
-        pitch_deg=prior.pitch_deg,
-        eye_height_m=eye_height_m,
+        # Do not leak the dummy PosePrior into this regime. The fixed values are
+        # explicit search assumptions; crop pitch is refined by the objective.
+        pitch_deg=0.0,
+        eye_height_m=2.0,
         grid_east=20,
         grid_north=20,
         n_bins=180,
         max_columns=80,
         top_k=8,
         terrain_stride=objective.terrain_stride,
+        projection=objective.projection,
+        horizontal_fov_deg=objective.horizontal_fov_deg,
     )
     _polish_seed_thetas(
         traced,
@@ -654,6 +690,8 @@ def _run_contour_database(traced: _TracedSolve) -> None:
         objective.prior,
         traced.renderer,
         objective.terrain_stride,
+        projection=objective.projection,
+        horizontal_fov_deg=objective.horizontal_fov_deg,
     )
     _polish_seed_thetas(
         traced,
@@ -821,7 +859,10 @@ def _final_estimate(
 
     extrinsics = traced.objective.extrinsics_from_theta(traced.best_theta)
     observed_profile = contour.to_profile()
-    predicted = renderer.skyline_profile(terrain, intrinsics, extrinsics, stride=1)
+    if traced.objective.projection == "cyltan":
+        predicted = traced.objective.predict_profile(extrinsics, intrinsics)
+    else:
+        predicted = renderer.skyline_profile(terrain, intrinsics, extrinsics, stride=1)
     residuals = robust_contour_residuals(predicted, observed_profile)
     mae, p95, valid_columns = residual_summary(residuals)
     observed_valid = int(np.sum(np.isfinite(observed_profile)))
@@ -886,7 +927,7 @@ def _reduce_profile(
 
 
 def _subsample_frames(frames: list[SolveFrame], limit: int) -> list[SolveFrame]:
-    """Evenly subsamples frames to at most `limit`, always keeping the last."""
+    """Evenly subsample frames to at most ``limit``, always retaining the last."""
 
     if len(frames) <= limit:
         return frames

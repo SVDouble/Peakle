@@ -8,33 +8,45 @@ import { api } from "../api.js";
 import { el, fitContainBox, setBox, svgElement } from "../format.js";
 import { candidatePrimaryKey, comparisonText, defaultCompareKeys, poseCandidates, poseTargetKey, selectedPoseTarget } from "../pose-candidates.js";
 
-// Per-family layer toggles. GT/DEM colors mirror gtlab.py _COLORS.
-const GT_POSE_LAYERS = [
-  ["gt_sky", "Observed skyline", "#00e65a"],
-  ["pfm_sky", "PFM skyline", "#ffd84a"],
+// The PFM/source-depth skyline is the reference track. GT-v2 substituted outlines and their
+// refined-pose DEM reconstruction are diagnostics only and start disabled.
+const SOURCE_DEPTH_REFERENCE_LAYERS = [
+  ["pfm_sky", "Source-depth / PFM skyline", "#ffd84a"],
+];
+const GT_V2_DIAGNOSTIC_LAYERS = [
+  ["gt_sky", "Substituted skyline", "#00e65a"],
   ["gt_occ", "Occlusion", "#ff961e"],
   ["gt_rib", "Ribs / spurs", "#ffeb3b"],
   ["gt_cou", "Couloirs", "#e86edc"],
+  ["dem_sky", "GT-v2 DEM skyline", "#00c8ff"],
+  ["dem_occ", "GT-v2 DEM occlusion", "#ff4646"],
+  ["dem_rib", "GT-v2 DEM ribs / spurs", "#50aaff"],
+  ["dem_cou", "GT-v2 DEM couloirs", "#aa5aff"],
 ];
-const DEM_POSE_LAYERS = [
-  ["dem_sky", "Skyline", "#00c8ff"],
-  ["dem_occ", "Occlusion", "#ff4646"],
-  ["dem_rib", "Ribs / spurs", "#50aaff"],
-  ["dem_cou", "Couloirs", "#aa5aff"],
+const SOLVED_POSE_LAYERS = [
+  ["sky", "Skyline", "#ff8c42"],
+  ["occ", "Occlusion", "#ff5252"],
+  ["rib", "Ribs / spurs", "#ffcc40"],
+  ["cou", "Couloirs", "#d768ff"],
+  ["depth", "Depth", "#5aa0d0"],
 ];
 const OTHER_LAYERS = [
   ["edges", "Photo edges", "#f5f5f5"],
   ["gt_depth", "GT depth", "#5aa0d0"],
   ["dem_depth", "DEM depth", "#2a5a80"],
 ];
-export const GT_LAYER_NAMES = [...GT_POSE_LAYERS, ...DEM_POSE_LAYERS, ...OTHER_LAYERS].map(([layer]) => layer);
+export const GT_LAYER_NAMES = [...SOURCE_DEPTH_REFERENCE_LAYERS, ...GT_V2_DIAGNOSTIC_LAYERS, ...OTHER_LAYERS].map(([layer]) => layer);
 
 export function setupCameraPanel(store, root) {
   const image = el("img", { class: "camera-image", alt: "Rendered view" });
   const overlay = svgElement("svg", { class: "camera-overlay" });
   overlay.setAttribute("preserveAspectRatio", "none");
   const gtOverlays = el("div", { class: "gt-overlays" });
-  const box = el("div", { class: "frame-box camera-box" }, [image, overlay, gtOverlays]);
+  const imageLoading = el("div", { class: "camera-image-loading", hidden: true }, [
+    el("span", { class: "app-loading-spinner" }),
+    el("span", { text: "Loading image..." }),
+  ]);
+  const box = el("div", { class: "frame-box camera-box" }, [image, overlay, gtOverlays, imageLoading]);
   const placeholder = el("p", { class: "control-hint", text: "Select a view to inspect it." });
   const legend = el("div", { class: "camera-image-legend" }, [
     el("span", { html: '<i class="observed-swatch"></i>Observed (truth)' }),
@@ -85,6 +97,12 @@ export function setupCameraPanel(store, root) {
     updateCompareKeys("b");
     layoutAndDraw();
   });
+  image.addEventListener("load", () => {
+    imageLoading.hidden = true;
+  });
+  image.addEventListener("error", () => {
+    imageLoading.hidden = true;
+  });
 
   function syncPhotoOverlayInput() {
     photoOverlayInput.checked = store.photoOpacity > 0;
@@ -106,7 +124,7 @@ export function setupCameraPanel(store, root) {
     }
     const selectedView = store.selectedView();
     const selectedViewSample = selectedView?.gt_name ? store.gtByName(selectedView.gt_name) : null;
-    if (store.activePoseKey?.() === "gt-depth" && selectedViewSample) {
+    if (selectedViewSample) {
       layoutGtSample(selectedViewSample);
       return;
     }
@@ -114,12 +132,14 @@ export function setupCameraPanel(store, root) {
     gtOverlays.replaceChildren();
     const view = selectedView;
     if (!view) {
+      cameraFrame.hidden = true;
       box.hidden = true;
       legend.hidden = true;
       compareControls.hidden = true;
       placeholder.hidden = false;
       return;
     }
+    cameraFrame.hidden = false;
     box.hidden = false;
     legend.hidden = false;
     placeholder.hidden = true;
@@ -137,6 +157,7 @@ export function setupCameraPanel(store, root) {
       : `${api.viewImageUrl(view.id)}?p=${encodeURIComponent(poseNonce(view))}`;
     if (image.dataset.src !== desiredSrc) {
       image.dataset.src = desiredSrc;
+      imageLoading.hidden = false;
       image.src = desiredSrc;
     }
     drawOverlay(view, fit);
@@ -149,7 +170,7 @@ export function setupCameraPanel(store, root) {
     const targetChanged = targetKey !== lastCompareTargetKey;
     lastCompareTargetKey = targetKey;
     syncComparisonKeys(candidates, targetChanged);
-    renderGtToggleGroups(candidates);
+    renderGtToggleGroups(candidates, targetInfo);
     compareControls.hidden = candidates.length === 0;
     if (!candidates.length) {
       compareList.replaceChildren();
@@ -197,11 +218,18 @@ export function setupCameraPanel(store, root) {
     compareKeys = [a, b].filter(Boolean);
   }
 
-  function renderGtToggleGroups(candidates) {
-    const selected = compareKeys.map((key) => candidates.find((candidate) => candidate.key === key)).filter(Boolean);
-    const groups = selected
-      .map((candidate, index) => poseToggleGroup(`Pose ${index === 0 ? "A" : "B"} · ${candidate.label}`, poseLayerDefs(candidate)))
+  function renderGtToggleGroups(candidates, targetInfo) {
+    const activeKey = activeCandidateKey();
+    const groups = candidates
+      .map((candidate) => {
+        const prefix = candidate.key === activeKey ? "Selected · " : "";
+        return poseToggleGroup(`${prefix}${candidate.label}`, poseLayerDefs(candidate, targetInfo));
+      })
       .filter(Boolean);
+    const diagnostics = diagnosticLayerDefs(targetInfo);
+    if (diagnostics.length) {
+      groups.push(toggleGroup("GT-v2 diagnostics · not solve evidence", diagnostics));
+    }
     groups.push(toggleGroup("Other", OTHER_LAYERS.map(layerDef), [photoOverlayToggle]));
     gtToggleGroups.replaceChildren(...groups);
   }
@@ -227,18 +255,22 @@ export function setupCameraPanel(store, root) {
     ]);
   }
 
-  function poseLayerDefs(candidate) {
+  function poseLayerDefs(candidate, targetInfo) {
     if (!candidate) {
       return [];
     }
     if (candidate.key === "gt-depth") {
-      return GT_POSE_LAYERS.map(layerDef);
+      return SOURCE_DEPTH_REFERENCE_LAYERS.map(layerDef);
     }
     if (candidate.key === "truth") {
-      return DEM_POSE_LAYERS.map(layerDef);
+      const view = poseLayerView(targetInfo);
+      return view ? SOLVED_POSE_LAYERS.map(([family, label, color]) => poseApiLayer(view.id, "truth", family, label, color)) : [];
     }
     if (candidate.key.startsWith("solve:")) {
-      return [layerDef([`${candidate.key}:sky`, "Skyline", "#ff8c42", "solve"])];
+      const view = poseLayerView(targetInfo);
+      return view
+        ? SOLVED_POSE_LAYERS.map(([family, label, color]) => poseApiLayer(view.id, candidate.key, family, label, color))
+        : [];
     }
     return [];
   }
@@ -247,14 +279,38 @@ export function setupCameraPanel(store, root) {
     return { key, label, color, source };
   }
 
-  function layerChecked(layer) {
-    return store.gtDisplay[layer.key] ?? (layer.key.endsWith("_sky") || layer.key.endsWith(":sky"));
+  function poseApiLayer(viewId, poseKey, family, label, color) {
+    return {
+      key: `${viewId}:${poseKey}:${family}`,
+      label,
+      color,
+      source: "pose",
+      viewId,
+      poseKey,
+      family,
+      defaultChecked: family === "sky" && poseKey === activeCandidateKey(),
+    };
   }
 
-  function enabledOverlayLayers(candidates) {
-    const selected = compareKeys.map((key) => candidates.find((candidate) => candidate.key === key)).filter(Boolean);
+  function layerChecked(layer) {
+    return store.gtDisplay[layer.key] ?? Boolean(layer.defaultChecked);
+  }
+
+  function diagnosticLayerDefs(targetInfo) {
+    return targetInfo?.sample || targetInfo?.view?.gt_name ? GT_V2_DIAGNOSTIC_LAYERS.map(layerDef) : [];
+  }
+
+  function poseLayerView(targetInfo) {
+    if (targetInfo?.kind === "gt") {
+      return targetInfo.view ?? store.gtViewForSample?.(targetInfo.sample.name) ?? null;
+    }
+    return targetInfo?.view ?? null;
+  }
+
+  function enabledOverlayLayers(candidates, targetInfo) {
     return [
-      ...selected.flatMap((candidate) => poseLayerDefs(candidate)),
+      ...candidates.flatMap((candidate) => poseLayerDefs(candidate, targetInfo)),
+      ...diagnosticLayerDefs(targetInfo),
       ...OTHER_LAYERS.map(layerDef),
     ].filter(layerChecked);
   }
@@ -326,6 +382,7 @@ export function setupCameraPanel(store, root) {
   }
 
   function layoutGtSample(sample) {
+    cameraFrame.hidden = false;
     box.hidden = false;
     legend.hidden = true;
     placeholder.hidden = true;
@@ -338,11 +395,12 @@ export function setupCameraPanel(store, root) {
     const desiredSrc = api.gtLayerUrl(sample.name, "photo");
     if (image.dataset.src !== desiredSrc) {
       image.dataset.src = desiredSrc;
+      imageLoading.hidden = false;
       image.src = desiredSrc;
     }
 
     const targetInfo = selectedPoseTarget(store);
-    const layers = enabledOverlayLayers(poseCandidates(store, targetInfo));
+    const layers = enabledOverlayLayers(poseCandidates(store, targetInfo), targetInfo);
     const want = layers.map((layer) => layerSignature(sample, layer));
     const have = [...gtOverlays.children].map((node) => node.dataset.src);
     if (want.join("|") !== have.join("|")) {
@@ -367,50 +425,18 @@ export function setupCameraPanel(store, root) {
   }
 
   function layerSignature(sample, layer) {
-    if (layer.source === "solve") {
-      const solveId = layer.key.slice("solve:".length, -":sky".length);
-      const solve = store.solveCache.get(solveId);
-      return solve ? `solve-sky:${solveId}:${sample.name}:${solve.result.predicted_profile_full?.length ?? 0}` : `solve-sky-missing:${solveId}`;
+    if (layer.source === "pose") {
+      return api.viewPoseLayerUrl(layer.viewId, layer.poseKey, layer.family);
     }
     return api.gtLayerUrl(sample.name, layer.key);
   }
 
   function createGtOverlayLayer(sample, layer) {
-    if (layer.source === "solve") {
-      return createSolveSkylineLayer(sample, layer);
-    }
-    const src = api.gtLayerUrl(sample.name, layer.key);
+    const src = layer.source === "pose" ? api.viewPoseLayerUrl(layer.viewId, layer.poseKey, layer.family) : api.gtLayerUrl(sample.name, layer.key);
     const img = el("img", { class: "gt-layer", alt: "" });
     img.dataset.src = src;
     img.src = src;
     return img;
-  }
-
-  function createSolveSkylineLayer(sample, layer) {
-    const solveId = layer.key.slice("solve:".length, -":sky".length);
-    const solve = store.solveCache.get(solveId);
-    const profile = solve?.result.predicted_profile_full;
-    if (!profile) {
-      return null;
-    }
-    const svg = svgElement("svg", {
-      class: "gt-layer",
-      viewBox: `0 0 ${sample.width} ${sample.height}`,
-      preserveAspectRatio: "none",
-    });
-    svg.dataset.src = layerSignature(sample, layer);
-    const points = profile
-      .map((value, col) => {
-        if (value === null || value === undefined) {
-          return null;
-        }
-        const x = (col / Math.max(1, profile.length - 1)) * sample.width;
-        return `${x.toFixed(1)},${Number(value).toFixed(1)}`;
-      })
-      .filter(Boolean)
-      .join(" ");
-    svg.replaceChildren(svgElement("polyline", { class: "predicted-line", points }));
-    return svg;
   }
 
   function drawOverlay(view, fit) {

@@ -16,23 +16,25 @@ diagnostics so verdict calibration can measure which of them predict correctness
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw
 
 from peakle.domain.projection import vertical_shift_px_from_pitch_deg
+from peakle.localize.compatibility import gt_dem_compatibility, raw_camera_clearance_compatibility
 from peakle.localize.copdem import load_cop_around
 from peakle.localize.explanation import arbitrate_by_explanation
 from peakle.localize.extract import extract_candidates
 from peakle.localize.geopose import load_sample, oracle_skyline
-from peakle.localize.paths import COP_TILES_DIR, GEOPOSE_DIR, STD_WIDTH
-from peakle.localize.photo_support import edge_mask
+from peakle.localize.outline_score import rows_to_mask
+from peakle.localize.paths import COP_TILES_DIR, GEOPOSE_DIR, STD_WIDTH, SWISS_DIR
+from peakle.localize.photo_support import edge_mask, family_support
 from peakle.localize.solve import HorizonProfile, OrientationSolve, _best_shift_chamfer, solve_orientation
+from peakle.localize.swissdem import in_switzerland, load_swiss_patch
 
 MAX_W = STD_WIDTH  # solve cost scales with width; ~1150 cols keeps yaw resolution well under 0.1 deg
 PITCH_BOUNDS = (-50.0, 50.0)  # GeoPose3K crop offsets reach ~48 deg (offset ~ 1.2 * Euler b)
-
-_SEGMENTER = None
 
 
 def ang_err(a: float, b: float) -> float:
@@ -63,17 +65,7 @@ def _candidates(rgb: np.ndarray, extractor: str) -> dict:
     """Skyline hypotheses: colour detectors (+ optional SAM3 sky mask). Solved separately —
     the DEM chamfer / explanation arbitrates, since no image-side rule reliably picks the winner."""
 
-    cands = extract_candidates(rgb)
-    if extractor == "sam3":
-        global _SEGMENTER
-        if _SEGMENTER is None:
-            from peakle.segmenters import load_segmenter
-
-            _SEGMENTER = load_segmenter("sam3")
-        from peakle.localize.extract import extract_skyline_from_mask
-
-        cands["sam3"] = extract_skyline_from_mask(_SEGMENTER.sky_mask(rgb), rgb)
-    return cands
+    return extract_candidates(rgb, backend=extractor)
 
 
 def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path | None = None, extractor: str = "color") -> dict:
@@ -94,10 +86,24 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path | None = Non
 
     terrain = load_cop_around(COP_TILES_DIR, gt.lat, gt.lon, extent_m=extent_m, grid=grid)
     ground = terrain.elevation_at(0.0, 0.0)
-    cam_z = max(gt.elev_m, ground + 2.0)
+    # Solver feasibility and dataset compatibility are deliberately separate. A camera below the
+    # selected DEM is evidence of a datum/map mismatch and must fail the raw-pose compatibility
+    # gate; clamping it to the DEM would make that mismatch disappear. The orientation solver can
+    # still use a feasible camera height, recorded as an explicit correction.
+    raw_cam_z = float(gt.elev_m)
+    cam_z = max(raw_cam_z, ground + 2.0)
     rec["ground_m"] = round(ground, 1)
     rec["alt_above_ground"] = round(gt.elev_m - ground, 1)
-    profile = HorizonProfile(terrain, cam_z, step=25.0)
+    rec["solver_height_correction_m"] = round(cam_z - raw_cam_z, 2)
+    patch = _finest_cached_patch(gt.lat, gt.lon)
+    profile = HorizonProfile(terrain, cam_z, step=5.0 if patch is not None else 25.0, patch=patch)
+    rec["terrain"] = {
+        "far_source": "Copernicus GLO-30",
+        "far_nominal_resolution_m": 30.0,
+        "near_source": "swissALTI3D" if patch is not None else None,
+        "near_nominal_resolution_m": 2.0 if patch is not None else None,
+        "near_effective_ray_step_m": 5.0 if patch is not None else None,
+    }
 
     rgb = np.asarray(Image.open(gt.photo_path).convert("RGB"), np.uint8)
     if rgb.shape[1] > MAX_W:
@@ -115,10 +121,31 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path | None = Non
 
     # GT consistency: chamfer between the GT-depth skyline and OUR DEM rendered at the GT yaw —
     # a per-sample cleanliness score flagging bad GT (mislocated/misoriented pose) or DEM trouble.
-    dem_gt = profile.rows_cyl_tan(w_p, h_p, gt.fov_deg, gt.yaw_gt_deg, 0.0)
+    compatibility_profile = (
+        profile
+        if cam_z == raw_cam_z
+        else HorizonProfile(terrain, raw_cam_z, step=5.0 if patch is not None else 25.0, patch=patch)
+    )
+    dem_gt = compatibility_profile.rows_cyl_tan(w_p, h_p, gt.fov_deg, gt.yaw_gt_deg, 0.0)
     dv_lim = int(vertical_shift_px_from_pitch_deg(w_p, gt.fov_deg, "cyltan", PITCH_BOUNDS[1])) + 1
     gt_cons, _ = _best_shift_chamfer(oracle, dem_gt, np.arange(-dv_lim, dv_lim + 1, 8), 60.0)
     rec["gt_consistency_px"] = round(gt_cons, 1)
+    compatibility: dict[str, Any] = gt_dem_compatibility(
+        oracle,
+        dem_gt,
+        width_px=w_p,
+        height_px=h_p,
+        horizontal_fov_deg=gt.fov_deg,
+        yaw_deg=gt.yaw_gt_deg,
+    ).to_dict()
+    compatibility["height"] = raw_camera_clearance_compatibility(raw_cam_z, ground)
+    rec["gt_dem_compatibility"] = compatibility
+    edges = edge_mask(rgb)
+    pfm_edge_support = family_support(rows_to_mask(oracle, h_p), edges) if edges is not None else None
+    rec["photo_edge_support"] = {
+        "pfm_edge_support": round(pfm_edge_support, 4) if pfm_edge_support is not None else None,
+        "usable": bool(pfm_edge_support is not None and pfm_edge_support >= 0.75),
+    }
 
     # ---- extracted track: solve every skyline hypothesis, arbitrated by explanation ----
     cands = _candidates(rgb, extractor)
@@ -149,7 +176,6 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path | None = Non
     if solved:
         # Among hypotheses within a tight chamfer slack of the best, pick the one whose typed DEM
         # outlines best EXPLAIN the photo edges — disambiguates the lake/false-skyline class.
-        edges = edge_mask(rgb)
         if edges is not None and len(solved) > 1:
             win_name, expl_scores = arbitrate_by_explanation(solved, terrain, cam_z, w_p, h_p, gt.fov_deg, edges)
             rec["extracted_explanation"] = {k: round(v, 3) for k, v in expl_scores.items()}
@@ -182,6 +208,17 @@ def run_sample(sdir: Path, extent_m: float, grid: int, outdir: Path | None = Non
     if s_extr is not None and outdir is not None:
         _overlay(rgb, gt, profile, ext_rows, oracle, s_extr, outdir / f"{gt.name}.jpg")
     return rec
+
+
+def _finest_cached_patch(lat: float, lon: float):
+    """Use the finest locally available terrain without downloading during a benchmark."""
+
+    if not in_switzerland(lat, lon):
+        return None
+    try:
+        return load_swiss_patch(SWISS_DIR, lat, lon, res=4.0, radius_m=4500.0)
+    except Exception:
+        return None
 
 
 def find_sample_dirs(data_dir: Path = GEOPOSE_DIR) -> list[Path]:

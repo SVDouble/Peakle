@@ -17,8 +17,10 @@ from numpy.typing import NDArray
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics, CameraModel
 from peakle.domain.coordinates import LocalPoint
 from peakle.domain.pose import PosePrior
+from peakle.domain.projection import ImageProjectionName, pitch_deg_from_vertical_shift_px
 from peakle.domain.terrain import TerrainMap
 from peakle.optimization.objective import dense_terrain_points
+from peakle.rendering.point_skyline import cyltan_point_skyline
 from peakle.rendering.rasterizer import SyntheticRenderer
 from peakle.rendering.skyline import interpolate_profile
 
@@ -50,6 +52,9 @@ def contour_database_seeds(
     renderer: SyntheticRenderer,
     terrain_stride: int,
     max_seeds: int = 12,
+    *,
+    projection: ImageProjectionName = "pinhole",
+    horizontal_fov_deg: float | None = None,
 ) -> list[ContourSeed]:
     """Builds and searches a compact contour snapshot database around the massif."""
 
@@ -73,10 +78,19 @@ def contour_database_seeds(
                     pitch_deg=0.0,
                     roll_deg=0.0,
                 )
-                profile = renderer.fast_skyline(points, intrinsics, base_extrinsics)
+                if projection == "cyltan":
+                    hfov_deg = horizontal_fov_deg or intrinsics.horizontal_fov_deg()
+                    profile = cyltan_point_skyline(points, intrinsics, base_extrinsics, hfov_deg)
+                else:
+                    profile = renderer.fast_skyline(points, intrinsics, base_extrinsics)
                 signature = _profile_signature(profile)
                 score = _signature_distance(observed_signature, signature)
-                pitch_deg = _pitch_from_vertical_shift(intrinsics, _median_shift_px(observed_profile, profile))
+                pitch_deg = _pitch_from_vertical_shift(
+                    intrinsics,
+                    _median_shift_px(observed_profile, profile),
+                    projection=projection,
+                    horizontal_fov_deg=horizontal_fov_deg,
+                )
                 snapshots.append(
                     ContourSeed(
                         extrinsics=base_extrinsics.model_copy(
@@ -167,7 +181,16 @@ def _median_shift_px(observed: NDArray[np.float64], predicted: NDArray[np.float6
     return float(np.median(observed[valid]) - np.median(predicted[valid]))
 
 
-def _pitch_from_vertical_shift(intrinsics: CameraIntrinsics, shift_px: float) -> float:
+def _pitch_from_vertical_shift(
+    intrinsics: CameraIntrinsics,
+    shift_px: float,
+    *,
+    projection: ImageProjectionName = "pinhole",
+    horizontal_fov_deg: float | None = None,
+) -> float:
+    if projection == "cyltan":
+        hfov_deg = horizontal_fov_deg or intrinsics.horizontal_fov_deg()
+        return pitch_deg_from_vertical_shift_px(intrinsics.width_px, hfov_deg, projection, shift_px)
     return CameraModel.from_intrinsics(intrinsics).pitch_deg_from_vertical_shift_px(shift_px)
 
 

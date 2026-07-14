@@ -15,6 +15,7 @@ from starlette.datastructures import Headers
 from starlette.responses import RedirectResponse, Response
 
 from peakle.scene.scene import Scene
+from peakle.web.api import benchmarks as benchmarks_api
 from peakle.web.api import gtlab as gtlab_api
 from peakle.web.api import jobs as jobs_api
 from peakle.web.api import scene as scene_api
@@ -70,6 +71,7 @@ def create_app(scene: Scene, job_store_dir: Path | None = None, solution_store_d
     app.state.solution_store = solution_store
 
     app.include_router(scene_api.router, prefix="/api")
+    app.include_router(benchmarks_api.router, prefix="/api")
     app.include_router(gtlab_api.router, prefix="/api")
     app.include_router(jobs_api.router, prefix="/api")
     app.include_router(views_api.router, prefix="/api")
@@ -78,6 +80,10 @@ def create_app(scene: Scene, job_store_dir: Path | None = None, solution_store_d
     @app.get("/gt", include_in_schema=False)
     async def gt_lab() -> RedirectResponse:  # the GT-dataset debugger page
         return RedirectResponse("/gtlab.html")
+
+    @app.get("/bench", include_in_schema=False)
+    async def benchmark_dashboard() -> RedirectResponse:
+        return RedirectResponse("/benchmark.html")
 
     static_dir = resources.files("peakle.web") / "static"
     app.mount("/", _NoCacheStaticFiles(directory=str(static_dir), html=True), name="static")

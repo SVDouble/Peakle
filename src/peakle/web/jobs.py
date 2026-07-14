@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import copy
 import json
 import threading
@@ -91,7 +92,7 @@ class JobQueue:
         self._schedule(job_id)
         return snapshot
 
-    def list(self, *, kind: str | None = None) -> list[dict[str, Any]]:
+    def list(self, *, kind: str | None = None) -> builtins.list[dict[str, Any]]:
         """Return newest jobs first."""
 
         with self._lock:
