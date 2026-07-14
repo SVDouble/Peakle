@@ -300,6 +300,29 @@ photo strategy must retain at least a 32-mode beam, rerender/match those modes, 
 independent margin or abstain; the required beam size must be calibrated on held-out data. Forcing
 another top-one skyline decision would discard the measured recovery path.
 
+The corresponding RGB-only transfer is now frozen and is a safe negative result. DexiNed internal
+edges, Depth-Anything ordinal depth, skyline and terrain overlap select 344.8, 359.7 and 523.9 m
+winners: still 0/3. The predeclared margin, cue-agreement and leave-one-column-block-out gates abstain
+on all three, so the method returns no false pose. A diverse 32-basin beam contains a target-successful
+candidate for IMG4948 and IMG5143 at beam rank 12, but IMG5145's first target is verifier rank 439 and
+is absent; a correct-yaw 154 m pose remains at beam rank two. Multi-seed render/match/PnP is therefore
+the next capture-range test, not a claimed three-photo solution. It must keep the original statistical
+prior separate from each atlas render seed, grade beam recall before refinement, validate each
+resulting pose with evidence not used by PnP, and retain abstention.
+
+The source skyline candidates have zero blue/bright agreement on all three controls. Worse, the
+selected skyline defines the terrain mask for ridge, ordinal-depth and overlap scoring, so a bad
+image-side arbitration poisons every nominally separate cue. Fusion is strongly biased toward common
+terrain coverage, and raw component argmins can win with only 13--15 outline pixels or no rendered
+terrain. The next proposal version must preserve separate skyline hypotheses when they disagree,
+apply eligibility gates to cue-specialist lanes, and prevent coverage alone from dominating. This is
+the upstream recovery path for IMG5145; PnP cannot refine a basin that no seed represents.
+
+All three real controls fall in the evaluation-only `MAP_B/HEIGHT_A` compatibility stratum. The new
+runner reports risk/coverage and beam recall by fit bucket, but three examples in one bucket cannot
+calibrate either the fusion weights or the abstention thresholds. Those values remain frozen research
+defaults until a larger location-held-out, manually verified set is available.
+
 The follow-up [synthetic stage contracts](synthetic-localization-benchmark.md) isolate two more
 failure sources. First, the old implicit ray range discarded diagonal terrain; it now reaches the
 per-camera farthest DEM corner and has analytic diagonal/offset/cap tests. Second, in a declared

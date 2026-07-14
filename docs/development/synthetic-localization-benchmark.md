@@ -42,8 +42,11 @@ Two deliberately different controls are now implemented:
 - `tests/integration/test_synthetic_production_pose_contract.py` exercises the real cyltan
   `HorizonProfile` -> `build_skyline_atlas` path, freezes it before truth evaluation, demonstrates a
   wrong blind basin with truth still in the proposal pool, and passes that frozen pool through the
-  real PFM geometry reranker. Its depth is made by the same raycaster and is explicitly only an
-  identity/plumbing ceiling.
+  real PFM geometry reranker. It also exercises the RGB-only photo-geometry verifier over the complete
+  frozen pool: an authoritative RGB channel encoding promotes the exact target from skyline rank two
+  to verifier/beam rank one, while empty cues score the pool and abstain. Both positive controls use
+  the same scene/raycaster and are explicitly identity/plumbing ceilings, not photo-model
+  generalization evidence.
 - `python -m peakle.scripts.bench_synthetic_pipeline` is a custom pinhole, shared-mesh-renderer stage
   harness. It compares exact versus deterministically coarsened estimator terrain, controlled priors,
   exact-mask/color/haze skylines, and fixed depth/outline scores. It does **not** call the production
@@ -142,6 +145,7 @@ numbers do not establish real-photo accuracy.
    parallax scenes.
 3. Compare skyline-only ranking with metric depth, scale-aligned depth and internal typed geometry.
 4. Add coherent-wrong matcher and photo-corruption rejection cases.
-5. Run atlas top-K through continuous render-match/PnP refinement.
+5. Run the frozen photo-verifier beam through continuous render-match/PnP refinement, keeping each
+   render seed separate from the unchanged statistical prior and reporting proposal recall first.
 6. Transfer only the strategies that pass these contracts to clean real GT/DEM compatibility
    strata, where label uncertainty remains a separate reported variable.

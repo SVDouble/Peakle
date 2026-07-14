@@ -134,6 +134,58 @@ replicate crosses. `rerank.json` is file- and directory-fsynced before truth rea
 the source atlas results/run, PFM inputs, terrain cache and selected implementation paths are checked
 again before atomic publication.
 
+## Photo-observable geometry verifier
+
+The deployable transfer was then measured without source PFM. The immutable artifact is
+`local/output/20260714-three-photo-photo-geometry-verifier-v1`; its frozen estimator archive SHA-256
+is `f2b5e62508c8601977e9f27d2740331a7549ceb204cc80ee7e439e06b80a8689`, results SHA-256 is
+`a55235964989131d00b515eceffb4b5b98341e30940f4e39d41c6a81a33c7f9b`, and the selected
+implementation paths were clean at revision `a18b473852d7f309261a863f33bb4f9f91c854f8`.
+
+DexiNed internal edges and Depth-Anything V2 Small relative depth were extracted offline from RGB.
+Every one of the 1,323 frozen `photo_auto` candidates was rendered before a 32-basin beam was chosen.
+Fixed fusion weights were skyline 0.20, symmetric internal outline 0.35, ordinal depth 0.35 and
+terrain overlap 0.10. Leave-one-column-block-out stability excludes the frozen full-image skyline
+score. The write-once `verifier.json` was file- and directory-fsynced before numeric truth and the
+evaluation-only GT/DEM compatibility bucket were reloaded.
+
+| sample | skyline-only winner | photo-geometry winner | first target verifier rank | first target beam rank | decision |
+|---|---:|---:|---:|---:|---|
+| IMG4948 | 373.1 m / 1.9° | 344.8 m / 0.9° | 30 | 12 | abstain |
+| IMG5143 | 467.5 m / 2.1° | 359.7 m / 1.1° | 32 | 12 | abstain |
+| IMG5145 | 416.6 m / 123.3° | 523.9 m / 106.7° | 439 | absent | abstain |
+
+This fixed photo score is **0/3 at top one** and must not replace the prior. Its useful result is the
+decision behavior: all three low-margin, fold-unstable cue conflicts abstain, producing zero false
+accepts. The diverse beam preserves a target-successful basin for IMG4948 and IMG5143, but not
+IMG5145. Its second beam pose is nevertheless in the correct yaw basin at 154.0 m / 0.3°, so a local
+refiner can measure capture from outside the formal target. A 32-seed render/match/PnP benchmark has
+only 2/3 input target recall and must report that before refinement; it cannot claim three-photo
+proposal success.
+
+The failure is not just an unfortunate weight vector. The blue/bright automatic skyline candidates
+have zero agreement on all three photos, yet their high coverage passes the source extractor's
+coverage-only gate. The selected skyline then defines the terrain mask for learned ridges, monocular
+depth and overlap, so these terms are not independent when the mask is wrong. Fusion score is strongly
+correlated with common-terrain coverage (Spearman -0.70, -0.87 and -0.94), and overlap loss is almost
+perfectly anti-correlated with it. IMG5145's wrong winner beats its 154 m rival only through overlap;
+the rival is better on skyline, outline and ordinal depth. The abstention cue vetoes catch exactly
+that conflict.
+
+Raw component argmins are also diagnostic-only: outline winners for IMG4948/IMG5145 contain just
+15/13 candidate-outline pixels, and IMG5145's raw skyline winner renders no valid terrain. Future
+component reporting must apply eligibility/support gates. Future proposal runs should keep separate
+blue, bright and fused-colour skyline hypotheses when they disagree, and use fixed cue-specialist
+lanes alongside the diverse fusion beam. IMG5145 needs that stronger proposer or an adaptive larger
+beam before expensive refinement can be expected to reach a target pose.
+
+All three controls are evaluation-only `MAP_B/HEIGHT_A`: their published reference and the supplied
+terrain agree reasonably well and camera clearance is plausible. This removes one obvious label/DEM
+failure explanation, but it does not calibrate compatibility stratification because the current set
+contains only one bucket. The benchmark runner reports success, selection, abstention, false accepts,
+beam recall and component winners by fit bucket so a larger manually verified corpus can do so without
+changing the estimator.
+
 ## What the literature says is realistic
 
 [LandscapeAR](https://www.ecva.net/papers/eccv_2020/papers_ECCV/papers/123740290.pdf) is still the
@@ -183,6 +235,15 @@ python -m peakle.scripts.bench_pose_atlas_pfm_geometry \
   --candidate-track pfm_oracle \
   --subsample 4 \
   --output local/output/<new-pfm-geometry-run>
+
+python -m peakle.scripts.bench_pose_atlas_photo_geometry \
+  --atlas local/output/<pose-atlas-run>/results.json \
+  --samples eth_ch1_IMG_4948_01024,eth_ch1_IMG_5143_01024,eth_ch1_IMG_5145_01024 \
+  --subsample 4 \
+  --dexined-checkpoint /path/to/DexiNed_BIPED_10.pth \
+  --depth-model-dir /path/to/Depth-Anything-V2-Small-hf \
+  --device cuda \
+  --output local/output/<new-photo-geometry-run>
 ```
 
 ## Decision rule after the atlas
