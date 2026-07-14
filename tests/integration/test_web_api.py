@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +15,12 @@ from PIL import Image
 from peakle.domain.camera import CameraExtrinsics
 from peakle.domain.contours import ImagePoint, SkylineContour
 from peakle.domain.coordinates import LocalPoint
+from peakle.localize.atlas_dashboard import (
+    ATLAS_DASHBOARD_FILENAME,
+    ATLAS_DASHBOARD_SCHEMA,
+    build_atlas_dashboard,
+    canonical_json_bytes,
+)
 from peakle.scene.scene import Scene
 from peakle.scene.state import build_intrinsics
 from peakle.web.api import benchmarks as benchmarks_api
@@ -333,6 +341,298 @@ def test_pose_benchmark_dashboard_surfaces_strategy_matrix(
     assert ambiguity["used_for_ranking"] is False
     assert ambiguity["refined_minus_original"]["horizontal_position_m"] == 412.0
     assert result["rows"][0]["candidate_validation"]["passed"] is True
+
+
+def test_pose_benchmark_dashboard_surfaces_compact_pose_atlas_study(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output"
+    run_dir = output / "20260714-three-photo-native-skyline-pose-atlas-v2"
+    run_dir.mkdir(parents=True)
+
+    def evaluated(position_m: float, yaw_deg: float, rank: int, *, reaches: bool, scope: str) -> dict:
+        return {
+            "candidate_id": f"candidate-{rank}",
+            "estimator_rank": rank,
+            "estimator_rank_scope": scope,
+            "hypothesis": {"estimator_score": rank / 1000.0, "pose": {"yaw_deg": 10.0}},
+            "errors": {
+                "horizontal_position_m": position_m,
+                "vertical_m": 1.0,
+                "position_3d_m": position_m + 0.1,
+                "yaw_deg": yaw_deg,
+                "pitch_deg": None,
+            },
+            "normalized_joint_error": max(position_m / 100.0, yaw_deg / 5.0),
+            "reaches_target": reaches,
+        }
+
+    def complete_track(
+        position_m: float,
+        oracle_position_m: float,
+        oracle_rank: int,
+        *,
+        winner_reaches: bool,
+        top_100_reaches: bool,
+    ) -> dict:
+        winner = evaluated(
+            position_m,
+            3.0,
+            1,
+            reaches=winner_reaches,
+            scope="spatially_diverse_shortlist",
+        )
+        oracle = evaluated(
+            oracle_position_m,
+            1.0,
+            oracle_rank,
+            reaches=True,
+            scope="full_score_lattice",
+        )
+        return {
+            "status": "ok",
+            "runtime_s": 12.5,
+            "evidence": {"available": True},
+            "estimator_archive": {
+                "archive_sha256": "archive-sha",
+                "candidate_count": 1323,
+                "selected_candidate_id": "candidate-1",
+                "grid": {"position_count": 441},
+                "query_geometry": {"width_px": 1024},
+                "native_patch_supplied": True,
+                "full_score_lattice": {
+                    "yaw_count": 360,
+                    "hypothesis_count": 158760,
+                    "positions": [{"yaw_scores": [0.1, 0.2], "private_lattice_sentinel": True}],
+                },
+                "candidates": [{"private_candidate_sentinel": True}],
+            },
+            "evaluation": {
+                "archive_sha256": "archive-sha",
+                "reference_data_used": True,
+                "used_by_estimator": False,
+                "target": {
+                    "horizontal_position_m_lte": 100.0,
+                    "absolute_yaw_deg_lte": 5.0,
+                    "pitch_used_by_oracle": False,
+                },
+                "winner_errors": winner,
+                "full_lattice_gt_oracle": oracle,
+                "selection_regret": {
+                    "horizontal_position_m": position_m - oracle_position_m,
+                    "yaw_deg": 2.0,
+                },
+                "shortlist_top_k": [
+                    {
+                        "candidate_pool": "spatially_diverse_shortlist",
+                        "requested_k": 100,
+                        "evaluated_k": 100,
+                        "reaches_target": top_100_reaches,
+                        "recall": 1.0 if top_100_reaches else 0.0,
+                        "best_candidate": oracle,
+                    }
+                ],
+                "evaluation_only_reference_position_probe": {
+                    "used_by_estimator": False,
+                    "included_in_estimator_archive": False,
+                    "errors": oracle["errors"],
+                    "score_delta_reference_minus_blind_winner": 0.5,
+                    "best_yaw_mode": {"private_probe_sentinel": True},
+                },
+            },
+        }
+
+    compatibility = {
+        "policy": "gt_dem_compat_v1",
+        "tier": "MAP_B",
+        "p90_deg": 0.75,
+        "height": {"tier": "HEIGHT_A", "raw_camera_clearance_m": 2.5},
+    }
+    results = {
+        "schema": benchmarks_api.ATLAS_STUDY_SCHEMA,
+        "run_id": run_dir.name,
+        "config": {
+            "tracks": ["pfm_oracle", "photo_auto"],
+            "atlas": {"radius_m": 500.0, "spacing_m": 50.0, "yaw_step_deg": 1.0},
+        },
+        "samples": [
+            {
+                "name": "manual-b",
+                "manual": True,
+                "compatibility": compatibility,
+                "photo_edge_support": {"usable": True},
+                "prior": {
+                    "regime": "perturbed_metadata",
+                    "constructed_from_reference_for_controlled_perturbation": True,
+                    "errors": {"horizontal_position_m": 200.0, "yaw_deg": 15.0},
+                },
+                "tracks": {
+                    "pfm_oracle": complete_track(200.0, 25.0, 900, winner_reaches=False, top_100_reaches=False),
+                    "photo_auto": complete_track(80.0, 20.0, 80, winner_reaches=True, top_100_reaches=True),
+                },
+            },
+            {
+                "name": "automatic-b",
+                "manual": False,
+                "compatibility": compatibility,
+                "photo_edge_support": {"usable": False},
+                "prior": {
+                    "regime": "perturbed_metadata",
+                    "constructed_from_reference_for_controlled_perturbation": True,
+                    "errors": {"horizontal_position_m": 200.0, "yaw_deg": 15.0},
+                },
+                "tracks": {
+                    "pfm_oracle": complete_track(220.0, 50.0, 400, winner_reaches=False, top_100_reaches=True),
+                    "photo_auto": {
+                        "status": "evidence_rejected",
+                        "evidence": {"available": False, "reason": "no_candidate"},
+                        "estimator_archive": None,
+                        "evaluation": None,
+                    },
+                },
+            },
+        ],
+        "aggregates": [{"sentinel": "API recomputes these"}],
+    }
+    encoded = (json.dumps(results, sort_keys=True) + "\n").encode()
+    results_sha256 = hashlib.sha256(encoded).hexdigest()
+    dashboard_encoded = canonical_json_bytes(build_atlas_dashboard(results, results_sha256))
+    (run_dir / "results.json").write_bytes(encoded)
+    (run_dir / ATLAS_DASHBOARD_FILENAME).write_bytes(dashboard_encoded)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": benchmarks_api.ATLAS_STUDY_SCHEMA,
+                "run_id": run_dir.name,
+                "status": "complete",
+                "created_at": "2026-07-14T08:00:00+00:00",
+                "results_sha256": results_sha256,
+                "dashboard": {
+                    "schema": ATLAS_DASHBOARD_SCHEMA,
+                    "path": ATLAS_DASHBOARD_FILENAME,
+                    "sha256": hashlib.sha256(dashboard_encoded).hexdigest(),
+                    "source_results_sha256": results_sha256,
+                    "size_bytes": len(dashboard_encoded),
+                },
+                "implementation": {
+                    "git_revision": "0123456789abcdef",
+                    "aggregate_sha256": "implementation-sha",
+                    "tracked_source_diff_sha256": "diff-sha",
+                    "source_worktree_status": [" M src/peakle/localize/skyline_atlas.py"],
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(benchmarks_api, "OUTPUT", output)
+    monkeypatch.setattr(benchmarks_api, "ATLAS_CACHE_ROOT", tmp_path / "atlas-cache")
+
+    def fail_dense_parse(_path: Path) -> dict:
+        raise AssertionError("a declared compact sidecar must avoid parsing dense results")
+
+    monkeypatch.setattr(benchmarks_api, "_parse_dense_atlas_results", fail_dense_parse)
+
+    runs = client.get("/api/bench/runs").json()
+    assert runs[0]["kind"] == "pose_atlas"
+    assert runs[0]["artifact_schema"] == benchmarks_api.ATLAS_STUDY_SCHEMA
+    assert runs[0]["track_count"] == 2
+    assert runs[0]["completed_track_count"] == 3
+    assert runs[0]["evidence_rejected_count"] == 1
+    assert runs[0]["hash_verified"] is True
+    assert runs[0]["dashboard_hash_verified"] is True
+    assert runs[0]["compact_source"] == "artifact_sidecar"
+    assert runs[0]["git_sha"] == "0123456789abcdef"
+    assert runs[0]["implementation_sha256"] == "implementation-sha"
+    assert runs[0]["dirty_code"] is True
+    assert "recommended" not in runs[0]
+
+    summary = client.get(f"/api/bench/runs/{run_dir.name}/summary").json()
+    assert summary["mode"] == "atlas"
+    assert summary["default_subset"] == "map_ab_height_a"
+    assert summary["subsets"]["all"]["requested_track_count"] == 4
+    assert summary["subsets"]["all"]["completed_track_count"] == 3
+    pfm = next(row for row in summary["subsets"]["all"]["aggregates"] if row["track"] == "pfm_oracle")
+    assert pfm["blind_winner_success_rate"] == 0.0
+    assert pfm["full_lattice_oracle_success_rate"] == 1.0
+    assert pfm["median_blind_winner_horizontal_m"] == 210.0
+    assert pfm["median_full_lattice_oracle_horizontal_m"] == 37.5
+    assert pfm["median_full_lattice_oracle_estimator_rank"] == 650.0
+    photo = next(row for row in summary["subsets"]["all"]["aggregates"] if row["track"] == "photo_auto")
+    assert photo["blind_winner_success_rate"] == 0.5
+    assert photo["evidence_rejected"] == 1
+
+    response = client.get(f"/api/bench/runs/{run_dir.name}/cases?subset=manual&evidence=pfm_oracle")
+    cases = response.json()
+    assert cases["mode"] == "atlas"
+    assert cases["total"] == 1
+    case = cases["rows"][0]
+    assert case["blind_winner"]["errors"]["horizontal_position_m"] == 200.0
+    assert case["prior_regime"] == benchmarks_api.ATLAS_PRIOR_REGIME
+    assert case["prior_context"]["constructed_from_reference_for_controlled_perturbation"] is True
+    assert case["prior_context"]["recorded_yaw_pitch_altitude_used_by_atlas"] is False
+    assert case["full_lattice_oracle"]["errors"]["horizontal_position_m"] == 25.0
+    assert case["full_lattice_oracle"]["estimator_rank"] == 900
+    assert case["archive"]["full_lattice"]["hypothesis_count"] == 158760
+    assert case["shortlist_top_100"]["reaches_target"] is False
+    assert case["shortlist_first_reach"] is None
+    public_json = json.dumps({"runs": runs, "summary": summary, "cases": cases})
+    assert "yaw_scores" not in public_json
+    assert "private_lattice_sentinel" not in public_json
+    assert "private_candidate_sentinel" not in public_json
+    assert "private_probe_sentinel" not in public_json
+    assert client.get(f"/api/bench/runs/{run_dir.name}/cases?subset=primary").status_code == 400
+
+    # The sidecar is part of the immutable run commit.  Once its bytes no
+    # longer match run.json, discovery fails closed instead of parsing the
+    # 111 MB dense result as a silent fallback.
+    (run_dir / ATLAS_DASHBOARD_FILENAME).write_bytes(dashboard_encoded + b" ")
+    assert client.get("/api/bench/runs").json() == []
+    assert client.get(f"/api/bench/runs/{run_dir.name}").status_code == 404
+
+
+def test_pose_atlas_legacy_projection_cache_is_content_addressed(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = tmp_path / "legacy-pose-atlas"
+    run_dir.mkdir()
+    results = {
+        "schema": benchmarks_api.ATLAS_STUDY_SCHEMA,
+        "run_id": run_dir.name,
+        "config": {"tracks": []},
+        "samples": [],
+    }
+    encoded = canonical_json_bytes(results)
+    results_path = run_dir / "results.json"
+    results_path.write_bytes(encoded)
+    metadata = {
+        "schema": benchmarks_api.ATLAS_STUDY_SCHEMA,
+        "run_id": run_dir.name,
+        "results_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+    cache_root = tmp_path / "cache"
+    monkeypatch.setattr(benchmarks_api, "ATLAS_CACHE_ROOT", cache_root)
+    benchmarks_api._read_atlas_artifact_cached.cache_clear()
+
+    generated = benchmarks_api._read_atlas_artifact(results_path, metadata)
+
+    assert generated is not None
+    assert generated.compact_source == "results_fallback"
+    cache_path = benchmarks_api._atlas_cache_path(cache_root, generated.results_sha256)
+    assert cache_path.is_file()
+
+    benchmarks_api._read_atlas_artifact_cached.cache_clear()
+
+    def fail_dense_parse(_path: Path) -> dict:
+        raise AssertionError("the content-addressed compact cache should be reused")
+
+    monkeypatch.setattr(benchmarks_api, "_parse_dense_atlas_results", fail_dense_parse)
+    cached = benchmarks_api._read_atlas_artifact(results_path, metadata)
+
+    assert cached is not None
+    assert cached.compact_source == "content_cache"
+    assert cached.payload == generated.payload
+
+    # Cache keys are not allowed to override the digest committed by run.json.
+    results_path.write_bytes(encoded + b" ")
+    benchmarks_api._read_atlas_artifact_cached.cache_clear()
+    assert benchmarks_api._read_atlas_artifact(results_path, metadata) is None
 
 
 def test_matrix_default_prefers_primary_over_excluded_map_diagnostic() -> None:

@@ -22,6 +22,7 @@ const LABELS = {
   primary: "Ranking eligible",
   primary_height_a: "Primary clean",
   map_ab: "MAP_A + B",
+  map_ab_height_a: "MAP_A + B + height",
   map_a: "MAP_A",
   map_a_height_a: "MAP_A + height",
   map_a_photo: "MAP_A + photo support",
@@ -40,6 +41,7 @@ const ALGORITHMS = {
   evolution: "Evolution",
   global: "Regional global",
   "render-pnp": "Render match + PnP",
+  "skyline-atlas": "Skyline pose atlas",
 };
 
 const PRIORS = {
@@ -112,8 +114,12 @@ async function json(url, signal) {
 
 function renderRuns() {
   runSelect.replaceChildren(...runs.map((run) => {
-    const kind = run.kind === "strategy_matrix" ? `${run.algorithm_count} strategies` : "legacy horizon";
-    const status = run.error_count ? ` · ${run.error_count} sample errors` : "";
+    const kind = run.kind === "strategy_matrix"
+      ? `${run.algorithm_count} strategies`
+      : run.kind === "pose_atlas"
+        ? `${run.track_count} atlas evidence tracks`
+        : "legacy horizon";
+    const status = run.error_count ? ` · ${run.error_count} ${run.kind === "pose_atlas" ? "track" : "sample"} errors` : "";
     return node("option", { value: run.id, text: `${run.created_at} · ${run.sample_count} samples · ${kind}${status}` });
   }));
   const preferred = runs.find((run) => run.recommended) ?? runs[0];
@@ -143,14 +149,23 @@ function renderTabs() {
 
 function renderProvenance() {
   const run = summary.run;
-  const pills = [
-    ["Artifact", run.kind === "strategy_matrix" ? `schema v${run.schema_version} matrix` : "legacy orientation"],
-    ["Samples", `${run.completed_sample_count}/${run.sample_count}`],
-    ["Strategies", run.algorithm_count],
-    ["Attempted cells", run.attempted_case_count || "legacy"],
-    ["Status", run.status],
-    ["Compatibility", run.compatibility_policy],
-  ];
+  const pills = run.kind === "pose_atlas"
+    ? [
+      ["Artifact", "pose-atlas study v2"],
+      ["Samples", `${run.completed_sample_count}/${run.sample_count}`],
+      ["Evidence tracks", run.track_count],
+      ["Completed tracks", `${run.completed_track_count}/${run.attempted_case_count}`],
+      ["Status", run.status],
+      ["Compatibility", run.compatibility_policy],
+    ]
+    : [
+      ["Artifact", run.kind === "strategy_matrix" ? `schema v${run.schema_version} matrix` : "legacy orientation"],
+      ["Samples", `${run.completed_sample_count}/${run.sample_count}`],
+      ["Strategies", run.algorithm_count],
+      ["Attempted cells", run.attempted_case_count || "legacy"],
+      ["Status", run.status],
+      ["Compatibility", run.compatibility_policy],
+    ];
   if (run.results_sha256) pills.push(["Artifact SHA", run.results_sha256.slice(0, 12)]);
   if (run.implementation_sha256) pills.push(["Implementation", run.implementation_sha256.slice(0, 12)]);
   if (run.git_sha) pills.push(["Git", `${run.git_sha.slice(0, 9)}${run.dirty_code ? "+dirty" : ""}`]);
@@ -177,6 +192,7 @@ function card(label, value, detail, className = "") {
 
 function renderSummary() {
   if (summary.mode === "matrix") renderMatrixSummary();
+  else if (summary.mode === "atlas") renderAtlasSummary();
   else renderLegacySummary();
 }
 
@@ -286,6 +302,65 @@ function renderMatrixStrata() {
   });
 }
 
+function renderAtlasSummary() {
+  const subset = summary.subsets[selectedSubset] ?? summary.subsets.all;
+  const aggregates = subset.aggregates;
+  const requested = aggregates.reduce((total, row) => total + row.requested, 0);
+  const completed = aggregates.reduce((total, row) => total + row.completed, 0);
+  const blindSuccesses = aggregates.reduce((total, row) => total + row.blind_winner_successes, 0);
+  const oracleSuccesses = aggregates.reduce((total, row) => total + row.full_lattice_oracle_successes, 0);
+  const rejected = aggregates.reduce((total, row) => total + row.evidence_rejected, 0);
+  const errors = aggregates.reduce((total, row) => total + row.errors, 0);
+  const missing = aggregates.reduce((total, row) => total + row.missing, 0);
+  subsetCount.textContent = `${subset.sample_count} samples · ${completed}/${requested} completed tracks`;
+  cards.replaceChildren(
+    card("Completed evidence tracks", `${completed} / ${requested}`, `${rejected} evidence rejections · ${errors} errors · ${missing} missing; all remain in the denominator`, errors || missing ? "bad" : rejected ? "photo" : "good"),
+    card("Blind-winner successes", `${blindSuccesses} / ${requested}`, "Estimator rank 1 · position ≤100 m and yaw ≤5°", blindSuccesses ? "photo" : "bad"),
+    card("Full-lattice oracle ceiling", `${oracleSuccesses} / ${requested}`, "Evaluation-only reachability after the estimator score lattice was frozen", "good"),
+    card("Selection gap", `+${Math.max(0, oracleSuccesses - blindSuccesses)}`, "Reachable targets missed by blind estimator selection; not additional solver wins"),
+  );
+  renderAtlasLeaderboard(aggregates);
+  renderAtlasStrata(aggregates);
+}
+
+function renderAtlasLeaderboard(aggregates) {
+  const headers = ["Evidence", "Requested", "Completed", "Blind success", "Oracle ceiling", "Blind position", "Oracle position", "Blind yaw", "Oracle yaw", "Oracle score rank", "Evaluation-only GT reach in top-100", "Runtime"];
+  leaderboardHead.replaceChildren(node("tr", {}, headers.map((label) => node("th", { text: label }))));
+  leaderboard.replaceChildren(...aggregates.map((row) => node("tr", {}, [
+    node("td", {}, [
+      node("span", { class: "method", text: EVIDENCE[row.track] ?? row.track }),
+      node("span", { class: "sub", text: row.track === "pfm_oracle" ? "reference-pose source depth · analysis only" : "automatic photo skyline" }),
+    ]),
+    node("td", { class: "number", text: String(row.requested) }),
+    node("td", { class: "number", text: String(row.completed) }),
+    node("td", { class: "number", text: `${pct(row.blind_winner_success_rate)} · ${row.blind_winner_successes}/${row.requested}` }),
+    node("td", { class: "number success", text: `${pct(row.full_lattice_oracle_success_rate)} · ${row.full_lattice_oracle_successes}/${row.requested}` }),
+    node("td", { class: "number", text: num(row.median_blind_winner_horizontal_m, 1, " m") }),
+    node("td", { class: "number", text: num(row.median_full_lattice_oracle_horizontal_m, 1, " m") }),
+    node("td", { class: "number", text: num(row.median_blind_winner_yaw_deg, 1, "°") }),
+    node("td", { class: "number", text: num(row.median_full_lattice_oracle_yaw_deg, 1, "°") }),
+    node("td", { class: "number", text: num(row.median_full_lattice_oracle_estimator_rank, 0) }),
+    node("td", { class: "number", text: `${row.shortlist_top_100_successes}/${row.requested}` }),
+    node("td", { class: "number", text: num(row.runtime_s, 1, " s") }),
+  ])));
+  if (!aggregates.length) leaderboard.append(emptyRow(headers.length, "No atlas evidence tracks in this subset."));
+}
+
+function renderAtlasStrata(aggregates) {
+  strataTitle.textContent = "Evidence tracks";
+  strataNote.textContent = "Blind bars show estimator-selected success. Oracle bars show evaluation-only reachability in the same frozen score lattice.";
+  strata.replaceChildren(...aggregates.map((row) => node("div", { class: "stratum" }, [
+    node("div", { class: "stratum-head" }, [
+      node("span", { class: "stratum-name", text: EVIDENCE[row.track] ?? row.track }),
+      node("span", { class: "muted number", text: `n=${row.requested}` }),
+    ]),
+    node("div", { class: "stratum-bars" }, [
+      bar("Blind", row.blind_winner_success_rate, ""),
+      bar("Oracle ceiling", row.full_lattice_oracle_success_rate, "photo"),
+    ]),
+  ])));
+}
+
 function renderLegacySummary() {
   const subset = summary.subsets[selectedSubset] ?? summary.subsets.all;
   const oracle = subset.pfm_oracle;
@@ -363,8 +438,9 @@ async function loadCases(generation = loadGeneration) {
   const params = new URLSearchParams({ subset: selectedSubset, limit: "500", query: search.value.trim() });
   const result = await json(`/api/bench/runs/${encodeURIComponent(runSelect.value)}/cases?${params}`, casesController.signal);
   if (generation !== loadGeneration) return;
-  caseCount.textContent = `${result.total} ${result.mode === "matrix" ? "strategy cells" : "samples"}`;
+  caseCount.textContent = `${result.total} ${result.mode === "matrix" ? "strategy cells" : result.mode === "atlas" ? "sample tracks" : "samples"}`;
   if (result.mode === "matrix") renderMatrixCases(result.rows);
+  else if (result.mode === "atlas") renderAtlasCases(result.rows);
   else renderLegacyCases(result.rows);
 }
 
@@ -420,6 +496,74 @@ function renderMatrixCases(rows) {
     ]);
   }));
   if (!rows.length) casesBody.append(emptyRow(headers.length, "No strategy cells in this subset."));
+}
+
+function renderAtlasCases(rows) {
+  const headers = ["Sample", "Evidence", "Blind winner", "Full-lattice oracle", "GT target reach (evaluation-only)", "Controlled prior", "GT ↔ DEM", "Runtime"];
+  casesHead.replaceChildren(node("tr", {}, headers.map((label) => node("th", { text: label }))));
+  casesBody.replaceChildren(...rows.map((item) => {
+    const compatibility = item.compatibility ?? {};
+    const height = compatibility.height ?? {};
+    const archive = item.archive ?? {};
+    const top100 = item.shortlist_top_100;
+    const firstReach = item.shortlist_first_reach;
+    const evidenceStatus = item.status === "ok" ? "complete" : item.status === "evidence_rejected" ? "evidence rejected" : item.status;
+    return node("tr", {}, [
+      node("td", {}, [
+        node("a", { class: "sample-link", href: `/gt?sample=${encodeURIComponent(item.name)}`, text: item.name }),
+        node("span", { class: "sub", text: item.manual ? "manual reference" : "automatic reference" }),
+      ]),
+      node("td", {}, [
+        node("span", { class: "method", text: EVIDENCE[item.evidence_track] ?? item.evidence_track }),
+        node("span", { class: "sub", text: evidenceStatus ?? "missing" }),
+      ]),
+      atlasCandidateCell(item.blind_winner, "estimator-selected", archive, item.reference_position_probe),
+      atlasCandidateCell(item.full_lattice_oracle, "evaluation-only GT oracle", archive),
+      node("td", {}, firstReach ? [
+        node("span", { class: "number success", text: `Top ${firstReach.requested_k}` }),
+        node("span", { class: "sub", text: `${firstReach.evaluated_k} evaluated · reached ≤100 m / 5°` }),
+      ] : top100 ? [
+        node("span", { class: "number failure", text: "Missed top 100" }),
+        node("span", { class: "sub", text: `${top100.evaluated_k} evaluated · no target-successful mode` }),
+      ] : [node("span", { class: "muted", text: "—" })]),
+      node("td", {}, [
+        node("span", { class: "number", text: `${num(item.prior_errors?.horizontal_position_m, 1, " m")} · ${num(item.prior_errors?.yaw_deg, 1, "°")}` }),
+        node("span", { class: "sub", text: "reference-derived control · only east/north centres the grid" }),
+        node("span", { class: "sub", text: "recorded yaw/pitch/altitude do not constrain scoring" }),
+      ]),
+      node("td", {}, [
+        node("span", { class: "number", text: `${compatibility.tier ?? "—"} · ${num(compatibility.p90_deg, 2, "°")}` }),
+        node("span", { class: "sub", text: `${height.tier ?? "no height gate"} · ${signed(height.raw_camera_clearance_m, 1, " m")}` }),
+      ]),
+      node("td", { class: "number", text: num(item.runtime_s, 1, " s") }),
+    ]);
+  }));
+  if (!rows.length) casesBody.append(emptyRow(headers.length, "No pose-atlas sample tracks in this subset."));
+}
+
+function atlasCandidateCell(candidate, label, archive, referenceProbe = null) {
+  if (!candidate) return node("td", {}, [node("span", { class: "muted", text: "—" }), node("span", { class: "sub", text: label })]);
+  const errors = candidate.errors ?? {};
+  const rankScope = candidate.estimator_rank_scope === "full_score_lattice" ? "full lattice" : "shortlist";
+  const rankTotal = candidate.estimator_rank_scope === "full_score_lattice"
+    ? archive?.full_lattice?.hypothesis_count
+    : archive?.candidate_count;
+  const details = [
+    node("span", {
+      class: `number ${candidate.reaches_target ? "success" : "failure"}`,
+      text: `${num(errors.horizontal_position_m, 1, " m")} · ${num(errors.yaw_deg, 1, "°")}`,
+    }),
+    node("span", { class: "sub", text: `${label} · rank ${candidate.estimator_rank ?? "—"}${rankTotal ? `/${rankTotal}` : ""} in ${rankScope}` }),
+  ];
+  const delta = referenceProbe?.score_delta_reference_minus_blind_winner;
+  if (delta != null) {
+    const outcome = Number(delta) > 0 ? "loses" : "beats blind";
+    details.push(node("span", {
+      class: "sub",
+      text: `reference-east/north probe ${outcome} by ${num(Math.abs(Number(delta)), 2, " px")} · yaw error ${num(referenceProbe?.errors?.yaw_deg, 1, "°")}`,
+    }));
+  }
+  return node("td", {}, details);
 }
 
 function renderLegacyCases(rows) {

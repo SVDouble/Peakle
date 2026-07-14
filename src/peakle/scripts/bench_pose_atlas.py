@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.metadata
-import json
 import math
 import os
 import platform
@@ -29,6 +28,13 @@ import numpy as np
 from PIL import Image
 
 from peakle.domain.camera import CameraExtrinsics
+from peakle.localize.atlas_dashboard import (
+    ATLAS_DASHBOARD_FILENAME,
+    ATLAS_DASHBOARD_SCHEMA,
+    ATLAS_STUDY_SCHEMA,
+    build_atlas_dashboard,
+    canonical_json_bytes,
+)
 from peakle.localize.bench import find_sample_dirs
 from peakle.localize.extract import best_skyline_candidate, extract_candidates
 from peakle.localize.geopose import load_sample, resampled_oracle_skyline
@@ -51,7 +57,6 @@ from peakle.localize.strategy_bench import (
     provision_estimator_terrain,
 )
 
-ATLAS_STUDY_SCHEMA = "peakle_pose_atlas_study_v2"
 DEFAULT_SAMPLES = (
     "eth_ch1_IMG_4948_01024",
     "eth_ch1_IMG_5143_01024",
@@ -145,6 +150,8 @@ def main() -> None:
         "aggregates": _aggregates(samples, tracks),
     }
     result_bytes = _json_bytes(results)
+    results_sha256 = hashlib.sha256(result_bytes).hexdigest()
+    dashboard_bytes = _json_bytes(build_atlas_dashboard(results, results_sha256))
     summary_bytes = _summary_markdown(results).encode()
     run = {
         "schema": ATLAS_STUDY_SCHEMA,
@@ -153,8 +160,15 @@ def main() -> None:
         "created_at": started_at.isoformat(timespec="seconds"),
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "wall_runtime_s": round((finished_at - started_at).total_seconds(), 3),
-        "results_sha256": hashlib.sha256(result_bytes).hexdigest(),
+        "results_sha256": results_sha256,
         "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+        "dashboard": {
+            "schema": ATLAS_DASHBOARD_SCHEMA,
+            "path": ATLAS_DASHBOARD_FILENAME,
+            "sha256": hashlib.sha256(dashboard_bytes).hexdigest(),
+            "source_results_sha256": results_sha256,
+            "size_bytes": len(dashboard_bytes),
+        },
         "inputs": provenance_started["inputs"],
         "implementation": provenance_started["implementation"],
         "environment": _environment_record(),
@@ -178,6 +192,9 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=False)
     _write_once(output_dir / "results.json", result_bytes)
     _write_once(output_dir / "summary.md", summary_bytes)
+    _write_once(output_dir / ATLAS_DASHBOARD_FILENAME, dashboard_bytes)
+    # run.json is the final commit marker. Discovery cannot observe a partially
+    # published result/summary/dashboard set.
     _write_once(output_dir / "run.json", _json_bytes(run))
     print(
         f"Committed pose-atlas artifact to {output_dir} (results sha256 {run['results_sha256'][:12]}…).",
@@ -500,6 +517,7 @@ def _position_count(config: SkylineAtlasConfig) -> int:
 def _implementation_record() -> dict[str, Any]:
     paths = [
         Path(__file__),
+        BASE / "src/peakle/localize/atlas_dashboard.py",
         BASE / "src/peakle/localize/skyline_atlas.py",
         BASE / "src/peakle/localize/solve.py",
         BASE / "src/peakle/localize/raycast.py",
@@ -586,7 +604,7 @@ def _environment_record() -> dict[str, Any]:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\n").encode()
+    return canonical_json_bytes(value)
 
 
 def _write_once(path: Path, content: bytes) -> None:

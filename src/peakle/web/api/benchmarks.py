@@ -5,13 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import tempfile
+import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from statistics import median
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from peakle.localize.atlas_dashboard import (
+    ATLAS_DASHBOARD_FILENAME,
+    ATLAS_DASHBOARD_SCHEMA,
+    ATLAS_STUDY_SCHEMA,
+    build_atlas_dashboard,
+    canonical_json_bytes,
+    validated_atlas_dashboard,
+)
 from peakle.localize.strategy_bench import aggregate_matrix
 
 router = APIRouter(tags=["benchmarks"])
@@ -19,6 +32,18 @@ router = APIRouter(tags=["benchmarks"])
 BASE = Path(__file__).resolve().parents[4]
 OUTPUT = BASE / "local/output"
 RESULT_GLOB = "*-geopose-bench/results.json"
+ATLAS_ALGORITHM = "skyline-atlas"
+ATLAS_PRIOR_REGIME = "controlled_reference_perturbation"
+ATLAS_CACHE_ROOT = BASE / "local/cache/pose_atlas_dashboard"
+_ATLAS_LOAD_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _AtlasArtifact:
+    payload: dict[str, Any]
+    results_sha256: str
+    compact_source: str
+    dashboard_hash_verified: bool | None
 
 
 def _discover_runs() -> list[dict[str, Any]]:
@@ -91,6 +116,23 @@ def _discover_runs() -> list[dict[str, Any]]:
             "_metadata": metadata,
         }
         runs.append(run)
+    discovered_paths = {run["_path"] for run in runs}
+    for metadata_path in OUTPUT.glob("*/run.json"):
+        atlas_metadata = _read_json(metadata_path)
+        if atlas_metadata is None or atlas_metadata.get("schema") != ATLAS_STUDY_SCHEMA:
+            continue
+        result_path = metadata_path.parent / "results.json"
+        if atlas_metadata.get("run_id") not in {None, result_path.parent.name}:
+            continue
+        if result_path in discovered_paths:
+            continue
+        artifact = _read_atlas_artifact(result_path, atlas_metadata)
+        if artifact is None:
+            continue
+        payload = artifact.payload
+        if payload.get("run_id") not in {None, result_path.parent.name}:
+            continue
+        runs.append(_atlas_run(result_path, atlas_metadata, artifact))
     runs.sort(key=lambda run: str(run["created_at"]), reverse=True)
     eligible = [
         run
@@ -105,6 +147,70 @@ def _discover_runs() -> list[dict[str, Any]]:
     return runs
 
 
+def _atlas_run(
+    result_path: Path,
+    metadata: dict[str, Any],
+    artifact: _AtlasArtifact,
+) -> dict[str, Any]:
+    payload = artifact.payload
+    samples = payload["samples"]
+    tracks = _atlas_track_names(payload)
+    track_records = [
+        sample.get("tracks", {}).get(track)
+        for sample in samples
+        for track in tracks
+        if isinstance(sample.get("tracks"), dict)
+    ]
+    completed_tracks = sum(isinstance(record, dict) and record.get("status") == "ok" for record in track_records)
+    evidence_rejected = sum(
+        isinstance(record, dict) and record.get("status") == "evidence_rejected" for record in track_records
+    )
+    track_errors = sum(isinstance(record, dict) and record.get("status") == "error" for record in track_records)
+    implementation_value = metadata.get("implementation")
+    implementation = implementation_value if isinstance(implementation_value, dict) else {}
+    expected_hash = metadata.get("results_sha256")
+    dashboard_value = metadata.get("dashboard")
+    dashboard = dashboard_value if isinstance(dashboard_value, dict) else {}
+    atlas_config = payload.get("config", {}).get("atlas")
+    return {
+        "id": result_path.parent.name,
+        "created_at": metadata.get("created_at") or _legacy_created_at(result_path.parent.name),
+        "status": metadata.get("status", "legacy"),
+        "schema_version": 2,
+        "artifact_schema": ATLAS_STUDY_SCHEMA,
+        "kind": "pose_atlas",
+        "sample_count": len(samples),
+        "completed_sample_count": len(samples),
+        "error_count": track_errors,
+        "matrix_case_count": 0,
+        "attempted_case_count": len(samples) * len(tracks),
+        "primary_case_count": 0,
+        "algorithm_count": 1,
+        "algorithms": [ATLAS_ALGORITHM],
+        "evidence_tracks": tracks,
+        "track_count": len(tracks),
+        "completed_track_count": completed_tracks,
+        "evidence_rejected_count": evidence_rejected,
+        "prior_regimes": [ATLAS_PRIOR_REGIME],
+        "compatibility_policy": "gt_dem_compat_v1",
+        "has_provenance": bool(metadata),
+        "hash_verified": artifact.results_sha256 == expected_hash if expected_hash else None,
+        "results_sha256": expected_hash,
+        "dashboard_sha256": dashboard.get("sha256"),
+        "dashboard_hash_verified": artifact.dashboard_hash_verified,
+        "compact_source": artifact.compact_source,
+        "git_sha": implementation.get("git_revision"),
+        "git_diff_sha256": implementation.get("tracked_source_diff_sha256"),
+        "implementation_sha256": implementation.get("aggregate_sha256"),
+        "dirty_code": bool(implementation.get("source_worktree_status")),
+        "candidate_validation": None,
+        "atlas_config": _json_safe(atlas_config),
+        "_path": result_path,
+        "_metadata": metadata,
+        "_payload": payload,
+    }
+
+
 def _public_run(run: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in run.items() if not key.startswith("_")}
 
@@ -117,7 +223,7 @@ def _run(run_id: str) -> dict[str, Any]:
 
 
 @router.get("/bench/runs")
-async def list_benchmark_runs() -> list[dict[str, Any]]:
+def list_benchmark_runs() -> list[dict[str, Any]]:
     """Available immutable benchmark artifacts, newest first."""
 
     return [_public_run(run) for run in _discover_runs()]
@@ -161,22 +267,24 @@ async def get_compatibility_policy() -> dict[str, Any]:
 
 
 @router.get("/bench/runs/{run_id}")
-async def get_benchmark_run(run_id: str) -> dict[str, Any]:
+def get_benchmark_run(run_id: str) -> dict[str, Any]:
     run = _run(run_id)
     return _public_run(run) | {"provenance": _json_safe(run["_metadata"])}
 
 
 @router.get("/bench/runs/{run_id}/summary")
-async def get_benchmark_summary(run_id: str) -> dict[str, Any]:
+def get_benchmark_summary(run_id: str) -> dict[str, Any]:
     run = _run(run_id)
     payload = _payload(run)
     if run["kind"] == "strategy_matrix":
         return _matrix_summary(run, payload)
+    if run["kind"] == "pose_atlas":
+        return _atlas_summary(run, payload)
     return _legacy_summary(run, payload["rows"])
 
 
 @router.get("/bench/runs/{run_id}/cases")
-async def get_benchmark_cases(
+def get_benchmark_cases(
     run_id: str,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=5000),
@@ -189,6 +297,26 @@ async def get_benchmark_cases(
     run = _run(run_id)
     payload = _payload(run)
     needle = query.casefold().strip()
+    if run["kind"] == "pose_atlas":
+        samples = _filter_atlas_samples(payload["samples"], subset)
+        tracks = _atlas_track_names(payload)
+        cases = [_atlas_case(sample, track) for sample in samples for track in tracks]
+        if algorithm and algorithm != ATLAS_ALGORITHM:
+            cases = []
+        if evidence:
+            cases = [case for case in cases if case.get("evidence_track") == evidence]
+        if prior_regime and prior_regime != ATLAS_PRIOR_REGIME:
+            cases = []
+        if needle:
+            cases = [case for case in cases if needle in str(case.get("name", "")).casefold()]
+        cases.sort(key=lambda case: (str(case["name"]), str(case["evidence_track"])))
+        return {
+            "mode": "atlas",
+            "total": len(cases),
+            "offset": offset,
+            "limit": limit,
+            "rows": cases[offset : offset + limit],
+        }
     if run["kind"] == "strategy_matrix":
         compatibility = _compatibility_by_name(payload["rows"])
         cases = _filter_matrix_cases(payload["matrix_cases"], subset, compatibility)
@@ -231,6 +359,211 @@ async def get_benchmark_cases(
         "limit": limit,
         "rows": public[offset : offset + limit],
     }
+
+
+def _atlas_summary(run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    samples = payload["samples"]
+    tracks = _atlas_track_names(payload)
+    subsets: dict[str, Any] = {}
+    for key in ("all", "manual", "map_ab", "map_ab_height_a", "map_a", "map_a_height_a"):
+        selected = _filter_atlas_samples(samples, key)
+        if not selected and key not in {"all", "manual"}:
+            continue
+        aggregates = [_atlas_track_aggregate(selected, track) for track in tracks]
+        subsets[key] = {
+            "sample_count": len(selected),
+            "requested_track_count": len(selected) * len(tracks),
+            "completed_track_count": sum(item["completed"] for item in aggregates),
+            "evidence_rejected_count": sum(item["evidence_rejected"] for item in aggregates),
+            "error_count": sum(item["errors"] for item in aggregates),
+            "aggregates": aggregates,
+        }
+    default_subset = (
+        "map_ab_height_a"
+        if subsets.get("map_ab_height_a", {}).get("sample_count", 0)
+        else "map_ab"
+        if subsets.get("map_ab", {}).get("sample_count", 0)
+        else "all"
+    )
+    warnings = [
+        "This is a diagnostic search-ceiling study, not a ranking-eligible strategy-matrix run.",
+        "Blind winners are estimator-selected. Full-lattice GT oracles use reference truth only after the score "
+        "lattice is frozen and never replace the estimator output.",
+        "PFM / source-depth evidence was generated at the reference pose and is analysis-only.",
+        "The atlas prior is a controlled, reference-derived horizontal perturbation. Only east/north centres "
+        "the grid; recorded yaw, pitch and altitude perturbations do not constrain scoring.",
+        "GeoPose crop pitch and the fitted roll nuisance are not graded.",
+    ]
+    if run.get("dirty_code"):
+        warnings.append(
+            "This artifact was produced from modified attested source paths; "
+            "use its implementation hash for comparison."
+        )
+    return {
+        "mode": "atlas",
+        "run": _public_run(run),
+        "default_subset": default_subset,
+        "warnings": warnings,
+        "success_contract": {
+            "horizontal_position_error_m_lte": 100.0,
+            "absolute_yaw_error_deg_lte": 5.0,
+            "pitch_scored": False,
+        },
+        "subsets": subsets,
+    }
+
+
+def _filter_atlas_samples(samples: list[dict[str, Any]], subset: str) -> list[dict[str, Any]]:
+    if subset == "all":
+        return list(samples)
+    if subset == "manual":
+        return [sample for sample in samples if sample.get("manual")]
+    if subset not in {"map_ab", "map_ab_height_a", "map_a", "map_a_height_a"}:
+        raise HTTPException(status_code=400, detail=f"unknown subset {subset!r}")
+    selected: list[dict[str, Any]] = []
+    for sample in samples:
+        compatibility = sample.get("compatibility")
+        compat = compatibility if isinstance(compatibility, dict) else {}
+        tier = compat.get("tier")
+        if subset in {"map_ab", "map_ab_height_a"} and tier not in {"MAP_A", "MAP_B"}:
+            continue
+        if subset not in {"map_ab", "map_ab_height_a"} and tier != "MAP_A":
+            continue
+        if subset in {"map_ab_height_a", "map_a_height_a"} and _height_tier_from_compat(compat) != "HEIGHT_A":
+            continue
+        selected.append(sample)
+    return selected
+
+
+def _atlas_track_names(payload: dict[str, Any]) -> list[str]:
+    config_value = payload.get("config")
+    config = config_value if isinstance(config_value, dict) else {}
+    configured = config.get("tracks")
+    if isinstance(configured, list):
+        names = [str(value) for value in configured if value]
+        if names:
+            return list(dict.fromkeys(names))
+    return sorted(
+        {
+            str(track)
+            for sample in payload.get("samples", [])
+            if isinstance(sample, dict) and isinstance(sample.get("tracks"), dict)
+            for track in sample["tracks"]
+        }
+    )
+
+
+def _atlas_track_aggregate(samples: list[dict[str, Any]], track: str) -> dict[str, Any]:
+    records = [sample.get("tracks", {}).get(track) for sample in samples if isinstance(sample.get("tracks"), dict)]
+    completed = [record for record in records if isinstance(record, dict) and record.get("status") == "ok"]
+    winner = [
+        evaluation["blind_winner"]
+        for record in completed
+        if isinstance((evaluation := record.get("evaluation")), dict)
+        and isinstance(evaluation.get("blind_winner"), dict)
+    ]
+    oracle = [
+        evaluation["full_lattice_oracle"]
+        for record in completed
+        if isinstance((evaluation := record.get("evaluation")), dict)
+        and isinstance(evaluation.get("full_lattice_oracle"), dict)
+    ]
+    requested = len(samples)
+    blind_successes = sum(item.get("reaches_target") is True for item in winner)
+    oracle_successes = sum(item.get("reaches_target") is True for item in oracle)
+    top_100_successes = 0
+    for record in completed:
+        evaluation = record.get("evaluation")
+        if not isinstance(evaluation, dict):
+            continue
+        top_100 = next(
+            (
+                item
+                for item in evaluation.get("shortlist_top_k", [])
+                if isinstance(item, dict) and item.get("requested_k") == 100
+            ),
+            None,
+        )
+        top_100_successes += isinstance(top_100, dict) and top_100.get("reaches_target") is True
+    return {
+        "track": track,
+        "requested": requested,
+        "completed": len(completed),
+        "evidence_rejected": sum(
+            isinstance(record, dict) and record.get("status") == "evidence_rejected" for record in records
+        ),
+        "errors": sum(isinstance(record, dict) and record.get("status") == "error" for record in records),
+        "missing": sum(not isinstance(record, dict) for record in records),
+        "blind_winner_successes": blind_successes,
+        "blind_winner_success_rate": round(blind_successes / requested, 4) if requested else None,
+        "full_lattice_oracle_successes": oracle_successes,
+        "full_lattice_oracle_success_rate": round(oracle_successes / requested, 4) if requested else None,
+        "median_blind_winner_horizontal_m": _atlas_candidate_median(winner, "horizontal_position_m"),
+        "median_blind_winner_yaw_deg": _atlas_candidate_median(winner, "yaw_deg"),
+        "median_full_lattice_oracle_horizontal_m": _atlas_candidate_median(oracle, "horizontal_position_m"),
+        "median_full_lattice_oracle_yaw_deg": _atlas_candidate_median(oracle, "yaw_deg"),
+        "median_full_lattice_oracle_estimator_rank": _median_numbers([item.get("estimator_rank") for item in oracle]),
+        "shortlist_top_100_successes": top_100_successes,
+        "runtime_s": round(
+            sum(_json_number(record.get("runtime_s")) or 0.0 for record in completed if isinstance(record, dict)), 4
+        ),
+    }
+
+
+def _atlas_candidate_median(candidates: list[dict[str, Any]], key: str) -> float | None:
+    return _median_numbers(
+        [candidate.get("errors", {}).get(key) for candidate in candidates if isinstance(candidate.get("errors"), dict)]
+    )
+
+
+def _median_numbers(values: list[Any]) -> float | None:
+    numbers = [number for value in values if (number := _json_number(value)) is not None]
+    return round(median(numbers), 5) if numbers else None
+
+
+def _atlas_case(sample: dict[str, Any], track: str) -> dict[str, Any]:
+    tracks_value = sample.get("tracks")
+    tracks = tracks_value if isinstance(tracks_value, dict) else {}
+    record_value = tracks.get(track)
+    record = record_value if isinstance(record_value, dict) else {}
+    evaluation_value = record.get("evaluation")
+    evaluation = evaluation_value if isinstance(evaluation_value, dict) else {}
+    shortlist = [item for item in evaluation.get("shortlist_top_k", []) if isinstance(item, dict)]
+    top_100 = next(
+        (item for item in shortlist if item.get("requested_k") == 100),
+        None,
+    )
+    reached = [
+        item
+        for item in shortlist
+        if item.get("reaches_target") is True and _json_number(item.get("requested_k")) is not None
+    ]
+    first_reach = min(reached, key=lambda item: float(item["requested_k"])) if reached else None
+    return _json_safe(
+        {
+            "id": f"{sample.get('name', 'unknown')}:{track}",
+            "name": str(sample.get("name", "unknown")),
+            "manual": bool(sample.get("manual")),
+            "algorithm": ATLAS_ALGORITHM,
+            "evidence_track": track,
+            "prior_regime": ATLAS_PRIOR_REGIME,
+            "status": record.get("status", "missing"),
+            "runtime_s": record.get("runtime_s"),
+            "compatibility": sample.get("compatibility"),
+            "photo_edge_support": sample.get("photo_edge_support"),
+            "prior_errors": sample.get("prior_errors"),
+            "prior_context": sample.get("prior_context"),
+            "evidence": record.get("evidence"),
+            "blind_winner": evaluation.get("blind_winner"),
+            "full_lattice_oracle": evaluation.get("full_lattice_oracle"),
+            "shortlist_top_100": top_100,
+            "shortlist_first_reach": first_reach,
+            "selection_regret": evaluation.get("selection_regret"),
+            "target": evaluation.get("target"),
+            "reference_position_probe": evaluation.get("reference_position_probe"),
+            "archive": record.get("archive"),
+        }
+    )
 
 
 def _matrix_summary(run: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -505,10 +838,216 @@ def _legacy_track_summary(rows: list[dict[str, Any]], key: str) -> dict[str, Any
 
 
 def _payload(run: dict[str, Any]) -> dict[str, Any]:
+    if run["kind"] == "pose_atlas":
+        payload = run.get("_payload")
+        if isinstance(payload, dict):
+            return payload
+        artifact = _read_atlas_artifact(run["_path"], run["_metadata"])
+        if artifact is not None:
+            return artifact.payload
+        raise HTTPException(status_code=500, detail="pose-atlas artifact became unreadable")
     payload = _read_result(run["_path"])
     if payload is None:
         raise HTTPException(status_code=500, detail="benchmark artifact became unreadable")
     return payload
+
+
+def _read_atlas_artifact(path: Path, metadata: dict[str, Any]) -> _AtlasArtifact | None:
+    result_identity = _file_identity(path)
+    if result_identity is None:
+        return None
+    run_id = path.parent.name
+    results_hash_declared = "results_sha256" in metadata
+    expected_results_sha256 = _sha256_digest(metadata.get("results_sha256"))
+    if results_hash_declared and expected_results_sha256 is None:
+        return None
+    dashboard_declared = "dashboard" in metadata
+    dashboard_identity: tuple[str, int, int, int, int, int] | None = None
+    expected_dashboard_sha256: str | None = None
+    if dashboard_declared:
+        dashboard_value = metadata.get("dashboard")
+        if not isinstance(dashboard_value, dict):
+            return None
+        expected_dashboard_sha256 = _sha256_digest(dashboard_value.get("sha256"))
+        dashboard_source_sha256 = _sha256_digest(dashboard_value.get("source_results_sha256"))
+        if (
+            dashboard_value.get("schema") != ATLAS_DASHBOARD_SCHEMA
+            or dashboard_value.get("path") != ATLAS_DASHBOARD_FILENAME
+            or expected_dashboard_sha256 is None
+            or expected_results_sha256 is None
+            or dashboard_source_sha256 != expected_results_sha256
+        ):
+            return None
+        dashboard_identity = _file_identity(path.parent / ATLAS_DASHBOARD_FILENAME)
+        if dashboard_identity is None:
+            return None
+        declared_size = dashboard_value.get("size_bytes")
+        if isinstance(declared_size, int) and declared_size != dashboard_identity[3]:
+            return None
+    cache_root = str(ATLAS_CACHE_ROOT.resolve())
+    # functools' cache does not coalesce concurrent misses. Hold the lock around
+    # the cached invocation so only one thread can enter a dense legacy parse.
+    with _ATLAS_LOAD_LOCK:
+        return _read_atlas_artifact_cached(
+            result_identity,
+            dashboard_identity,
+            expected_results_sha256,
+            expected_dashboard_sha256,
+            run_id,
+            cache_root,
+        )
+
+
+@lru_cache(maxsize=128)
+def _read_atlas_artifact_cached(
+    result_identity: tuple[str, int, int, int, int, int],
+    dashboard_identity: tuple[str, int, int, int, int, int] | None,
+    expected_results_sha256: str | None,
+    expected_dashboard_sha256: str | None,
+    run_id: str,
+    cache_root: str,
+) -> _AtlasArtifact | None:
+    result_path = Path(result_identity[0])
+    actual_results_sha256 = _stream_sha256(result_path)
+    if actual_results_sha256 is None:
+        return None
+    # A declared result digest is the immutable run commit.  Cache entries are
+    # keyed by the bytes we observed, but must never legitimize bytes that no
+    # longer match that commit.
+    if expected_results_sha256 is not None and actual_results_sha256 != expected_results_sha256:
+        return None
+
+    if dashboard_identity is not None:
+        # A declared sidecar is part of the immutable commit. Never silently
+        # downgrade a missing/tampered sidecar into the legacy dense path.
+        if expected_dashboard_sha256 is None:
+            return None
+        dashboard_path = Path(dashboard_identity[0])
+        try:
+            encoded = dashboard_path.read_bytes()
+            if hashlib.sha256(encoded).hexdigest() != expected_dashboard_sha256:
+                return None
+            dashboard_raw = json.loads(encoded)
+        except OSError, json.JSONDecodeError:
+            return None
+        payload = validated_atlas_dashboard(
+            dashboard_raw,
+            expected_results_sha256=actual_results_sha256,
+            expected_run_id=run_id,
+        )
+        if payload is None:
+            return None
+        return _AtlasArtifact(
+            payload=payload,
+            results_sha256=actual_results_sha256,
+            compact_source="artifact_sidecar",
+            dashboard_hash_verified=True,
+        )
+
+    cache_path = _atlas_cache_path(Path(cache_root), actual_results_sha256)
+    cached_payload = _read_cached_atlas_dashboard(
+        cache_path,
+        expected_results_sha256=actual_results_sha256,
+        expected_run_id=run_id,
+    )
+    if cached_payload is not None:
+        return _AtlasArtifact(
+            payload=cached_payload,
+            results_sha256=actual_results_sha256,
+            compact_source="content_cache",
+            dashboard_hash_verified=None,
+        )
+
+    raw = _parse_dense_atlas_results(result_path)
+    if raw is None:
+        return None
+    try:
+        dashboard = build_atlas_dashboard(raw, actual_results_sha256)
+    except ValueError:
+        return None
+    _write_atlas_cache(cache_path, canonical_json_bytes(dashboard))
+    return _AtlasArtifact(
+        payload=dashboard["payload"],
+        results_sha256=actual_results_sha256,
+        compact_source="results_fallback",
+        dashboard_hash_verified=None,
+    )
+
+
+def _file_identity(path: Path) -> tuple[str, int, int, int, int, int] | None:
+    try:
+        stat = path.stat()
+        resolved = str(path.resolve())
+    except OSError:
+        return None
+    return (resolved, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _stream_sha256(path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _parse_dense_atlas_results(path: Path) -> dict[str, Any] | None:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except OSError, json.JSONDecodeError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _atlas_cache_path(cache_root: Path, results_sha256: str) -> Path:
+    return cache_root / ATLAS_DASHBOARD_SCHEMA / results_sha256[:2] / f"{results_sha256}.json"
+
+
+def _read_cached_atlas_dashboard(
+    path: Path,
+    *,
+    expected_results_sha256: str,
+    expected_run_id: str,
+) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_bytes())
+    except OSError, json.JSONDecodeError:
+        return None
+    return validated_atlas_dashboard(
+        raw,
+        expected_results_sha256=expected_results_sha256,
+        expected_run_id=expected_run_id,
+    )
+
+
+def _write_atlas_cache(path: Path, content: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _sha256_digest(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) != 64 or value.lower() != value:
+        return None
+    try:
+        int(value, 16)
+    except ValueError:
+        return None
+    return value
 
 
 def _read_result(path: Path) -> dict[str, Any] | None:
@@ -524,6 +1063,8 @@ def _read_result(path: Path) -> dict[str, Any] | None:
             "aggregates": [],
         }
     if not isinstance(raw, dict):
+        return None
+    if raw.get("schema") == ATLAS_STUDY_SCHEMA:
         return None
     rows = raw.get("rows", [])
     cases = raw.get("matrix_cases", [])
