@@ -153,7 +153,12 @@ def main() -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--max-n", type=int, default=1)
+    parser.add_argument(
+        "--max-n",
+        type=int,
+        default=None,
+        help="optional sample cap; defaults to one for a manifest/default run and all explicitly named samples",
+    )
     parser.add_argument("--samples", help="comma-separated sample names (overrides manifest)")
     parser.add_argument(
         "--manifest",
@@ -230,7 +235,10 @@ def _selected_samples(args: argparse.Namespace) -> list[Path]:
             [line.strip() for line in manifest.read_text().splitlines() if line.strip()] if manifest.exists() else []
         )
     selected = [by_name[name] for name in names if name in by_name] if names else dirs
-    return selected[: args.max_n]
+    limit = args.max_n if args.max_n is not None else (len(selected) if args.samples else 1)
+    if limit < 1:
+        raise SystemExit("--max-n must be positive")
+    return selected[:limit]
 
 
 def _csv_choice(value: str, allowed: tuple[str, ...], label: str):

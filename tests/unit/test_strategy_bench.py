@@ -231,6 +231,22 @@ def test_candidate_validation_is_enabled_serialized_and_cli_opt_out_reaches_rend
     assert resources.config.candidate_validation.enabled is False
 
 
+def test_explicit_benchmark_sample_list_is_not_silently_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    from peakle.scripts.bench_pose_matrix import _parser, _selected_samples
+
+    samples = [Path("/data/alpha"), Path("/data/beta"), Path("/data/gamma")]
+    monkeypatch.setattr("peakle.scripts.bench_pose_matrix.find_sample_dirs", lambda: samples)
+
+    explicit = _parser().parse_args(["--samples", "alpha,beta,gamma"])
+    assert _selected_samples(explicit) == samples
+
+    capped = _parser().parse_args(["--samples", "alpha,beta,gamma", "--max-n", "2"])
+    assert _selected_samples(capped) == samples[:2]
+
+    default = _parser().parse_args(["--manifest", "/definitely/missing/manifest.txt"])
+    assert _selected_samples(default) == samples[:1]
+
+
 def test_rgb_only_evidence_does_not_invoke_skyline_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     from peakle.localize import strategy_bench as module
 

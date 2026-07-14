@@ -1173,6 +1173,18 @@ def _pre_solve_quality(
     return compatibility, photo_edge_support
 
 
+def assess_pre_solve_quality(
+    sample: GeoPoseSample,
+    terrain_selection: TerrainSelection,
+    evidence: list[EvidenceTrack],
+    width: int,
+    height: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Expose the matrix's evaluation-only compatibility screen to studies."""
+
+    return _pre_solve_quality(sample, terrain_selection, evidence, width, height)
+
+
 def _estimator_terrain_for_cell(
     base_terrain: TerrainMap,
     scenario: PriorScenario,
@@ -1251,6 +1263,28 @@ def _estimator_terrain_for_cell(
             "regular_grid_fused_cells": fused_cells,
             "regular_grid_is_per_cell_copy": provision.patch is not None,
         },
+    )
+
+
+def provision_estimator_terrain(
+    base_terrain: TerrainMap,
+    scenario: PriorScenario,
+) -> EstimatorTerrainSelection:
+    """Provision the truth-free terrain stack for one standalone estimator study.
+
+    Matrix execution normally owns a per-scenario cache because several cells
+    share the same supplied prior.  Research tools that execute one estimator
+    family still need the exact same lineage rule: the native patch is centred
+    on the supplied position prior, never on the evaluation reference.
+    """
+
+    replicate = int(scenario.perturbation.get("replicate", 0))
+    return _estimator_terrain_for_cell(
+        base_terrain,
+        scenario,
+        scenario_key=(scenario.name, replicate),
+        patch_cache={},
+        provision_patch=True,
     )
 
 
