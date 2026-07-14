@@ -50,7 +50,12 @@ def _elevation_angle_grid(
     x0, dx = xm[0], (xm[-1] - xm[0]) / (len(xm) - 1)
     y0, dy = ym[0], (ym[-1] - ym[0]) / (len(ym) - 1)
     if d_max is None:
-        d_max = 0.95 * min(xm[-1] - xm[0], ym[-1] - ym[0]) / 2
+        # A half-side cutoff misses the corners even for a centred camera, and misses most of
+        # the map when the camera is off centre.  The farthest-corner distance is the smallest
+        # common ray range that lets this camera use all terrain in the rectangular DEM.
+        farthest_east_m = max(abs(cam_e - xm[0]), abs(xm[-1] - cam_e))
+        farthest_north_m = max(abs(cam_n - ym[0]), abs(ym[-1] - cam_n))
+        d_max = float(np.hypot(farthest_east_m, farthest_north_m))
     ds = _distance_samples(d_max, step, patch=patch)
     east = cam_e + ds[None, :] * np.sin(az_rad)[:, None]
     north = cam_n + ds[None, :] * np.cos(az_rad)[:, None]
@@ -86,6 +91,10 @@ def _distance_samples(d_max: float, step: float, patch=None) -> np.ndarray:
     ds = np.unique(np.concatenate([band for band in bands if band.size]))
     if ds.size == 0:
         ds = np.asarray([min(close_step, d_max)], dtype=float)
+    elif not np.isclose(ds[-1], d_max, rtol=0.0, atol=np.finfo(float).eps * max(1.0, abs(d_max))):
+        # np.arange excludes its stop. Include an explicitly requested cap and the implicit
+        # farthest corner exactly; otherwise the last available terrain can be skipped by a step.
+        ds = np.append(ds, d_max)
     return ds.astype(float, copy=False)
 
 
