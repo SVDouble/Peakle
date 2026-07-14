@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import math
-import os
 import platform
-import shutil
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -22,6 +20,7 @@ from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import EARTH_RADIUS_M, LocalPoint
 from peakle.domain.terrain import TerrainMap
 from peakle.io.artifacts import fsync_directory as _fsync_directory
+from peakle.io.artifacts import publish_directory_once as _publish_directory_once
 from peakle.io.artifacts import write_once_bytes as _write_once
 from peakle.localize.extract import best_skyline_candidate, extract_candidates
 from peakle.localize.paths import BASE
@@ -579,40 +578,34 @@ def _commit_artifact(
     started_at: datetime,
     finished_at: datetime,
 ) -> None:
-    if output.exists():
-        raise FileExistsError(f"refusing to replace completed artifact directory: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    staging = output.with_name(f".{output.name}.staging-{os.getpid()}")
-    staging.mkdir(exist_ok=False)
-    try:
-        result_bytes = canonical_json_bytes(results)
-        summary_bytes = summary.encode()
-        _write_once(staging / "results.json", result_bytes)
-        _write_once(staging / "summary.md", summary_bytes)
-        run = {
-            "schema": SYNTHETIC_BENCHMARK_SCHEMA,
-            "run_id": output.name,
-            "status": "complete",
-            "created_at": started_at.isoformat(timespec="seconds"),
-            "finished_at": finished_at.isoformat(timespec="seconds"),
-            "case_count": len(results["cases"]),
-            "results_sha256": hashlib.sha256(result_bytes).hexdigest(),
-            "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
-            "code": _code_provenance(),
-            "environment": {
-                "python": platform.python_version(),
-                "platform": platform.platform(),
-                "numpy": np.__version__,
-            },
-        }
-        _write_once(staging / "run.json", canonical_json_bytes(run))
-        _fsync_directory(staging)
-        os.replace(staging, output)
-        _fsync_directory(output.parent)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        _fsync_directory(output.parent)
-        raise
+    result_bytes = canonical_json_bytes(results)
+    summary_bytes = summary.encode()
+    run = {
+        "schema": SYNTHETIC_BENCHMARK_SCHEMA,
+        "run_id": output.name,
+        "status": "complete",
+        "created_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "case_count": len(results["cases"]),
+        "results_sha256": hashlib.sha256(result_bytes).hexdigest(),
+        "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+        "code": _code_provenance(),
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "numpy": np.__version__,
+        },
+    }
+    _publish_directory_once(
+        output,
+        {
+            "results.json": result_bytes,
+            "summary.md": summary_bytes,
+            "run.json": canonical_json_bytes(run),
+        },
+        write_bytes=_write_once,
+        sync_directory=_fsync_directory,
+    )
 
 
 def _code_provenance() -> dict[str, Any]:

@@ -413,8 +413,13 @@ def test_artifact_commit_uses_atomic_directory_publish(tmp_path) -> None:
 
     assert output.is_dir()
     assert {path.name for path in output.iterdir()} == {"results.json", "summary.md", "run.json"}
+    assert (output / "results.json").read_bytes() == script_module.canonical_json_bytes(results)
+    assert (output / "summary.md").read_bytes() == b"# summary\n"
     assert json.loads((output / "results.json").read_text()) == results
-    assert json.loads((output / "run.json").read_text())["status"] == "complete"
+    run_bytes = (output / "run.json").read_bytes()
+    run = json.loads(run_bytes)
+    assert run_bytes == script_module.canonical_json_bytes(run)
+    assert run["status"] == "complete"
     assert not list(tmp_path.glob(".*.staging-*"))
 
 

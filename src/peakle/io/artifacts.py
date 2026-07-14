@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,8 @@ from pydantic import BaseModel
 from peakle.domain.terrain import TerrainMap
 
 type JsonPayload = dict[str, Any] | list[Any]
+type ByteWriter = Callable[[Path, bytes], None]
+type DirectorySync = Callable[[Path], None]
 
 
 def write_once_bytes(path: Path, data: bytes) -> None:
@@ -37,6 +42,44 @@ def fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def publish_directory_once(
+    output: Path,
+    files: Mapping[str, bytes],
+    *,
+    write_bytes: ByteWriter = write_once_bytes,
+    sync_directory: DirectorySync = fsync_directory,
+) -> None:
+    """Durably publish a flat immutable artifact directory exactly once."""
+
+    if not files:
+        raise ValueError("artifact directory must contain at least one file")
+    validated: list[tuple[str, bytes]] = []
+    for name, data in files.items():
+        relative = Path(name)
+        if not name or relative.is_absolute() or len(relative.parts) != 1 or relative.name in {".", ".."}:
+            raise ValueError(f"artifact filename must be one safe relative path component: {name!r}")
+        if not isinstance(data, bytes):
+            raise TypeError(f"artifact file content must be bytes: {name!r}")
+        validated.append((name, data))
+    if output.exists():
+        raise FileExistsError(f"refusing to replace completed artifact directory: {output}")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
+    try:
+        for name, data in validated:
+            write_bytes(staging / name, data)
+        sync_directory(staging)
+        if output.exists():
+            raise FileExistsError(f"output directory appeared during publication: {output}")
+        os.rename(staging, output)
+        sync_directory(output.parent)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        sync_directory(output.parent)
+        raise
 
 
 def ensure_directory(path: Path) -> Path:

@@ -5,30 +5,32 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
 
 from peakle.domain.annotations import PeakAnnotation
 from peakle.domain.camera import CameraIntrinsics
 from peakle.domain.contours import ImagePoint
 
 
-@dataclass(frozen=True, slots=True)
-class PeakDisplacement:
+class _FrozenMetric(BaseModel):
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+
+class PeakDisplacement(_FrozenMetric):
     peak_id: str
     anchor_px: float
     anchor_angle_deg: float
     label_position_px: float
 
 
-@dataclass(frozen=True, slots=True)
-class MetricSummary:
+class MetricSummary(_FrozenMetric):
     count: int
     median: float | None
     p90: float | None
 
 
-@dataclass(frozen=True, slots=True)
-class AnnotationSensitivity:
+class AnnotationSensitivity(_FrozenMetric):
     reference_visible_count: int
     candidate_visible_count: int
     precision: float | None
