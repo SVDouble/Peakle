@@ -4,24 +4,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import math
 import platform
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 from peakle.annotation.sensitivity_study import run_annotation_sensitivity_suite as _run_suite
 from peakle.config import AppSettings, load_settings, settings_payload
-from peakle.io.artifacts import publish_directory_once as _publish_directory_once
-from peakle.localize.paths import BASE
 from peakle.rendering.terrain_view import terrain_fingerprint
+from peakle.research.experiment import canonical_json_bytes, publish_flat_run, whole_worktree_provenance
 from peakle.scene.state import SceneState
 
-RUN_SCHEMA = "peakle_annotation_sensitivity_run_v1"
+RUN_SCHEMA = "peakle_annotation_sensitivity_run_v2"
 
 
 def main() -> None:
@@ -39,7 +35,7 @@ def main() -> None:
         terrain_stride=args.terrain_stride,
         max_labels=args.max_labels,
     )
-    results_bytes = _json_bytes(suite.model_dump(mode="json", by_alias=True))
+    results_bytes = canonical_json_bytes(suite.model_dump(mode="json", by_alias=True))
     finished = datetime.now(UTC)
     run = {
         "schema": RUN_SCHEMA,
@@ -65,17 +61,14 @@ def main() -> None:
             "terrain_stride": args.terrain_stride,
             "max_labels": args.max_labels,
         },
-        "code": _code_provenance(),
+        "code": whole_worktree_provenance(),
         "environment": {
             "python": platform.python_version(),
             "platform": platform.platform(),
             "numpy": np.__version__,
         },
     }
-    _publish_directory_once(
-        output,
-        {"results.json": results_bytes, "run.json": _json_bytes(run)},
-    )
+    publish_flat_run(output, run, {"results.json": results_bytes})
     print(f"Committed {len(suite.studies)} views / {run['case_count']} cases to {output}.", flush=True)
 
 
@@ -122,27 +115,6 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise SystemExit(f"--{name.replace('_', '-')} must be finite")
     if args.camera_ground_clearance_m <= 0.0:
         raise SystemExit("--camera-ground-clearance-m must be positive")
-
-
-def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True) + "\n").encode()
-
-
-def _code_provenance() -> dict[str, Any]:
-    status = _git("status", "--porcelain", "--", "src/peakle")
-    return {
-        "git_revision": _git("rev-parse", "HEAD"),
-        "scope": "src/peakle",
-        "dirty": bool(status) if status is not None else None,
-        "source_worktree_status": status.splitlines() if status else [],
-    }
-
-
-def _git(*args: str) -> str | None:
-    try:
-        return subprocess.run(("git", *args), cwd=BASE, check=True, capture_output=True, text=True).stdout.strip()
-    except OSError, subprocess.CalledProcessError:
-        return None
 
 
 def _parser() -> argparse.ArgumentParser:

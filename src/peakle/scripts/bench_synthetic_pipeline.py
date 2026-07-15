@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import math
 import platform
-import subprocess
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -21,9 +20,6 @@ from peakle.config import AppSettings, load_settings
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import EARTH_RADIUS_M, LocalPoint
 from peakle.domain.terrain import TerrainMap
-from peakle.io.artifacts import fsync_directory as _fsync_directory
-from peakle.io.artifacts import publish_directory_once as _publish_directory_once
-from peakle.io.artifacts import write_once_bytes as _write_once
 from peakle.localize.paths import BASE
 from peakle.localize.synthetic_pipeline_bench import (
     DEFAULT_PRIOR_REGIMES,
@@ -32,20 +28,18 @@ from peakle.localize.synthetic_pipeline_bench import (
     SyntheticSearchConfig,
     aggregate_synthetic_cases,
     build_synthetic_candidate_archive,
-    canonical_json_bytes,
     controlled_prior,
     evaluate_synthetic_candidate_archive,
 )
 from peakle.rendering.terrain_view import terrain_fingerprint
+from peakle.research.experiment import canonical_json_bytes, publish_flat_run, whole_worktree_provenance
 from peakle.research.synthetic_estimator import ImmutableArtifact, run_synthetic_estimator
 from peakle.research.synthetic_query import (
     build_synthetic_query_observations,
     observation_track_contract,
     renderer_contract,
 )
-from peakle.scene.state import place_cameras
-from peakle.terrain.generator import TerrainGenerator
-from peakle.terrain.peak_detection import PeakDetector
+from peakle.research.synthetic_scenes import rugged_scenes
 
 
 def main() -> None:
@@ -62,6 +56,8 @@ def main() -> None:
     )
     if args.coarse_factor < 2:
         raise SystemExit("--coarse-factor must be at least 2")
+    if args.views_per_scene < 1:
+        raise SystemExit("--views-per-scene must be positive")
     config = SyntheticSearchConfig(
         position_spacing_m=args.position_spacing_m,
         position_radius_steps=args.position_radius_steps,
@@ -84,7 +80,7 @@ def main() -> None:
     artifact_files: dict[str, bytes] = {}
     query_artifact_manifest: list[dict[str, Any]] = []
     estimator_artifact_manifest: dict[str, dict[str, Any]] = {}
-    scenes = _rugged_scenes(
+    scenes = rugged_scenes(
         seeds,
         views_per_scene=args.views_per_scene,
         terrain_width_m=args.terrain_width_m,
@@ -347,60 +343,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--render-stride", type=int, default=2)
     parser.add_argument("--ambiguity-score-delta", type=float, default=0.0025)
     return parser
-
-
-def _rugged_scenes(
-    seeds: tuple[int, ...],
-    *,
-    views_per_scene: int,
-    terrain_width_m: float,
-    terrain_height_m: float,
-    terrain_grid_width: int,
-    terrain_grid_height: int,
-    eye_height_m: float,
-    settings: AppSettings | None = None,
-) -> list[dict[str, Any]]:
-    if views_per_scene < 1:
-        raise SystemExit("--views-per-scene must be positive")
-    settings = settings or load_settings()
-    scenes: list[dict[str, Any]] = []
-    for seed in seeds:
-        spec = settings.terrain.model_copy(
-            update={
-                "seed": seed,
-                "width_m": terrain_width_m,
-                "height_m": terrain_height_m,
-                "grid_width": terrain_grid_width,
-                "grid_height": terrain_grid_height,
-            }
-        )
-        terrain = TerrainGenerator(spec).generate()
-        peaks = PeakDetector(settings.peak_detection).detect(terrain)
-        if not peaks:
-            raise RuntimeError(f"rugged synthetic terrain seed {seed} produced no peaks")
-        cameras = place_cameras(
-            terrain,
-            peaks,
-            settings.camera.model_copy(
-                update={
-                    "view_count": views_per_scene,
-                    "overlook_height_m": eye_height_m,
-                }
-            ),
-        )
-        for index, truth in enumerate(cameras):
-            scenes.append(
-                {
-                    "scene_id": f"rugged-s{seed}-v{index + 1:02d}",
-                    "kind": "rugged_generated",
-                    "terrain_seed": seed,
-                    "view_index": index,
-                    "terrain": terrain,
-                    "truth": truth,
-                    "expected_pose_ambiguity": False,
-                }
-            )
-    return scenes
 
 
 def _radial_control_scene(
@@ -674,7 +616,7 @@ def _commit_artifact(
         "case_count": len(results["cases"]),
         "results_sha256": hashlib.sha256(result_bytes).hexdigest(),
         "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
-        "code": _code_provenance(query_renderer),
+        "code": whole_worktree_provenance(_implementation_paths(query_renderer)),
         "environment": {
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -686,21 +628,15 @@ def _commit_artifact(
     files = {
         "results.json": result_bytes,
         "summary.md": summary_bytes,
-        "run.json": canonical_json_bytes(run),
     }
     for name, content in (extra_files or {}).items():
         if name in files:
             raise ValueError(f"extra artifact file collides with the benchmark transaction: {name}")
         files[name] = content
-    _publish_directory_once(
-        output,
-        files,
-        write_bytes=_write_once,
-        sync_directory=_fsync_directory,
-    )
+    publish_flat_run(output, run, files)
 
 
-def _code_provenance(query_renderer: str = "shared-python") -> dict[str, Any]:
+def _implementation_paths(query_renderer: str = "shared-python") -> list[Path]:
     paths = [
         BASE / "pyproject.toml",
         BASE / "uv.lock",
@@ -717,7 +653,9 @@ def _code_provenance(query_renderer: str = "shared-python") -> dict[str, Any]:
         BASE / "src/peakle/rendering/rasterizer.py",
         BASE / "src/peakle/rendering/pinhole.py",
         BASE / "src/peakle/rendering/skyline.py",
+        BASE / "src/peakle/research/experiment.py",
         BASE / "src/peakle/research/synthetic_query.py",
+        BASE / "src/peakle/research/synthetic_scenes.py",
         BASE / "src/peakle/research/webgl_contract.py",
         BASE / "src/peakle/scene/state.py",
         BASE / "src/peakle/terrain/generator.py",
@@ -731,48 +669,7 @@ def _code_provenance(query_renderer: str = "shared-python") -> dict[str, Any]:
                 BASE / "src/peakle/research/synthetic_estimator.py",
             )
         )
-    implementation_subset = []
-    for path in paths:
-        implementation_subset.append(
-            {
-                "path": str(path.relative_to(BASE)),
-                "sha256": _file_sha256(path),
-            }
-        )
-    status = _git("status", "--porcelain", "--untracked-files=all")
-    diff = _git("diff", "--binary", "HEAD")
-    return {
-        "git_sha": _git("rev-parse", "HEAD"),
-        "git_tree_sha": _git("rev-parse", "HEAD^{tree}"),
-        "dirty": bool(status) if status is not None else None,
-        "scope": "whole_worktree",
-        "worktree_status": status,
-        "worktree_status_sha256": hashlib.sha256((status or "").encode()).hexdigest(),
-        "worktree_diff_sha256": hashlib.sha256((diff or "").encode()).hexdigest(),
-        "implementation_subset_role": "causal_files_for_human_review",
-        "implementation_subset": implementation_subset,
-    }
-
-
-def _git(*args: str) -> str | None:
-    try:
-        return subprocess.run(
-            ("git", *args),
-            cwd=BASE,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except OSError, subprocess.CalledProcessError:
-        return None
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return paths
 
 
 def _csv_ints(value: str, label: str) -> tuple[int, ...]:

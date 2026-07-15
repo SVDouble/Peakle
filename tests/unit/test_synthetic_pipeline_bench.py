@@ -25,11 +25,12 @@ from peakle.localize.synthetic_pipeline_bench import (
     extraction_quality,
 )
 from peakle.rendering.rasterizer import SyntheticRenderer
+from peakle.research.experiment import whole_worktree_provenance
 from peakle.scripts import bench_synthetic_pipeline as script_module
 from peakle.scripts.bench_synthetic_pipeline import (
-    _code_provenance,
     _commit_artifact,
     _estimator_terrain,
+    _implementation_paths,
     _radial_control_scene,
     _summary_markdown,
 )
@@ -511,17 +512,18 @@ def test_aggregates_deduplicate_observations_and_report_depth_once_per_archive()
 
 
 def test_code_provenance_covers_the_worktree_and_lists_the_implementation_subset() -> None:
-    provenance = _code_provenance()
-    webgl_provenance = _code_provenance("webgl")
+    provenance = whole_worktree_provenance(_implementation_paths())
+    webgl_provenance = whole_worktree_provenance(_implementation_paths("webgl"))
 
     assert provenance["scope"] == "whole_worktree"
     assert provenance["git_tree_sha"]
     assert provenance["worktree_status_sha256"]
-    assert provenance["worktree_diff_sha256"]
+    assert provenance["worktree_fingerprint_sha256"]
     assert provenance["implementation_subset_role"] == "causal_files_for_human_review"
     assert all(not item["path"].startswith(".vscode/") for item in provenance["implementation_subset"])
     webgl_paths = {item["path"] for item in webgl_provenance["implementation_subset"]}
     assert "src/peakle/research/synthetic_query.py" in webgl_paths
+    assert "src/peakle/research/experiment.py" in webgl_paths
     assert "src/peakle/research/webgl_contract.py" in webgl_paths
     assert "src/peakle/research/webgl_query.py" in webgl_paths
     assert "src/peakle/research/webgl_query.html" in webgl_paths
@@ -572,31 +574,3 @@ def test_artifact_commit_publishes_frozen_query_files_in_same_transaction(tmp_pa
         "run.json",
         "summary.md",
     }
-
-
-def test_failed_artifact_staging_never_publishes_final_directory(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    output = tmp_path / "synthetic-v2-failure"
-    now = datetime.now(UTC)
-    calls = 0
-    real_write = script_module._write_once
-
-    def fail_on_run(path, data):
-        nonlocal calls
-        calls += 1
-        if calls == 3:
-            raise OSError("injected staging failure")
-        real_write(path, data)
-
-    monkeypatch.setattr(script_module, "_write_once", fail_on_run)
-
-    with pytest.raises(OSError, match="injected staging failure"):
-        _commit_artifact(
-            output,
-            {"cases": [], "schema": "test", "aggregates": {}},
-            "# summary\n",
-            started_at=now,
-            finished_at=now,
-        )
-
-    assert not output.exists()
-    assert not list(tmp_path.glob(".*.staging-*"))

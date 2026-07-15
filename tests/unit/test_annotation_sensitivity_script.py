@@ -72,12 +72,6 @@ def test_invalid_overrides_fail_before_scene_build(tmp_path: Path, name: str, va
         module._validate_args(_args(tmp_path / "out", **{name: value}))
 
 
-def test_json_encoding_is_compact_sorted_and_rejects_nonfinite() -> None:
-    assert module._json_bytes({"b": 1, "a": 2}) == b'{"a":2,"b":1}\n'
-    with pytest.raises(ValueError):
-        module._json_bytes({"invalid": float("nan")})
-
-
 def test_main_publishes_typed_results_and_complete_hash_linked_run(
     tmp_path: Path,
     small_settings: AppSettings,
@@ -119,8 +113,8 @@ def test_main_publishes_typed_results_and_complete_hash_linked_run(
     monkeypatch.setattr(module, "terrain_fingerprint", lambda _terrain: {"sha256": "a" * 64})
     monkeypatch.setattr(
         module,
-        "_code_provenance",
-        lambda: {"git_revision": "abc", "scope": "src/peakle", "dirty": False},
+        "whole_worktree_provenance",
+        lambda: {"git_sha": "abc", "scope": "whole_worktree", "dirty": False},
     )
     monkeypatch.setattr(sys, "argv", ["bench", "--output", str(output), "--terrain-stride", "3"])
 
@@ -129,9 +123,9 @@ def test_main_publishes_typed_results_and_complete_hash_linked_run(
     results_bytes = (output / "results.json").read_bytes()
     run_bytes = (output / "run.json").read_bytes()
     run = json.loads(run_bytes)
-    assert results_bytes == module._json_bytes(results)
-    assert run_bytes == module._json_bytes(run)
-    assert run["schema"] == module.RUN_SCHEMA
+    assert results_bytes == module.canonical_json_bytes(results)
+    assert run_bytes == module.canonical_json_bytes(run)
+    assert run["schema"] == module.RUN_SCHEMA == "peakle_annotation_sensitivity_run_v2"
     assert run["status"] == "complete"
     assert run["run_id"] == output.name
     assert (run["view_count"], run["case_count"]) == (2, 6)
