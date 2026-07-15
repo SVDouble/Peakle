@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
@@ -13,6 +15,15 @@ from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field
 
 ARTIFACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+_QUERY_ARTIFACT_SUFFIXES = {
+    "sealed_truth_scene_json": ".scene.json",
+    "rgb_rgba8": ".rgb.rgba8",
+    "normal_xyz_depth_f32le": ".geometry.f32le",
+    "semantic_u8": ".semantic.u8",
+}
+_OBSERVATION_ROLES = frozenset({"rgb_rgba8", "normal_xyz_depth_f32le", "semantic_u8"})
 
 
 class _FrozenRecord(BaseModel):
@@ -140,6 +151,17 @@ class FrozenWebGLQueryArtifact:
     manifest: tuple[QueryArtifactFile, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedWebGLQueryArtifact:
+    """Hash-validated frozen observations, without sealed truth by default."""
+
+    rgb: NDArray[np.uint8]
+    terrain_mask: NDArray[np.bool_]
+    forward_depth_m: NDArray[np.float64]
+    camera_normals: NDArray[np.float64]
+    sealed_input_scene_json: bytes | None = None
+
+
 def freeze_webgl_query_artifact(render: WebGLQueryRender, artifact_id: str) -> FrozenWebGLQueryArtifact:
     """Re-encode and hash the browser outputs before estimator execution."""
 
@@ -200,6 +222,194 @@ def freeze_webgl_query_artifact(render: WebGLQueryRender, artifact_id: str) -> F
             )
         )
     return FrozenWebGLQueryArtifact(files=MappingProxyType(files), manifest=tuple(manifest))
+
+
+def load_frozen_webgl_query_artifact(
+    manifest: Sequence[QueryArtifactFile],
+    files: Mapping[str, bytes],
+    *,
+    include_sealed_truth: bool = False,
+) -> LoadedWebGLQueryArtifact:
+    """Validate and decode a frozen WebGL query without crossing the truth boundary.
+
+    The manifest must describe the complete four-file artifact. ``files`` may omit
+    the sealed scene for the ordinary observation-only path; if it is present, its
+    value is deliberately not requested unless ``include_sealed_truth`` is true.
+    """
+
+    records = _validate_query_manifest(manifest)
+    observation_names = {records[role].filename for role in _OBSERVATION_ROLES}
+    supplied_names = set(files)
+    allowed_names = observation_names | {records["sealed_truth_scene_json"].filename}
+    missing = observation_names - supplied_names
+    extra = supplied_names - allowed_names
+    if missing:
+        raise ValueError(f"frozen query files are missing: {', '.join(sorted(missing))}")
+    if extra:
+        raise ValueError(f"frozen query files contain undeclared entries: {', '.join(sorted(extra))}")
+
+    rgb_record = records["rgb_rgba8"]
+    geometry_record = records["normal_xyz_depth_f32le"]
+    semantic_record = records["semantic_u8"]
+    rgba = _decode_array(rgb_record, files, np.dtype(np.uint8))
+    geometry = _decode_array(geometry_record, files, np.dtype("<f4"))
+    semantic = _decode_array(semantic_record, files, np.dtype(np.uint8))
+
+    height, width, _ = rgba.shape
+    if geometry.shape != (height, width, 4) or semantic.shape != (height, width):
+        raise ValueError("frozen query RGB, geometry, and semantic shapes differ")
+    if np.any(rgba[..., 3] != 255):
+        raise ValueError("frozen query RGBA alpha channel must be opaque")
+    if np.any((semantic != 0) & (semantic != 1)):
+        raise ValueError("frozen query semantic mask must contain only 0 and 1")
+
+    terrain_mask = semantic.astype(np.bool_)
+    packed_normals = np.asarray(geometry[..., :3], dtype=np.float64)
+    packed_depth = np.asarray(geometry[..., 3], dtype=np.float64)
+    if np.any(geometry[~terrain_mask] != 0.0):
+        raise ValueError("frozen query sky pixels must have zero packed geometry")
+    if np.any(~np.isfinite(packed_depth[terrain_mask]) | (packed_depth[terrain_mask] <= 0.0)):
+        raise ValueError("frozen query terrain pixels need finite positive forward depth")
+    normal_lengths = np.linalg.norm(packed_normals[terrain_mask], axis=1)
+    if normal_lengths.size and (not np.all(np.isfinite(normal_lengths)) or np.max(np.abs(normal_lengths - 1.0)) > 2e-4):
+        raise ValueError("frozen query terrain camera normals must be unit vectors")
+
+    forward_depth = packed_depth.copy()
+    camera_normals = packed_normals.copy()
+    forward_depth[~terrain_mask] = np.nan
+    camera_normals[~terrain_mask] = np.nan
+    rgb = np.asarray(rgba[..., :3], dtype=np.uint8)
+    for array in (rgb, terrain_mask, forward_depth, camera_normals):
+        array.flags.writeable = False
+
+    sealed_scene: bytes | None = None
+    if include_sealed_truth:
+        scene_record = records["sealed_truth_scene_json"]
+        if scene_record.filename not in supplied_names:
+            raise ValueError(f"frozen query files are missing sealed truth: {scene_record.filename}")
+        sealed_scene = _validated_file_bytes(scene_record, files)
+    return LoadedWebGLQueryArtifact(
+        rgb=rgb,
+        terrain_mask=terrain_mask,
+        forward_depth_m=forward_depth,
+        camera_normals=camera_normals,
+        sealed_input_scene_json=sealed_scene,
+    )
+
+
+def load_frozen_webgl_query_rgb(
+    manifest: Sequence[QueryArtifactFile],
+    files: Mapping[str, bytes],
+) -> NDArray[np.uint8]:
+    """Open only hash-validated RGB bytes, leaving geometry and truth sealed."""
+
+    records = _validate_query_manifest(manifest)
+    rgb_record = records["rgb_rgba8"]
+    supplied_names = set(files)
+    declared_names = {record.filename for record in records.values()}
+    if rgb_record.filename not in supplied_names:
+        raise ValueError(f"frozen query files are missing RGB: {rgb_record.filename}")
+    extra = supplied_names - declared_names
+    if extra:
+        raise ValueError(f"frozen query files contain undeclared entries: {', '.join(sorted(extra))}")
+    rgba = _decode_array(rgb_record, files, np.dtype(np.uint8))
+    if np.any(rgba[..., 3] != 255):
+        raise ValueError("frozen query RGBA alpha channel must be opaque")
+    rgb = np.asarray(rgba[..., :3], dtype=np.uint8)
+    rgb.flags.writeable = False
+    return rgb
+
+
+def _validate_query_manifest(manifest: Sequence[QueryArtifactFile]) -> dict[str, QueryArtifactFile]:
+    expected_roles = set(_QUERY_ARTIFACT_SUFFIXES)
+    records: dict[str, QueryArtifactFile] = {}
+    filenames: set[str] = set()
+    artifact_ids: set[str] = set()
+    for record in manifest:
+        if not isinstance(record, QueryArtifactFile):
+            raise TypeError("frozen query manifest entries must be QueryArtifactFile records")
+        if record.filename in filenames:
+            raise ValueError(f"frozen query manifest has duplicate filename: {record.filename}")
+        if record.role in records:
+            raise ValueError(f"frozen query manifest has duplicate role: {record.role}")
+        suffix = _QUERY_ARTIFACT_SUFFIXES[record.role]
+        if not record.filename.endswith(suffix):
+            raise ValueError(f"frozen query filename does not match role {record.role}: {record.filename}")
+        artifact_id = record.filename[: -len(suffix)]
+        if not artifact_id or ARTIFACT_ID_PATTERN.fullmatch(artifact_id) is None:
+            raise ValueError(f"invalid frozen query artifact filename: {record.filename}")
+        if _SHA256_PATTERN.fullmatch(record.sha256) is None:
+            raise ValueError(f"invalid SHA-256 for frozen query file: {record.filename}")
+        if record.bytes < 0:
+            raise ValueError(f"invalid byte count for frozen query file: {record.filename}")
+        filenames.add(record.filename)
+        artifact_ids.add(artifact_id)
+        records[record.role] = record
+    missing_roles = expected_roles - set(records)
+    extra_roles = set(records) - expected_roles
+    if missing_roles or extra_roles:
+        details = []
+        if missing_roles:
+            details.append(f"missing roles {', '.join(sorted(missing_roles))}")
+        if extra_roles:
+            details.append(f"unexpected roles {', '.join(sorted(extra_roles))}")
+        raise ValueError(f"invalid frozen query manifest: {'; '.join(details)}")
+    if len(artifact_ids) != 1:
+        raise ValueError("frozen query manifest filenames do not share one artifact id")
+
+    scene = records["sealed_truth_scene_json"]
+    if scene.media_type != "application/json" or scene.dtype is not None or scene.shape is not None:
+        raise ValueError("sealed truth scene record has invalid media type, dtype, or shape")
+    _validate_array_record(records["rgb_rgba8"], "uint8", dimensions=3, channels=4, itemsize=1)
+    _validate_array_record(
+        records["normal_xyz_depth_f32le"],
+        "float32_little_endian",
+        dimensions=3,
+        channels=4,
+        itemsize=4,
+    )
+    _validate_array_record(records["semantic_u8"], "uint8", dimensions=2, channels=None, itemsize=1)
+    return records
+
+
+def _validate_array_record(
+    record: QueryArtifactFile,
+    dtype: str,
+    *,
+    dimensions: int,
+    channels: int | None,
+    itemsize: int,
+) -> None:
+    if record.media_type != "application/octet-stream" or record.dtype != dtype:
+        raise ValueError(f"frozen query {record.role} record has invalid media type or dtype")
+    if record.shape is None or len(record.shape) != dimensions or any(size <= 0 for size in record.shape):
+        raise ValueError(f"frozen query {record.role} record has invalid shape")
+    if channels is not None and record.shape[-1] != channels:
+        raise ValueError(f"frozen query {record.role} record must have {channels} channels")
+    expected_bytes = math.prod(record.shape) * itemsize
+    if record.bytes != expected_bytes:
+        raise ValueError(f"frozen query {record.role} record byte count does not match its dtype and shape")
+
+
+def _decode_array(
+    record: QueryArtifactFile,
+    files: Mapping[str, bytes],
+    dtype: np.dtype,
+) -> NDArray:
+    content = _validated_file_bytes(record, files)
+    assert record.shape is not None
+    return np.frombuffer(content, dtype=dtype).reshape(record.shape)
+
+
+def _validated_file_bytes(record: QueryArtifactFile, files: Mapping[str, bytes]) -> bytes:
+    content = files[record.filename]
+    if not isinstance(content, bytes):
+        raise TypeError(f"frozen query file is not immutable bytes: {record.filename}")
+    if len(content) != record.bytes:
+        raise ValueError(f"frozen query file byte count differs from its manifest: {record.filename}")
+    if sha256_bytes(content) != record.sha256:
+        raise ValueError(f"frozen query file SHA-256 differs from its manifest: {record.filename}")
+    return content
 
 
 def sha256_bytes(value: bytes) -> str:

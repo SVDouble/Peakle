@@ -789,8 +789,10 @@ The positive render is the Python estimator at the exact query pose. The two dec
 controls cross `rugged-s31-v01` with the exact `rugged-s47-v01` render and vice versa. There is no
 radial fixture, position/yaw lattice, prior, orthophoto or hidden appearance resource in this test.
 The query files must be immutable before matcher construction. A matcher receives only query RGB
-and candidate RGB; WebGL depth, semantic mask, camera and scene are opened only after its match
-outputs are frozen.
+and candidate RGB. The orchestrator uses the declared exact terrain, pose and FOV to render that
+candidate before matching; these are oracle setup, not matcher inputs. Frozen WebGL depth and the
+semantic mask are opened for truth-side grading only after every match output is frozen, while the
+sealed scene JSON is never opened by the screen evaluator.
 
 Compare exactly these existing matcher paths:
 
@@ -829,12 +831,26 @@ coverage beats SIFT without losing more than 0.05 precision. Advance at most two
 survives, freeze the negative result and reproduce LandscapeAR rather than tuning thresholds,
 fusion or PnP.
 
-The experiment-specific implementation is capped at 400 nonblank production lines plus a 120-line
-thin CLI. Extract the rugged scene generator rather than copy it. Add a hash-validating typed loader
-for frozen WebGL observations and reuse `TerrainViewRenderer`, `lift_render_pixels`, `DenseMatcher`,
-`SiftMatcher`, `WorkerMatcher` and `fit_pose_ransac`. Because this is the second experiment consumer,
-shared canonical hashing, whole-worktree provenance and immutable run publication may be extracted
-only while deleting the private copies they replace; that consolidation must be net-negative.
+For that comparison, coverage is `occupied_correct_4x4_cells / 16`, and the SIFT comparator is the
+same render modality over the four positive views; “beats” is a strict increase in median coverage,
+while the precision allowance compares positive-view medians. Rank advancing pairs by positive
+passes, median coverage, median precision and median correct count, all descending, then by stable
+matcher/modality ID. A worker's returned `MatchSet.count` is the raw count and its selected mask
+defines the selected count; any dense/valid/unique precursor counts remain producer diagnostics.
+The learned workers report per-pair GPU peak memory. SIFT reports the process's cumulative Linux
+high-water RSS with that weaker measurement scope explicit; no profiler dependency is added.
+
+The initial 400+120-line estimate covered the geographic grader and a thin command, but not the
+review-required RGB-only truth firewall, deterministic match freeze/reload, six-case aggregation,
+complete worker provenance or conditional unregularized PnP. Before canonical evidence, the
+corrective cap is 1,100 net nonblank production lines for the whole slice. The reviewed
+implementation is +1,100: 735 across two experiment modules, a 143-line CLI, +232 reusable
+render/query-boundary lines, and −10 from shared transaction/scene extraction. Both experiment
+modules remain below 500 lines and the CLI below the standing 150-line guardrail. Extract the rugged
+scene generator rather than copy it; reuse `TerrainViewRenderer`, `lift_render_pixels`,
+`DenseMatcher`, `SiftMatcher`, `WorkerMatcher` and `fit_pose_ransac`; and add no dependency, matcher,
+solver or UI schema. If no pair survives, freeze this surface and move to LandscapeAR rather than
+adding features here.
 
 ### Gate 4 — restricted capture surfaces
 
@@ -929,9 +945,11 @@ branch per experiment.
    hand-off and hash-only scene record violated the registered truth firewall; the final increment
    enforces the existing paired-prior reporting rule. No more Gate-2 feature code enters before this
    pilot decides what to retain and the next consumer drives consolidation.
-5. Let Gate 3 drive the next extraction: one exact-pose screen should reuse the current matcher
-   worker and render/lift contracts. Extract only duplicated experiment transaction/metrics needed
-   by a second new study; do not create another standalone 1,000-line CLI.
+5. **Gate-3 extraction — implemented, evidence pending.** The second consumer now shares canonical
+   JSON, whole-worktree provenance, immutable flat publication and the rugged scene generator with
+   the prior studies. A typed RGB-only loader and deterministic match artifact keep query geometry
+   sealed until grading; the 141-line command reuses the existing renderer, workers, lifting and
+   PnP. No parallel experiment framework or standalone 1,000-line CLI was added.
 6. When the second new study exists, collapse shared pose error, evaluated candidate, top-K,
    canonical hashing, provenance, and freeze/reload code behind typed contracts. Keep legacy readers
    as frozen adapters rather than rewriting their schemas.

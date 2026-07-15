@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,10 +16,223 @@ from peakle.localize.synthetic_pipeline_bench import SyntheticSearchConfig
 from peakle.rendering.rasterizer import HeightfieldGrid, SyntheticRenderer
 from peakle.research import synthetic_query
 from peakle.research.synthetic_query import build_synthetic_query_observations
-from peakle.research.webgl_contract import QueryArtifactFile, freeze_webgl_query_artifact
+from peakle.research.webgl_contract import (
+    QueryArtifactFile,
+    freeze_webgl_query_artifact,
+    load_frozen_webgl_query_artifact,
+    load_frozen_webgl_query_rgb,
+    sha256_bytes,
+)
 from peakle.research.webgl_query import render_webgl_mesh_query, terrain_mesh_buffers
 
 CHROMIUM_AVAILABLE = shutil.which("chromium") is not None
+
+
+def _frozen_query_fixture() -> tuple[tuple[QueryArtifactFile, ...], dict[str, bytes]]:
+    artifact_id = "query-fixture"
+    scene = b'{"sealed":"truth"}'
+    rgba = np.asarray(
+        (
+            ((10, 20, 30, 255), (40, 50, 60, 255), (70, 80, 90, 255)),
+            ((11, 21, 31, 255), (41, 51, 61, 255), (71, 81, 91, 255)),
+        ),
+        dtype=np.uint8,
+    )
+    semantic = np.asarray(((0, 1, 1), (0, 0, 1)), dtype=np.uint8)
+    geometry = np.zeros((2, 3, 4), dtype="<f4")
+    geometry[semantic.astype(bool), :3] = (0.0, 0.0, 1.0)
+    geometry[semantic.astype(bool), 3] = (100.0, 200.0, 300.0)
+    files = {
+        f"{artifact_id}.scene.json": scene,
+        f"{artifact_id}.rgb.rgba8": rgba.tobytes(),
+        f"{artifact_id}.geometry.f32le": geometry.tobytes(),
+        f"{artifact_id}.semantic.u8": semantic.tobytes(),
+    }
+    declarations = (
+        ("sealed_truth_scene_json", "application/json", None, None, f"{artifact_id}.scene.json"),
+        ("rgb_rgba8", "application/octet-stream", "uint8", rgba.shape, f"{artifact_id}.rgb.rgba8"),
+        (
+            "normal_xyz_depth_f32le",
+            "application/octet-stream",
+            "float32_little_endian",
+            geometry.shape,
+            f"{artifact_id}.geometry.f32le",
+        ),
+        ("semantic_u8", "application/octet-stream", "uint8", semantic.shape, f"{artifact_id}.semantic.u8"),
+    )
+    records = tuple(
+        QueryArtifactFile(
+            filename=filename,
+            role=role,
+            media_type=media_type,
+            dtype=dtype,
+            shape=shape,
+            sha256=sha256_bytes(files[filename]),
+            bytes=len(files[filename]),
+        )
+        for role, media_type, dtype, shape, filename in declarations
+    )
+    return records, files
+
+
+class _SealedSceneGuard(Mapping[str, bytes]):
+    """Expose file names while proving the ordinary loader never reads truth."""
+
+    def __init__(self, files: Mapping[str, bytes]) -> None:
+        self._files = files
+        self._scene_filename = next(name for name in files if name.endswith(".scene.json"))
+
+    def __getitem__(self, key: str) -> bytes:
+        if key == self._scene_filename:
+            raise AssertionError("ordinary frozen-query loading opened the sealed truth scene")
+        return self._files[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._files)
+
+    def __len__(self) -> int:
+        return len(self._files)
+
+
+class _RgbOnlyGuard(_SealedSceneGuard):
+    """Prove matcher input loading never reads geometry, semantics, or truth."""
+
+    def __getitem__(self, key: str) -> bytes:
+        if not key.endswith(".rgb.rgba8"):
+            raise AssertionError("RGB-only loading crossed the observation boundary")
+        return self._files[key]
+
+
+def test_frozen_webgl_rgb_loader_does_not_open_geometry_mask_or_truth() -> None:
+    manifest, files = _frozen_query_fixture()
+
+    rgb = load_frozen_webgl_query_rgb(manifest, _RgbOnlyGuard(files))
+
+    assert rgb.shape == (2, 3, 3)
+    assert rgb[1, 2].tolist() == [71, 81, 91]
+    assert rgb.flags.writeable is False
+
+
+def test_frozen_webgl_loader_reconstructs_readonly_observations_without_opening_truth() -> None:
+    manifest, files = _frozen_query_fixture()
+
+    loaded = load_frozen_webgl_query_artifact(manifest, _SealedSceneGuard(files))
+
+    assert loaded.rgb.dtype == np.dtype(np.uint8)
+    assert loaded.rgb.shape == (2, 3, 3)
+    assert loaded.rgb[0, 1].tolist() == [40, 50, 60]
+    assert loaded.terrain_mask.dtype == np.dtype(np.bool_)
+    assert loaded.terrain_mask.tolist() == [[False, True, True], [False, False, True]]
+    assert loaded.forward_depth_m.dtype == np.dtype(np.float64)
+    assert loaded.forward_depth_m[0, 1] == 100.0
+    assert np.isnan(loaded.forward_depth_m[0, 0])
+    assert loaded.camera_normals.dtype == np.dtype(np.float64)
+    assert loaded.camera_normals[1, 2].tolist() == [0.0, 0.0, 1.0]
+    assert np.isnan(loaded.camera_normals[1, 0]).all()
+    assert loaded.sealed_input_scene_json is None
+    assert all(
+        array.flags.writeable is False
+        for array in (loaded.rgb, loaded.terrain_mask, loaded.forward_depth_m, loaded.camera_normals)
+    )
+
+
+def test_frozen_webgl_loader_unseals_and_validates_truth_only_when_requested() -> None:
+    manifest, files = _frozen_query_fixture()
+    scene_filename = next(record.filename for record in manifest if record.role == "sealed_truth_scene_json")
+
+    ordinary_files = {name: content for name, content in files.items() if name != scene_filename}
+    ordinary = load_frozen_webgl_query_artifact(manifest, ordinary_files)
+    assert ordinary.sealed_input_scene_json is None
+    with pytest.raises(ValueError, match="missing sealed truth"):
+        load_frozen_webgl_query_artifact(manifest, ordinary_files, include_sealed_truth=True)
+
+    loaded = load_frozen_webgl_query_artifact(manifest, files, include_sealed_truth=True)
+    assert loaded.sealed_input_scene_json == b'{"sealed":"truth"}'
+
+    corrupt_files = dict(files)
+    corrupt_files[scene_filename] += b"\n"
+    with pytest.raises(ValueError, match="byte count differs"):
+        load_frozen_webgl_query_artifact(manifest, corrupt_files, include_sealed_truth=True)
+
+
+@pytest.mark.parametrize(
+    ("mutate_manifest", "match"),
+    (
+        (lambda records: records[:-1], "missing roles semantic_u8"),
+        (lambda records: (*records, records[1]), "duplicate filename"),
+        (
+            lambda records: (
+                records[0],
+                records[1],
+                records[2],
+                records[3].model_copy(update={"role": "rgb_rgba8", "filename": "query-fixture.copy.rgb.rgba8"}),
+            ),
+            "duplicate role",
+        ),
+        (
+            lambda records: (
+                records[0],
+                records[1].model_copy(update={"filename": "query-fixture.bad.semantic.u8"}),
+                records[2],
+                records[3],
+            ),
+            "filename does not match role",
+        ),
+        (
+            lambda records: (
+                records[0],
+                records[1].model_copy(update={"dtype": "float32_little_endian"}),
+                records[2],
+                records[3],
+            ),
+            "invalid media type or dtype",
+        ),
+        (
+            lambda records: (
+                records[0],
+                records[1].model_copy(update={"shape": (2, 3, 3)}),
+                records[2],
+                records[3],
+            ),
+            "must have 4 channels",
+        ),
+        (
+            lambda records: (
+                records[0],
+                records[1].model_copy(update={"bytes": records[1].bytes + 1}),
+                records[2],
+                records[3],
+            ),
+            "byte count does not match",
+        ),
+    ),
+)
+def test_frozen_webgl_loader_rejects_invalid_manifest(
+    mutate_manifest: Callable[[tuple[QueryArtifactFile, ...]], Sequence[QueryArtifactFile]],
+    match: str,
+) -> None:
+    manifest, files = _frozen_query_fixture()
+
+    with pytest.raises(ValueError, match=match):
+        load_frozen_webgl_query_artifact(mutate_manifest(manifest), files)
+
+
+def test_frozen_webgl_loader_rejects_missing_extra_and_corrupt_observation_files() -> None:
+    manifest, files = _frozen_query_fixture()
+    semantic_filename = next(record.filename for record in manifest if record.role == "semantic_u8")
+
+    missing = dict(files)
+    del missing[semantic_filename]
+    with pytest.raises(ValueError, match="files are missing"):
+        load_frozen_webgl_query_artifact(manifest, missing)
+
+    with pytest.raises(ValueError, match="undeclared entries"):
+        load_frozen_webgl_query_artifact(manifest, {**files, "unregistered.bin": b""})
+
+    corrupt = dict(files)
+    corrupt[semantic_filename] = b"\0" * len(corrupt[semantic_filename])
+    with pytest.raises(ValueError, match="SHA-256 differs"):
+        load_frozen_webgl_query_artifact(manifest, corrupt)
 
 
 def _intrinsics() -> CameraIntrinsics:

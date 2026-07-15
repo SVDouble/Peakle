@@ -24,7 +24,7 @@ from peakle.rendering.orthophoto import AppearanceRaster
 from peakle.rendering.pinhole import camera_axes
 from peakle.rendering.rasterizer import HeightfieldGrid, HeightfieldLike, SyntheticRenderer
 
-RenderModality = Literal["hillshade", "normal", "relative_depth", "orthophoto"]
+RenderModality = Literal["hillshade", "normal", "camera_normal", "relative_depth", "orthophoto"]
 PIXEL_LIFTING_SCHEMA = "terrain_render_pixel_lifting_v1"
 PIXEL_LIFTING_DEPTH_METHOD = "bilinear_finite_positive_inverse_depth_then_invert_v1"
 
@@ -176,8 +176,9 @@ class TerrainViewRenderer:
         appearance_mask = mask.copy()
         if modality == "hillshade":
             rgb = _with_sky(hillshade, mask, (174, 195, 215))
-        elif modality == "normal":
-            normal_rgb = np.clip(np.rint((normals + 1.0) * 127.5), 0.0, 255.0).astype(np.uint8)
+        elif modality in {"normal", "camera_normal"}:
+            encoded_normals = normals if modality == "normal" else world_normals_to_camera(normals, extrinsics)
+            normal_rgb = np.clip(np.rint((encoded_normals + 1.0) * 127.5), 0.0, 255.0).astype(np.uint8)
             rgb = _with_sky(normal_rgb, mask, (8, 11, 17))
         elif modality == "relative_depth":
             rgb = _with_sky(_relative_depth_rgb(depth, mask), mask, (8, 11, 17))
@@ -324,6 +325,20 @@ def unproject_pinhole_depth(
     return world
 
 
+def world_normals_to_camera(
+    world_normals: NDArray[np.float64],
+    extrinsics: CameraExtrinsics,
+) -> NDArray[np.float64]:
+    """Express world-space normals in the camera's right/down/forward frame."""
+
+    normals = np.asarray(world_normals, dtype=np.float64)
+    if normals.ndim < 1 or normals.shape[-1] != 3:
+        raise ValueError(f"world normals must end in a three-vector, got {normals.shape}")
+    right, down, forward = camera_axes(extrinsics)
+    world_from_camera = np.column_stack((right, down, forward))
+    return np.einsum("...i,ij->...j", normals, world_from_camera)
+
+
 def sample_terrain_normals(
     terrain: TerrainMap,
     east_m: NDArray[np.float64],
@@ -435,15 +450,54 @@ def lift_render_pixels(
 ) -> LiftedRenderPoints:
     """Lift matched pixels using the rasterizer's inverse-depth interpolation."""
 
-    xy = np.asarray(render_xy_px, dtype=np.float64)
+    lifted = lift_pinhole_depth_pixels(
+        render.forward_depth_m,
+        render.intrinsics,
+        render.extrinsics,
+        render_xy_px,
+        support_mask=render.appearance_mask,
+        max_relative_depth_span=max_relative_depth_span,
+        discontinuity_radius_px=discontinuity_radius_px,
+    )
+    rejection_counts = dict(lifted.rejection_counts)
+    rejection_counts["invalid_appearance"] = rejection_counts.pop("invalid_support")
+    return LiftedRenderPoints(
+        world_xyz_m=lifted.world_xyz_m,
+        forward_depth_m=lifted.forward_depth_m,
+        valid=lifted.valid,
+        relative_depth_span=lifted.relative_depth_span,
+        rejection_counts=rejection_counts,
+    )
+
+
+def lift_pinhole_depth_pixels(
+    forward_depth_m: NDArray[np.float64],
+    intrinsics: CameraIntrinsics,
+    extrinsics: CameraExtrinsics,
+    xy_px: NDArray[np.float64],
+    *,
+    support_mask: NDArray[np.bool_] | None = None,
+    max_relative_depth_span: float = 0.08,
+    discontinuity_radius_px: int = 1,
+) -> LiftedRenderPoints:
+    """Lift subpixels from a pinhole forward-depth image without image-source assumptions."""
+
+    xy = np.asarray(xy_px, dtype=np.float64)
     if xy.ndim != 2 or xy.shape[1] != 2:
-        raise ValueError(f"render pixel coordinates must have shape (N, 2), got {xy.shape}")
+        raise ValueError(f"pixel coordinates must have shape (N, 2), got {xy.shape}")
     if max_relative_depth_span <= 0.0:
         raise ValueError("max_relative_depth_span must be positive")
     if discontinuity_radius_px < 0:
         raise ValueError("discontinuity radius cannot be negative")
+    depth = np.asarray(forward_depth_m, dtype=np.float64)
+    expected_shape = (intrinsics.height_px, intrinsics.width_px)
+    if depth.shape != expected_shape:
+        raise ValueError(f"forward depth must have shape {expected_shape}, got {depth.shape}")
+    support = np.ones(expected_shape, dtype=np.bool_) if support_mask is None else np.asarray(support_mask, dtype=bool)
+    if support.shape != expected_shape:
+        raise ValueError(f"support mask must have shape {expected_shape}, got {support.shape}")
     count = xy.shape[0]
-    height, width = render.forward_depth_m.shape
+    height, width = depth.shape
     world = np.full((count, 3), np.nan, dtype=np.float64)
     sampled_depth = np.full(count, np.nan, dtype=np.float64)
     relative_span = np.full(count, np.inf, dtype=np.float64)
@@ -466,7 +520,6 @@ def lift_render_pixels(
     # different curved surface between pixel centres. Preserve NaN/sky support
     # by converting only finite positive samples, interpolate inverse depth,
     # and invert once at the exact subpixel keypoint.
-    depth = np.asarray(render.forward_depth_m, dtype=np.float64)
     finite_positive_depth = np.isfinite(depth) & (depth > 0.0)
     inverse_depth = np.full_like(depth, np.nan)
     inverse_depth[finite_positive_depth] = 1.0 / depth[finite_positive_depth]
@@ -482,10 +535,10 @@ def lift_render_pixels(
     # Interpolating the precomputed XYZ image is not projectively equivalent to
     # lifting a subpixel coordinate at its interpolated forward depth. Build the
     # point from the exact keypoint ray so it reprojects to render_xy_px.
-    right, down, forward = camera_axes(render.extrinsics)
-    position = np.asarray(render.extrinsics.position.as_tuple(), dtype=np.float64)
-    x_camera = (safe_x - render.intrinsics.principal_x_px) / render.intrinsics.focal_length_px * sampled_depth
-    y_camera = (safe_y - render.intrinsics.principal_y_px) / render.intrinsics.focal_length_px * sampled_depth
+    right, down, forward = camera_axes(extrinsics)
+    position = np.asarray(extrinsics.position.as_tuple(), dtype=np.float64)
+    x_camera = (safe_x - intrinsics.principal_x_px) / intrinsics.focal_length_px * sampled_depth
+    y_camera = (safe_y - intrinsics.principal_y_px) / intrinsics.focal_length_px * sampled_depth
     world[:] = (
         position[None, :]
         + x_camera[:, None] * right[None, :]
@@ -495,15 +548,15 @@ def lift_render_pixels(
     depth_valid = np.isfinite(sampled_depth) & (sampled_depth > 0.0) & np.all(np.isfinite(world), axis=1)
     valid &= depth_valid
 
-    appearance_support = map_coordinates(
-        render.appearance_mask.astype(np.float64),
+    sampled_support = map_coordinates(
+        support.astype(np.float64),
         [safe_y, safe_x],
         order=1,
         mode="constant",
         cval=0.0,
     )
-    appearance_valid = appearance_support >= 1.0 - 1e-9
-    valid &= appearance_valid
+    support_valid = sampled_support >= 1.0 - 1e-9
+    valid &= support_valid
 
     discontinuity_valid = np.zeros(count, dtype=np.bool_)
     for index in np.flatnonzero(valid):
@@ -511,7 +564,7 @@ def lift_render_pixels(
         column_max = int(math.ceil(float(xy[index, 0]))) + discontinuity_radius_px
         row_min = int(math.floor(float(xy[index, 1]))) - discontinuity_radius_px
         row_max = int(math.ceil(float(xy[index, 1]))) + discontinuity_radius_px
-        window = render.forward_depth_m[
+        window = depth[
             row_min : row_max + 1,
             column_min : column_max + 1,
         ]
@@ -528,8 +581,8 @@ def lift_render_pixels(
         "non_finite_pixel": int((~finite_xy).sum()),
         "outside_safe_image": int((finite_xy & ~inside).sum()),
         "invalid_or_sky_depth": int((inside & ~depth_valid).sum()),
-        "invalid_appearance": int((inside & depth_valid & ~appearance_valid).sum()),
-        "depth_discontinuity": int((inside & depth_valid & appearance_valid & ~discontinuity_valid).sum()),
+        "invalid_support": int((inside & depth_valid & ~support_valid).sum()),
+        "depth_discontinuity": int((inside & depth_valid & support_valid & ~discontinuity_valid).sum()),
         "accepted": int(valid.sum()),
     }
     return LiftedRenderPoints(

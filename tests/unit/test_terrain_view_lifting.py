@@ -7,7 +7,7 @@ from scipy.ndimage import map_coordinates
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import GeoPoint, LocalPoint
 from peakle.domain.terrain import TerrainMap, TerrainSpec
-from peakle.rendering.pinhole import project_points
+from peakle.rendering.pinhole import camera_axes, project_points
 from peakle.rendering.rasterizer import SyntheticRenderer, _ScreenVertex
 from peakle.rendering.terrain_view import (
     PIXEL_LIFTING_DEPTH_METHOD,
@@ -16,6 +16,7 @@ from peakle.rendering.terrain_view import (
     TerrainViewRenderer,
     lift_render_pixels,
     unproject_pinhole_depth,
+    world_normals_to_camera,
 )
 
 
@@ -149,3 +150,20 @@ def test_render_provenance_declares_inverse_depth_subpixel_lifting() -> None:
         "world_point": "exact keypoint ray at interpolated camera-forward depth",
         "invalid_support": "any non-finite or non-positive bilinear depth support is rejected",
     }
+
+
+def test_camera_normal_representation_uses_right_down_forward_axes() -> None:
+    extrinsics = CameraExtrinsics(
+        position=LocalPoint(east_m=0.0, north_m=0.0, up_m=0.0),
+        yaw_deg=37.0,
+        pitch_deg=-12.0,
+        roll_deg=8.0,
+    )
+    world = np.asarray([[0.0, 0.0, 1.0], [0.2, -0.4, 0.8]], dtype=np.float64)
+
+    camera = world_normals_to_camera(world, extrinsics)
+
+    axes = camera_axes(extrinsics)
+    expected = np.asarray([[np.dot(normal, axis) for axis in axes] for normal in world])
+    assert camera == pytest.approx(expected, abs=1e-12)
+    assert not np.allclose(camera, world)
