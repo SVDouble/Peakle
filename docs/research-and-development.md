@@ -4,7 +4,7 @@
 
 **Last reviewed:** 2026-07-15
 
-**Current phase:** Phase 0C — exact-pose representation × matcher screen
+**Current research phase:** Phase 2 — LandscapeAR baseline reproduction; Phase 0C maintenance remains open
 
 This document is the sole normative source for Peakle's research goal, interpretation of accepted
 evidence, benchmark contracts, technical direction, and current roadmap. Its adjacent
@@ -47,6 +47,16 @@ abstention criterion on a discretely non-invariant control, while skyline contai
 information in an all-terrain view. The next bottleneck is
 therefore obtaining geographically correct photo↔terrain evidence at the exact pose.
 
+The registered exact-pose screen has now bounded the existing generic matchers. All four independent
+WebGL↔Python mask/depth calibrations pass, but identical-query SIFT returns only 0–6 selected features
+and fails its harness on every view. RoMa and MINIMA each select 5,000 dense points per case; all 24
+learned positives exceed the correct-count and span floors, but none reaches either 0.80 render-lift
+validity or 0.70 selected-match precision. No case passes and PnP is correctly skipped. Some
+terrain-valid subsets are geographically coherent, but re-denominating or mask-filtering them now
+would change the frozen decision rule. This is a negative harness diagnostic under an exact-pose
+ceiling, not proof that dense matching contains no signal. The next bounded task is the published
+LandscapeAR reproduction.
+
 The first annotation diagnostic also falsifies a single distance-only pose target. At 640 px, the
 same 200 m displacement produces roughly 7 px median-of-view p90 anchor error along the viewing
 direction and 26 px cross-view. For lateral motion, the median p90 is about 30 px for 4–5 km peaks,
@@ -59,9 +69,9 @@ Until the gates in this program are met:
 - do not describe a truth-selected oracle, source PFM, shared-renderer synthetic result, or
   identity-seed integration test as localization;
 - do not promote a method because an overlay looks plausible;
-- keep every experimental estimator out of product ranking; and
+- keep every experimental estimator out of product ranking;
 - make the next research milestone independent observation truth and a perfect-observation surface,
-  followed by the exact-pose modality benchmark; and
+  followed by the LandscapeAR true-position and noisy-offset baselines; and
 - add shared experiment infrastructure only when that second consumer removes duplication.
 
 ## Review decision: what changes now
@@ -101,8 +111,9 @@ The program is therefore changed as follows:
 These changes intentionally reduce the next experiment. The annotation-sensitivity diagnostic,
 truth protocol v0, independent-renderer calibration, serialized estimator firewall and first
 perfect-observation pilot are complete. Metric and relative depth survive the pilot; typed outlines
-and their fixed fusion stop at the ambiguity control. The immediate target is a small exact-pose
-modality screen—not another end-to-end solver or a run of all 32 verifier candidates.
+and their fixed fusion stop at the ambiguity control. The exact-pose generic-matcher screen is also
+complete and advances no pair. The immediate target is the released LandscapeAR descriptor in its
+isolated published protocols—not another end-to-end solver or a run of all 32 verifier candidates.
 
 ## Mission and task boundaries
 
@@ -163,6 +174,7 @@ mean:
 | Synthetic pinhole stage ceiling, `local/output/20260714-synthetic-pinhole-stage-upper-bound-v2/results.json`, SHA `bf813d184d4b6c99be00ff6c0b75c3e8d4b7c5115478d932cd77638209f180a8` | Five observations, two priors, exact/coarse estimator terrain; shared custom renderer | Proposal recall is 20/20 by construction. Exact-mask skyline top-one falls from 8/10 to 3/10 after factor-two terrain coarsening; RGB skyline falls from 2/10 to 0/10. | **Diagnostic ceiling.** It isolates terrain/extraction sensitivity; it is not an independent end-to-end result. |
 | Independent WebGL geometry pilot v1, `local/output/20260715-independent-webgl-geometry-pilot-v1/results.json`, SHA `ddc5373f8beef4fbf1fbede11d9e1c8a8f94ff6a5cabcf22be95da43284f2657` | Five independent-rasterizer observations, exact terrain, two priors and ten frozen 175-candidate archives | Metric depth meets strict numerical-truth rank/regret calibration on only 2/4 rugged exact-prior views; only skyline abstains in both ambiguity-control archives. | **Negative harness calibration.** Seed-7 WebGL depths of metres were compared with kilometre-scale Python renders because near-plane-crossing terrain was dropped. Do not interpret the method ranking. |
 | Corrective independent WebGL geometry pilot v2, `local/output/20260715-independent-webgl-geometry-pilot-v2-near-clip/results.json`, SHA `7a5a7200441116e76c4df38272b82279d25e29480d61af021c7e4c9b60ffa64a` | Same sealed queries, terrain, requests, priors and candidate poses as v1; corrected estimator clipping; clean whole-worktree provenance | Metric and relative depth rank the unique numerical truth first with zero regret on 4/4 rugged exact-prior and 8/8 all-prior cases. Skyline, metric and relative depth abstain in both controls; typed outlines and fixed fusion violate the registered criterion on the discretely non-invariant fixture. | **Diagnostic ceiling / partial gate pass.** Translation is observable from perfect depth under exact terrain. Retain metric/relative ceilings, keep skyline as a control, and stop typed/fixed-fusion lanes rather than tune them. |
+| Exact-pose representation screen v1, `local/output/20260715-exact-pose-representation-screen-v1/results.json`, SHA `15b6ac11fa0f522b2346bec2389782ee69365c4642611a986038dead86d3dbfb` | Four independent WebGL queries; exact Python terrain/pose/FOV renders; 54 frozen SIFT/RoMa/MINIMA × hillshade/depth/camera-normal cases; clean revision `fc42576` | Renderer parity passes 4/4, but identical-query SIFT returns only 0–6 features and fails 4/4 harness checks. No learned positive reaches either 0.80 render-lift validity or 0.70 selected precision; all 18 cross-seed cases have zero correct matches. PnP is not run. | **Negative harness diagnostic, not an accepted matcher comparison.** Freeze the gates and outputs. Reproduce LandscapeAR next; only a newly registered harness may revisit the dense terrain-valid subset. |
 | Annotation sensitivity diagnostic, `local/output/20260715-annotation-sensitivity-diagnostic-v2/results.json`, SHA `a7153733e636a830f60b89d643fefab1c05102bf2a6689ac0afab2bd2ed44221` | Four seed-13 synthetic pinhole views, 49 controlled perturbations per view; same terrain/renderer/labeler on both sides, no estimator | Exact pose has 24 physically eligible peak exposures and 14 displayed labels at 4.1–14.7 km. Median-of-view p90 anchor error is 13.0 px for 100 m lateral, 26.0 px for 200 m lateral, but 7.6 px for 200 m along-view; ±1° yaw is 11.9 px and ±1° FOV is 4.6 px at 640 px width. | **Diagnostic ceiling.** Pose utility is direction- and peak-distance-conditioned. Seed 13 was selected from 1–24 using exact-pose eligibility only; shared-renderer and fixture-selection bias prohibit a product claim. |
 | Six-photo GT↔DEM compatibility, `local/output/20260714-high-compute-six-photo-compatibility-v2-geopose-bench/results.json`, SHA `a2937e7ad1464dbfa59ad8cead798bda64be2d06e2a9cea57d30c977dee80488` | Reference PFM and metadata, evaluation-only | Produces two MAP_A, two MAP_B, and two MAP_C cases, but tiers change in nearby seeded runs around hard thresholds. | **Experimental dataset audit.** Useful as a continuous covariate, not yet as a calibrated eligibility gate. |
 | Legacy GT alignment audit, `local/output/20260709-155112-gt-alignment-audit/audit.json`, SHA `bc7ce33733e4893f832257fb1fa594869ef7d41500a9744651dd22239abc598f` | 364 refined-pose-era records, without a modern run manifest | 192 CLEAN, 172 SUSPECT, including 126 photo/PFM registration mismatches. | **Superseded diagnostic.** Supports caution about the corpus but cannot grade the reset benchmark. |
@@ -178,7 +190,10 @@ The result is a clear decomposition, not “nothing worked”:
 6. current real truth is too ambiguous and too small to decide whether some 200 m alternatives are
    algorithm failures or reference errors; and
 7. annotation displacement depends strongly on translation direction and peak distance, so a
-   universal horizontal-error threshold cannot define product utility.
+   universal horizontal-error threshold cannot define product utility; and
+8. generic dense matching contains terrain signal at the exact pose, but the current worker-selected
+   set is dominated by invalid/sky endpoints and the SIFT identity harness is unsuitable for these
+   low-texture synthetic views.
 
 ## Failure model
 
@@ -487,13 +502,13 @@ deployability.
 | Independent perfect depth | 4 diagnostic; 0 deployable | After near-plane repair, metric and relative depth each rank truth first on 8/8 rugged archives; exact terrain and perfect query depth make this an upper bound | Retain as the observability target for representation tests; do not add another handcrafted fusion |
 | RGB geometry verifier v1 | 1 selector; 3 interface | Top one is 0/3 and all cases abstain; its selected skyline defines the mask used by ridge and depth cues | Freeze v1; retain beam/abstention contracts; run one independent-mask kill test before deleting the scorer |
 | Render/lift/PnP core | 4 local stage | Geometry works in controlled tests; the sole real learned-matcher case is truth-ambiguous and can false-accept a coherent basin | Keep and simplify; grade correspondence geography before PnP |
-| SIFT | 1 | Positive mainly on identity/same-render plumbing; real cross-domain use usually abstains | Hermetic regression control only |
-| RoMa / MINIMA | 2 | Coherent matches exist, but generic features converge to an ambiguous basin and share fitting/validation evidence | Keep as exact-pose controls; no more integration until correspondence truth passes |
+| SIFT | 0.5 | The exact-pose screen's low-texture identical-query control returns only 0–6 features and fails its harness on 4/4 views | Retain as a feature-plumbing control, not the screen-wide harness or a competitive baseline |
+| RoMa / MINIMA | 2 | The exact-pose screen finds many correct terrain matches and zero correct cross-seed negatives, but all 24 learned positives fail selected-set validity and precision; the failed SIFT harness prevents a pair-level comparison | Freeze the current screen; no threshold/PnP tuning. Revisit only behind a preregistered estimator-mask contract after LandscapeAR |
 | MatchAnything | 1.5 | No Peakle artifact; its authors identify aerial↔ground as difficult and recommend task adaptation | One external-worker control only; do not make it a new core dependency |
 | LandscapeAR descriptor + PnP | 4 | Closest released mountain method; 30%≤100 m and 54%≤300 m, but its main renders start at truth and known FOV | Highest-priority task-B reproduction in an isolated environment |
-| NormalLoc-style RGB↔normal training | 3.5 concept | Large gains over generic matchers on low-detail textureless CAD/urban models; no mountain test or official code | Promote normals to the exact-pose screen; train only after that signal exists |
+| NormalLoc-style RGB↔normal training | 3 concept | Large gains over generic matchers on low-detail textureless CAD/urban models; generic RoMa/MINIMA camera-normal lanes do not pass the exact-pose screen | Keep as a task-specific adaptation hypothesis; train only after LandscapeAR establishes a domain baseline |
 | Segmentation / ridge extraction | 3.5 enabler; 1 direct translation | Large oracle/RGB orientation gap, but better boundaries do not create translation parallax | Build a manually labelled observation benchmark; defer LingBot Giant |
-| Independent synthetic causal tests | 4 | A different rasterizer isolated a real near-plane defect and perfect-depth observability; shared scene physics and sim-to-real remain the main uncertainty | Keep bounded one-factor tests; the next consumer is exact-pose representation, not another synthetic solver |
+| Independent synthetic causal tests | 4 | A different rasterizer isolated a real near-plane defect and perfect-depth observability; the exact-pose screen then bounded generic matching without running PnP | Keep bounded one-factor tests; do not expand them until a domain baseline defines the next falsifiable representation test |
 | Current `contourdb` / `global` | 0.5 | They search at most a massif-centred ring or a 20×20 grid in a supplied terrain window, not a published no-prior protocol | Remove from active method selection; preserve historical results |
 | Baatz/Saurer skyline retrieval | 3 coarse retrieval | Reported 76–88% top-one within 1 km, with correction/circular-truth caveats and catastrophic outliers | Classical task-C baseline only |
 | CrossLocate depth retrieval | 4 regional; 1 fine pose | 38.66% R@1 and 72.62% R@100 within 1 km over a held-out Alps region; known FOV and no metric refinement | Primary task-C baseline, after or separate from local capture |
@@ -502,13 +517,13 @@ The portfolio implies a hard keep/freeze/remove boundary:
 
 - **Keep stable:** terrain rendering/raycasting, horizon orientation, matcher-worker contract, and
   render/lift/PnP geometry.
-- **Freeze as diagnostics:** skyline atlas/scorer, PFM rerank, RGB verifier v1, and shared-renderer
-  synthetic suite.
+- **Freeze as diagnostics:** skyline atlas/scorer, PFM rerank, RGB verifier v1, shared-renderer
+  synthetic suite, and exact-pose screen v1.
 - **Remove from active selection:** skyline translation optimizers and the current `contourdb` and
   `global` labels. Do not delete potentially public compatibility code until its ownership/use is
   audited.
-- **Invest next:** annotation sensitivity, independent observation truth, LandscapeAR reproduction,
-  and RGB↔depth/normal representation tests.
+- **Invest next:** gold-real annotation/truth, LandscapeAR reproduction, and only then a newly
+  registered domain-feature or estimator-mask representation test.
 
 ## External baselines and relevant methods
 
@@ -852,6 +867,30 @@ scene generator rather than copy it; reuse `TerrainViewRenderer`, `lift_render_p
 solver or UI schema. If no pair survives, freeze this surface and move to LandscapeAR rather than
 adding features here.
 
+#### Accepted exact-pose screen v1 outcome
+
+The immutable run at `local/output/20260715-exact-pose-representation-screen-v1` uses clean revision
+`fc42576`; `results.json` has SHA
+`15b6ac11fa0f522b2346bec2389782ee69365c4642611a986038dead86d3dbfb` and `run.json` has SHA
+`1e35b8e227e89469f3b4f3b599abf91f7478a5c5fde505747d2b671b4e76d5dc`. An independent audit
+rehashes all 77 files, all 74 declared blobs, all 30 causal source files, the three model resources
+and six browser/runtime resources without a mismatch.
+
+Cross-render calibration passes on all four views: mask IoU is 0.999805–0.999945 and p95 absolute
+log-depth disagreement is 0.000319–0.001908. The SIFT harness nevertheless fails on all four
+identical-query controls, returning 5, 4, 0 and 6 selected matches rather than the required 12; its
+nonempty matches are within one pixel but occupy only 0–3 grid cells. The registered screen therefore
+abstains from a pair-level method comparison.
+
+The learned outcomes independently miss the central method gates. Every learned positive selects
+5,000 points and clears correct-count and span floors, but none clears 0.80 render-lift validity or
+0.70 precision over the worker-selected set; 22/24 clear occupancy. All 18 cross-seed controls have
+zero geographically correct matches. Conditional precision after terrain-valid filtering ranges
+widely from 0.135 to 1.0 and has median 0.736, which shows diluted signal but is not a registered
+decision statistic. No pair survives, so PnP is not run. Do not retune this surface. Reproduce
+LandscapeAR; a later corrective screen needs a newly registered low-texture harness and may use only
+estimator-available masking declared before evidence.
+
 ### Gate 4 — restricted capture surfaces
 
 Advance at most the best two representation/matcher pairs. With yaw/FOV fixed, sweep the directional
@@ -1017,11 +1056,12 @@ production cap (actual net +709).
 surfaces expose only the stable baseline while historical methods require explicit replay; the new
 experiment is typed, bounded, and frozen. Met.
 
-### Phase 0C — reusable new-experiment contract (current)
+### Phase 0C — reusable new-experiment contract (active maintenance track)
 
-Use the exact-pose screen as the second consumer. Extract only the shared evaluator/artifact pieces,
-validate/project canonical historical results through frozen adapters, and configure remote
-content-addressed transport when available.
+The exact-pose screen is now the second consumer, and canonical JSON, whole-worktree provenance,
+immutable publication and seeded synthetic scenes are shared without a parallel framework. Next,
+validate/project canonical historical results through frozen adapters and configure remote
+content-addressed transport when available; neither blocks the LandscapeAR research track.
 
 **Exit gate:** the two new studies share a typed truth firewall and projector; canonical evidence can
 be validated with one command; no production module imports private script helpers. A remote archive
@@ -1040,10 +1080,12 @@ scores.
 
 ### Phase 2 — map local information and capture
 
-Run the observability ceiling and exact-pose modality screen. Reproduce B0, horizon, and both
-LandscapeAR protocols in an isolated environment; retain SIFT/RoMa/MINIMA as controls. Advance at
-most two pairs into directional capture. CrossLocate/Baatz are not phase blockers because they solve
-task C rather than this local task.
+The observability ceiling is complete and the first exact-pose screen advances no pair under a
+failed SIFT harness. Reproduce B0, horizon, and both LandscapeAR protocols in an isolated
+environment. Adapt a released descriptor into the frozen correspondence boundary only after its
+published reproduction; any corrective exact-pose screen gets a newly registered low-texture
+harness. Advance at most two passing pairs into directional capture. CrossLocate/Baatz are not phase
+blockers because they solve task C rather than this local task.
 
 **Exit gate:** at least one image-based method improves the unchanged prior over a preregistered
 capture region on held-out gold locations with a bounded false-accept rate. If none does, stop
@@ -1077,12 +1119,13 @@ coverage, and the UI never presents an uncalibrated pose as confirmed.
 
 ## Current decision queue
 
-1. Use the exact-pose render-modality screen as the second consumer that triggers only genuinely
-   shared experiment extraction.
-2. Reproduce LandscapeAR's released descriptor on its published protocol; keep the legacy runtime
-   outside the core environment.
-3. Advance at most two pairs into restricted capture and use the measured, annotation-conditioned
-   boundary to decide whether the frozen 32-mode beam is worth the full render/PnP cost.
+1. Reproduce LandscapeAR's released descriptor on its published true-position and noisy-offset
+   protocols; keep the legacy runtime outside the core environment and record exact resource hashes.
+2. If that reproduction works, adapt only the descriptor/inference boundary and preregister a
+   corrected low-texture exact-pose harness. Do not reinterpret or retune screen v1.
+3. Advance at most two registered passing pairs into restricted capture and use the measured,
+   annotation-conditioned boundary to decide whether the frozen 32-mode beam is worth full
+   render/PnP cost. With no passing pair, keep PnP and the beam stopped.
 4. Reproduce CrossLocate/Baatz only as task-C baselines once local capture is useful, or explicitly
    label an earlier run as a standalone retrieval study.
 
