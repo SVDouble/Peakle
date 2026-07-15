@@ -29,7 +29,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -42,9 +42,11 @@ from peakle.localize.typed_outlines import TypedOutlines, extract_typed_outlines
 from peakle.rendering.rasterizer import SyntheticRenderer
 from peakle.rendering.terrain_view import terrain_fingerprint
 
-SYNTHETIC_BENCHMARK_SCHEMA = "peakle_synthetic_pose_pipeline_benchmark_v2"
+SYNTHETIC_BENCHMARK_SCHEMA = "peakle_synthetic_pose_pipeline_benchmark_v3"
 SYNTHETIC_ARCHIVE_SCHEMA = "peakle_synthetic_candidate_archive_v2"
-SYNTHETIC_EVALUATION_SCHEMA = "peakle_synthetic_candidate_evaluation_v2"
+SYNTHETIC_EVALUATION_SCHEMA = "peakle_synthetic_candidate_evaluation_v3"
+
+type QueryRendererFamily = Literal["shared_python_synthetic_renderer", "chromium_webgl2_raw"]
 
 SKYLINE_METHOD = "skyline"
 ORACLE_METRIC_DEPTH_METHOD = "oracle_metric_depth"
@@ -216,6 +218,7 @@ def build_synthetic_candidate_archive(
     reference_rendered_depth_oracle: NDArray[np.float64],
     *,
     config: SyntheticSearchConfig | None = None,
+    query_renderer_family: QueryRendererFamily = "shared_python_synthetic_renderer",
 ) -> dict[str, Any]:
     """Build a candidate archive without accepting numeric pose truth.
 
@@ -225,6 +228,7 @@ def build_synthetic_candidate_archive(
     """
 
     settings = config or SyntheticSearchConfig()
+    query_renderer_family = _validated_query_renderer_family(query_renderer_family)
     profiles = _validated_profiles(observed_skylines, intrinsics)
     source_depth = _validated_depth(reference_rendered_depth_oracle, intrinsics)
     source_typed = extract_typed_outlines(source_depth, min_px=_typed_min_px(intrinsics.width_px))
@@ -329,7 +333,8 @@ def build_synthetic_candidate_archive(
             "numeric_truth_used_directly": False,
             "candidate_count": len(candidates),
         },
-        "ranking_methods": _ranking_method_contract(),
+        "query_renderer_family": query_renderer_family,
+        "ranking_methods": _ranking_method_contract(query_renderer_family),
         "candidates": candidates,
     }
     archive["archive_sha256"] = _canonical_sha256(archive)
@@ -347,9 +352,24 @@ def evaluate_synthetic_candidate_archive(
     """Evaluate a frozen archive against synthetic truth after ranking."""
 
     record = _validated_archive(archive)
+    query_renderer_family = _validated_query_renderer_family(record.get("query_renderer_family"))
     settings = record["config"]
     target_position = float(settings["success_target"]["horizontal_position_m_lte"])
     target_yaw = float(settings["success_target"]["absolute_yaw_deg_lte"])
+    prior_errors = _pose_errors(record["prior"], truth)
+    prior_baseline = {
+        "pose": record["prior"],
+        "errors": prior_errors,
+        "reaches_target": bool(
+            prior_errors["horizontal_position_m"] <= target_position and prior_errors["yaw_deg"] <= target_yaw
+        ),
+        "normalized_joint_error": _round_score(
+            math.hypot(
+                prior_errors["horizontal_position_m"] / target_position,
+                prior_errors["yaw_deg"] / target_yaw,
+            )
+        ),
+    }
     candidates = list(record["candidates"])
     evaluated = [
         {
@@ -367,14 +387,7 @@ def evaluate_synthetic_candidate_archive(
             math.hypot(errors["horizontal_position_m"] / target_position, errors["yaw_deg"] / target_yaw)
         )
 
-    pool_oracle = min(
-        evaluated,
-        key=lambda item: (
-            item["normalized_joint_error"],
-            item["errors"]["position_3d_m"],
-            item["candidate"]["candidate_id"],
-        ),
-    )
+    numerical_truth_candidate = min(evaluated, key=_numerical_truth_key)
     target_count = sum(bool(item["reaches_target"]) for item in evaluated)
     proposal = {
         "evaluation_order": "before_any_candidate_ranking",
@@ -382,7 +395,15 @@ def evaluate_synthetic_candidate_archive(
         "target_candidate_count": target_count,
         "full_pool_recall": 1.0 if target_count else 0.0,
         "reaches_target": bool(target_count),
-        "best_reachable_candidate": _evaluated_candidate_record(pool_oracle),
+        "best_reachable_candidate": _evaluated_candidate_record(numerical_truth_candidate),
+        "numerical_truth_candidate": _evaluated_candidate_record(numerical_truth_candidate),
+        "numerical_truth_candidate_selection": (
+            "minimum normalized horizontal-position/yaw error; then 3D-position error; then candidate ID"
+        ),
+        "numerical_truth_candidate_exact_xy_yaw": bool(
+            numerical_truth_candidate["errors"]["horizontal_position_m"] <= 1e-6
+            and numerical_truth_candidate["errors"]["yaw_deg"] <= 1e-8
+        ),
     }
 
     tracks: dict[str, Any] = {}
@@ -402,6 +423,9 @@ def evaluate_synthetic_candidate_archive(
                 track,
                 quality,
                 settings["abstention"],
+                numerical_truth_candidate,
+                prior_baseline,
+                query_renderer_family=query_renderer_family,
                 expected_abstain=expected_abstain,
             )
         tracks[track] = {
@@ -419,6 +443,9 @@ def evaluate_synthetic_candidate_archive(
             score_track,
             {},
             settings["abstention"],
+            numerical_truth_candidate,
+            prior_baseline,
+            query_renderer_family=query_renderer_family,
             expected_abstain=expected_pose_ambiguity,
         )
         for method in TRACK_INVARIANT_ORACLE_METHODS
@@ -432,6 +459,7 @@ def evaluate_synthetic_candidate_archive(
         "reference_derived_evidence_used_by_archive_builder": True,
         "expected_pose_ambiguity": expected_pose_ambiguity,
         "truth": truth.model_dump(mode="json"),
+        "prior_baseline": prior_baseline,
         "proposal": proposal,
         "tracks": tracks,
         "oracle_depth_methods": {
@@ -577,6 +605,41 @@ def _aggregate_case_set(cases: list[dict[str, Any]]) -> dict[str, Any]:
                 "decision_accuracy": _rate(sum(bool(row["decision_correct"]) for row in rows), len(rows)),
                 "abstentions": sum(bool(row["decision"]["abstained"]) for row in rows),
                 "median_first_target_rank": _median_optional(row["first_target_rank"] for row in rows),
+                "numerical_truth_top1_hits": sum(row["numerical_truth_candidate_rank"] == 1 for row in rows),
+                "numerical_truth_top1_rate": _rate(
+                    sum(row["numerical_truth_candidate_rank"] == 1 for row in rows), len(rows)
+                ),
+                "median_numerical_truth_candidate_rank": _median_optional(
+                    row["numerical_truth_candidate_rank"] for row in rows
+                ),
+                "median_numerical_truth_score_regret_to_winner": _median_optional(
+                    row["numerical_truth_score_regret_to_winner"] for row in rows
+                ),
+                "geographic_alias_cases": sum(row["geographic_alias"] is not None for row in rows),
+                "median_geographic_alias_margin": _median_optional(_geographic_alias_margin(row) for row in rows),
+                "geographic_alias_beats_truth": sum(_geographic_alias_beats_truth(row) for row in rows),
+                "geographic_alias_beats_truth_rate": _rate(
+                    sum(_geographic_alias_beats_truth(row) for row in rows),
+                    sum(row["geographic_alias"] is not None for row in rows),
+                ),
+                "winner_prior_improvements": sum(
+                    row["winner_vs_prior"]["normalized_joint_outcome"] == "improved" for row in rows
+                ),
+                "winner_prior_regressions": sum(
+                    row["winner_vs_prior"]["normalized_joint_outcome"] == "regressed" for row in rows
+                ),
+                "median_winner_position_error_delta_vs_prior_m": _median_optional(
+                    row["winner_vs_prior"]["horizontal_position_error_delta_m"] for row in rows
+                ),
+                "median_winner_yaw_error_delta_vs_prior_deg": _median_optional(
+                    row["winner_vs_prior"]["yaw_error_delta_deg"] for row in rows
+                ),
+                "median_decision_position_error_delta_vs_prior_m": _median_optional(
+                    row["decision_output_vs_prior"]["horizontal_position_error_delta_m"] for row in rows
+                ),
+                "median_decision_yaw_error_delta_vs_prior_deg": _median_optional(
+                    row["decision_output_vs_prior"]["yaw_error_delta_deg"] for row in rows
+                ),
                 "median_winner_position_error_m": _median_optional(
                     row["winner"]["errors"]["horizontal_position_m"] for row in rows
                 ),
@@ -593,10 +656,12 @@ def canonical_json_bytes(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
 
 
-def _ranking_method_contract() -> dict[str, Any]:
+def _ranking_method_contract(
+    query_renderer_family: QueryRendererFamily = "shared_python_synthetic_renderer",
+) -> dict[str, Any]:
     return {
         SKYLINE_METHOD: {
-            "evidence": "custom pinhole shared-renderer query skyline only",
+            "evidence": _query_skyline_evidence_role(query_renderer_family),
             "analysis_only": True,
             "production_eligible": False,
         },
@@ -752,7 +817,10 @@ def _evaluate_ranking_method(
     track: str,
     observation_quality: Mapping[str, Any],
     abstention_contract: Mapping[str, Any],
+    numerical_truth_candidate: Mapping[str, Any],
+    prior_baseline: Mapping[str, Any],
     *,
+    query_renderer_family: QueryRendererFamily,
     expected_abstain: bool,
 ) -> dict[str, Any]:
     ranked = sorted(
@@ -774,24 +842,71 @@ def _evaluate_ranking_method(
         abstention_contract,
     )
     winner = ranked[0]
+    winner_score = _method_score(winner["candidate"], method, track)
+    numerical_truth_id = str(numerical_truth_candidate["candidate"]["candidate_id"])
+    numerical_truth_rank, ranked_numerical_truth = next(
+        (rank, item)
+        for rank, item in enumerate(ranked, start=1)
+        if item["candidate"]["candidate_id"] == numerical_truth_id
+    )
+    numerical_truth_score = _method_score(ranked_numerical_truth["candidate"], method, track)
+    alias_threshold_m = float(abstention_contract["competitive_position_separation_m_gte"])
+    alias_match = next(
+        (
+            (
+                rank,
+                item,
+                _horizontal_pose_separation_m(item["candidate"]["pose"], ranked_numerical_truth["candidate"]["pose"]),
+            )
+            for rank, item in enumerate(ranked, start=1)
+            if _horizontal_pose_separation_m(item["candidate"]["pose"], ranked_numerical_truth["candidate"]["pose"])
+            >= alias_threshold_m
+        ),
+        None,
+    )
+    geographic_alias = None
+    if alias_match is not None:
+        alias_rank, alias, alias_separation = alias_match
+        alias_score = _method_score(alias["candidate"], method, track)
+        geographic_alias = {
+            "candidate": _evaluated_candidate_record(alias),
+            "rank": alias_rank,
+            "score": _round_score(alias_score),
+            "horizontal_separation_from_numerical_truth_candidate_m": _round_score(alias_separation),
+            "minimum_separation_m": _round_score(alias_threshold_m),
+            "score_margin_alias_minus_numerical_truth": _round_score(alias_score - numerical_truth_score),
+        }
     raw_top1_reaches_target = bool(winner["reaches_target"])
     selected = not decision["abstained"]
     selected_pose_reaches_target = raw_top1_reaches_target and selected
     decision_correct = decision["abstained"] if expected_abstain else selected_pose_reaches_target
+    winner_vs_prior = _paired_error_delta(winner, prior_baseline)
+    decision_output_vs_prior = winner_vs_prior if selected else _zero_paired_error_delta()
     return {
         "evidence_role": (
             "oracle_only_reference_pose_generated"
             if method in ORACLE_ONLY_METHODS
-            else "custom_pinhole_query_skyline_stage_harness"
+            else _query_skyline_evidence_role(query_renderer_family)
         ),
         "production_eligible": False,
         "winner": _evaluated_candidate_record(winner),
-        "winner_score": _round_score(_method_score(winner["candidate"], method, track)),
+        "winner_score": _round_score(winner_score),
         "first_target_rank": first_target_rank,
         "top_k_recall": {
             str(k): bool(first_target_rank is not None and first_target_rank <= k) for k in (1, 5, 10, 25, 50, 100)
         },
         "raw_top1_reaches_target": raw_top1_reaches_target,
+        "numerical_truth_candidate_rank": numerical_truth_rank,
+        "numerical_truth_candidate_score": _round_score(numerical_truth_score),
+        "numerical_truth_score_regret_to_winner": _round_score(max(0.0, numerical_truth_score - winner_score)),
+        "numerical_truth_score_tie_count": sum(
+            _method_score(item["candidate"], method, track) == numerical_truth_score for item in ranked
+        ),
+        "numerical_truth_top_k_recall": {str(k): numerical_truth_rank <= k for k in (1, 5, 10, 25, 50, 100)},
+        "geographic_alias": geographic_alias,
+        "winner_vs_prior": winner_vs_prior,
+        "decision_output_source": "winner" if selected else "unchanged_prior",
+        "decision_output_vs_prior": decision_output_vs_prior,
         "selected": selected,
         "selected_pose_reaches_target": selected_pose_reaches_target,
         "false_accept": selected and (expected_abstain or not raw_top1_reaches_target),
@@ -858,6 +973,54 @@ def _pose_errors(pose_record: Mapping[str, Any], truth: CameraExtrinsics) -> dic
     }
 
 
+def _horizontal_pose_separation_m(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+    left_position = left["position"]
+    right_position = right["position"]
+    return math.hypot(
+        float(left_position["east_m"]) - float(right_position["east_m"]),
+        float(left_position["north_m"]) - float(right_position["north_m"]),
+    )
+
+
+def _paired_error_delta(candidate: Mapping[str, Any], prior: Mapping[str, Any]) -> dict[str, Any]:
+    position_delta = float(candidate["errors"]["horizontal_position_m"]) - float(
+        prior["errors"]["horizontal_position_m"]
+    )
+    yaw_delta = float(candidate["errors"]["yaw_deg"]) - float(prior["errors"]["yaw_deg"])
+    joint_delta = float(candidate["normalized_joint_error"]) - float(prior["normalized_joint_error"])
+    return {
+        "horizontal_position_error_delta_m": _round_score(position_delta),
+        "yaw_error_delta_deg": _round_score(yaw_delta),
+        "normalized_joint_error_delta": _round_score(joint_delta),
+        "normalized_joint_outcome": _delta_outcome(joint_delta),
+    }
+
+
+def _zero_paired_error_delta() -> dict[str, Any]:
+    return {
+        "horizontal_position_error_delta_m": 0.0,
+        "yaw_error_delta_deg": 0.0,
+        "normalized_joint_error_delta": 0.0,
+        "normalized_joint_outcome": "tied",
+    }
+
+
+def _delta_outcome(delta: float) -> str:
+    if delta < 0.0:
+        return "improved"
+    if delta > 0.0:
+        return "regressed"
+    return "tied"
+
+
+def _numerical_truth_key(item: Mapping[str, Any]) -> tuple[float, float, str]:
+    return (
+        float(item["normalized_joint_error"]),
+        float(item["errors"]["position_3d_m"]),
+        str(item["candidate"]["candidate_id"]),
+    )
+
+
 def _evaluated_candidate_record(item: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "candidate_id": item["candidate"]["candidate_id"],
@@ -880,6 +1043,20 @@ def _validated_archive(archive: Mapping[str, Any]) -> dict[str, Any]:
     if record.get("numeric_pose_reference_fields_used_directly_in_scoring") is not False:
         raise ValueError("synthetic candidate archive scoring must not receive numeric truth fields directly")
     return record
+
+
+def _validated_query_renderer_family(value: object) -> QueryRendererFamily:
+    if value is None or value == "shared_python_synthetic_renderer":
+        return "shared_python_synthetic_renderer"
+    if value == "chromium_webgl2_raw":
+        return "chromium_webgl2_raw"
+    raise ValueError(f"unsupported query renderer family: {value!r}")
+
+
+def _query_skyline_evidence_role(query_renderer_family: QueryRendererFamily) -> str:
+    if query_renderer_family == "chromium_webgl2_raw":
+        return "independent_chromium_webgl2_semantic_terrain_mask_skyline"
+    return "shared_python_synthetic_renderer_query_skyline_stage_harness"
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -930,3 +1107,16 @@ def _rate(numerator: int, denominator: int) -> float | None:
 def _median_optional(values) -> float | None:
     finite = [float(value) for value in values if value is not None and math.isfinite(float(value))]
     return _round_score(float(np.median(finite))) if finite else None
+
+
+def _geographic_alias_margin(method_result: Mapping[str, Any]) -> float | None:
+    alias = method_result.get("geographic_alias")
+    if not isinstance(alias, Mapping):
+        return None
+    value = alias.get("score_margin_alias_minus_numerical_truth")
+    return float(value) if isinstance(value, int | float) else None
+
+
+def _geographic_alias_beats_truth(method_result: Mapping[str, Any]) -> bool:
+    margin = _geographic_alias_margin(method_result)
+    return margin is not None and margin < 0.0

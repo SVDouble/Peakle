@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import numpy as np
@@ -17,6 +19,7 @@ from peakle.localize.synthetic_pipeline_bench import (
     SyntheticSearchConfig,
     aggregate_synthetic_cases,
     build_synthetic_candidate_archive,
+    canonical_json_bytes,
     controlled_prior,
     evaluate_synthetic_candidate_archive,
     extraction_quality,
@@ -83,6 +86,12 @@ def _rugged_case():
     return terrain, truth, intrinsics, config, geometry, profiles, quality
 
 
+def _rehash_archive(archive: dict) -> None:
+    unhashed = dict(archive)
+    unhashed.pop("archive_sha256", None)
+    archive["archive_sha256"] = hashlib.sha256(canonical_json_bytes(unhashed)).hexdigest()
+
+
 def test_archive_build_is_truth_free_deterministic_and_depth_is_explicitly_oracle_only() -> None:
     terrain, truth, intrinsics, config, geometry, profiles, _quality = _rugged_case()
     prior = controlled_prior(terrain, truth, DEFAULT_PRIOR_REGIMES["exact"], config)
@@ -126,11 +135,15 @@ def test_archive_build_is_truth_free_deterministic_and_depth_is_explicitly_oracl
         "observed_skylines",
         "reference_rendered_depth_oracle",
         "config",
+        "query_renderer_family",
     ]
     encoded = json.dumps(archive, sort_keys=True)
     assert '"truth":' not in encoded
     assert '"errors":' not in encoded
     assert "winner_errors" not in encoded
+    assert "numerical_truth_candidate_rank" not in encoded
+    assert "numerical_truth_score_regret" not in encoded
+    assert "geographic_alias" not in encoded
     assert '"reference_data_used"' not in encoded
 
 
@@ -163,8 +176,99 @@ def test_post_freeze_evaluation_reports_full_proposal_recall_before_ranking() ->
     assert depth["winner"]["errors"]["horizontal_position_m"] == 0.0
     assert depth["winner"]["errors"]["yaw_deg"] == 0.0
     assert depth["first_target_rank"] == 1
+    assert depth["numerical_truth_candidate_rank"] == 1
+    assert depth["numerical_truth_score_regret_to_winner"] == 0.0
+    assert depth["geographic_alias"]["score_margin_alias_minus_numerical_truth"] >= 0.0
+    assert evaluation["prior_baseline"]["errors"]["horizontal_position_m"] == 0.0
+    assert depth["winner_vs_prior"]["normalized_joint_outcome"] == "tied"
+    assert depth["decision_output_vs_prior"]["horizontal_position_error_delta_m"] == 0.0
     assert evaluation["numeric_truth_fields_used_by_archive_builder"] is False
     assert evaluation["reference_derived_evidence_used_by_archive_builder"] is True
+
+
+def test_post_freeze_ranking_separates_target_basin_from_numerical_truth_and_aliases() -> None:
+    terrain, truth, intrinsics, config, geometry, profiles, quality = _rugged_case()
+    prior = controlled_prior(terrain, truth, DEFAULT_PRIOR_REGIMES["exact"], config)
+    archive = build_synthetic_candidate_archive(
+        terrain,
+        intrinsics,
+        prior,
+        profiles,
+        geometry.forward_depth_m,
+        config=config,
+    )
+    candidates = {candidate["candidate_id"]: candidate for candidate in archive["candidates"]}
+    for candidate in candidates.values():
+        candidate["scores"]["skyline"]["oracle_mask"] = 0.9
+    candidates["n01-e01-y00"]["scores"]["skyline"]["oracle_mask"] = 0.05
+    candidates["n01-e00-y01"]["scores"]["skyline"]["oracle_mask"] = 0.1
+    candidates["n01-e01-y01"]["scores"]["skyline"]["oracle_mask"] = 0.2
+    _rehash_archive(archive)
+    frozen_bytes = canonical_json_bytes(archive)
+
+    evaluation = evaluate_synthetic_candidate_archive(
+        archive,
+        truth,
+        quality,
+        {"oracle_mask": "select"},
+        expected_pose_ambiguity=False,
+    )
+    result = evaluation["tracks"]["oracle_mask"]["methods"][SKYLINE_METHOD]
+
+    assert canonical_json_bytes(archive) == frozen_bytes
+    assert result["first_target_rank"] == 1
+    assert result["numerical_truth_candidate_rank"] == 3
+    assert result["numerical_truth_score_regret_to_winner"] == 0.15
+    assert result["geographic_alias"]["rank"] == 2
+    assert result["geographic_alias"]["horizontal_separation_from_numerical_truth_candidate_m"] == 50.0
+    assert result["geographic_alias"]["score_margin_alias_minus_numerical_truth"] == -0.1
+    assert result["winner_vs_prior"]["yaw_error_delta_deg"] == 5.0
+    assert result["winner_vs_prior"]["normalized_joint_outcome"] == "regressed"
+
+    candidates["n01-e01-y01"]["scores"]["skyline"]["oracle_mask"] = 0.05
+    _rehash_archive(archive)
+    tied = evaluate_synthetic_candidate_archive(
+        archive,
+        truth,
+        quality,
+        {"oracle_mask": "select"},
+        expected_pose_ambiguity=False,
+    )["tracks"]["oracle_mask"]["methods"][SKYLINE_METHOD]
+    assert tied["numerical_truth_candidate_rank"] == 2
+    assert tied["numerical_truth_score_regret_to_winner"] == 0.0
+    assert tied["numerical_truth_score_tie_count"] == 2
+    assert tied["geographic_alias"]["score_margin_alias_minus_numerical_truth"] == 0.05
+
+
+def test_moderate_prior_is_reported_unchanged_and_metric_depth_improves_it() -> None:
+    terrain, truth, intrinsics, config, geometry, profiles, quality = _rugged_case()
+    config = replace(config, position_radius_steps=2, yaw_radius_steps=3)
+    prior = controlled_prior(terrain, truth, DEFAULT_PRIOR_REGIMES["moderate"], config)
+    archive = build_synthetic_candidate_archive(
+        terrain,
+        intrinsics,
+        prior,
+        profiles,
+        geometry.forward_depth_m,
+        config=config,
+    )
+
+    evaluation = evaluate_synthetic_candidate_archive(
+        archive,
+        truth,
+        quality,
+        {"oracle_mask": "select"},
+        expected_pose_ambiguity=False,
+    )
+    depth = evaluation["oracle_depth_methods"]["methods"][ORACLE_METRIC_DEPTH_METHOD]
+
+    expected_position_error = config.position_spacing_m * 2**0.5
+    assert evaluation["prior_baseline"]["errors"]["horizontal_position_m"] == pytest.approx(expected_position_error)
+    assert evaluation["prior_baseline"]["errors"]["yaw_deg"] == 10.0
+    assert depth["numerical_truth_candidate_rank"] == 1
+    assert depth["winner_vs_prior"]["horizontal_position_error_delta_m"] == pytest.approx(-expected_position_error)
+    assert depth["winner_vs_prior"]["yaw_error_delta_deg"] == -10.0
+    assert depth["winner_vs_prior"]["normalized_joint_outcome"] == "improved"
 
 
 def test_radial_negative_control_requires_and_detects_skyline_abstention() -> None:
@@ -387,21 +491,41 @@ def test_aggregates_deduplicate_observations_and_report_depth_once_per_archive()
 
     assert extraction["oracle_mask"]["unique_observations"] == 1
     assert depth["cases"] == 2
+    assert depth["numerical_truth_top1_hits"] == 2
+    assert depth["median_numerical_truth_candidate_rank"] == 1.0
+    assert depth["median_numerical_truth_score_regret_to_winner"] == 0.0
+    assert depth["geographic_alias_cases"] == 2
+    assert depth["winner_prior_improvements"] == 0
+    assert depth["winner_prior_regressions"] == 0
+    assert depth["median_winner_position_error_delta_vs_prior_m"] == 0.0
     assert not any(
         row["track"] == "oracle_mask" and row["method"] == ORACLE_METRIC_DEPTH_METHOD
         for row in aggregates["candidate_ranking"]
     )
     summary = _summary_markdown({"aggregates": aggregates})
     assert "selected pose reaches target" in summary
+    assert "median numerical-truth rank" in summary
+    assert "median alias margin" in summary
+    assert "Paired against the unchanged input prior" in summary
     assert "identity check, not benchmark success" in summary
 
 
 def test_code_provenance_is_scoped_to_implementation_not_user_settings() -> None:
     provenance = _code_provenance()
+    webgl_provenance = _code_provenance("webgl")
 
     assert provenance["scope"] == "listed_implementation_paths_only"
     assert ".vscode/settings.json" not in str(provenance["implementation_status"])
     assert all(not item["path"].startswith(".vscode/") for item in provenance["implementation"])
+    webgl_paths = {item["path"] for item in webgl_provenance["implementation"]}
+    assert "src/peakle/research/synthetic_query.py" in webgl_paths
+    assert "src/peakle/research/webgl_contract.py" in webgl_paths
+    assert "src/peakle/research/webgl_query.py" in webgl_paths
+    assert "src/peakle/research/webgl_query.html" in webgl_paths
+    assert "src/peakle/research/synthetic_estimator.py" in webgl_paths
+    assert "src/peakle/rendering/pinhole.py" in webgl_paths
+    assert "src/peakle/default_settings.yaml" in webgl_paths
+    assert "uv.lock" in webgl_paths
 
 
 def test_artifact_commit_uses_atomic_directory_publish(tmp_path) -> None:
@@ -421,6 +545,29 @@ def test_artifact_commit_uses_atomic_directory_publish(tmp_path) -> None:
     assert run_bytes == script_module.canonical_json_bytes(run)
     assert run["status"] == "complete"
     assert not list(tmp_path.glob(".*.staging-*"))
+
+
+def test_artifact_commit_publishes_frozen_query_files_in_same_transaction(tmp_path) -> None:
+    output = tmp_path / "synthetic-webgl"
+    now = datetime.now(UTC)
+
+    _commit_artifact(
+        output,
+        {"cases": [], "schema": "test", "aggregates": {}},
+        "# summary\n",
+        started_at=now,
+        finished_at=now,
+        query_renderer="webgl",
+        extra_files={"query-scene.semantic.u8": b"\x00\x01"},
+    )
+
+    assert (output / "query-scene.semantic.u8").read_bytes() == b"\x00\x01"
+    assert {path.name for path in output.iterdir()} == {
+        "query-scene.semantic.u8",
+        "results.json",
+        "run.json",
+        "summary.md",
+    }
 
 
 def test_failed_artifact_staging_never_publishes_final_directory(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

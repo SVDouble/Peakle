@@ -4,7 +4,7 @@
 
 **Last reviewed:** 2026-07-15
 
-**Current phase:** Phase 0C — reusable experiment contract and truth protocol
+**Current phase:** Phase 0C — registered independent-rasterizer geometry pilot
 
 This document is the sole normative source for Peakle's research goal, interpretation of accepted
 evidence, benchmark contracts, technical direction, and current roadmap. Its adjacent
@@ -88,10 +88,11 @@ The program is therefore changed as follows:
    or training data are correlated. The requirement is evidence not reused for fitting plus measured
    conditional value and risk/coverage—not an unsupported claim that heads are independent.
 
-These changes intentionally reduce the next experiment. The annotation-sensitivity diagnostic is
-complete. The immediate targets are the independent synthetic/gold-real protocol, a
-perfect-observation surface, and then a small exact-pose modality screen—not another end-to-end
-solver or a run of all 32 verifier candidates.
+These changes intentionally reduce the next experiment. The annotation-sensitivity diagnostic and
+truth protocol v0 are complete. The independent-renderer calibration and serialized estimator
+firewall are implemented; the immediate target is the registered perfect-observation pilot,
+followed by a small exact-pose modality
+screen—not another end-to-end solver or a run of all 32 verifier candidates.
 
 ## Mission and task boundaries
 
@@ -247,22 +248,159 @@ must not be pooled into one success percentage.
 | **Independent synthetic** | Controlled perturbations and causal stage tests | Forward renderer differs from estimator renderer; vary DEM resolution/bias/nodata, texture, vegetation, snow, haze, crop, lens, and camera model; keep truth sealed from estimators |
 | **Diagnostic oracle** | Upper bounds and failure localization | Mark visibly in artifacts/UI; exclude from rankings, confidence, and product claims |
 
-Gold v0 should be a small engineering pilot: at least ten location groups and roughly 50 images
-across different view directions, distances, cameras, terrain types, and conditions. It is enough to
-debug the protocol, not to calibrate a product claim. Capture raw images, calibrated intrinsics and
-lens distortion, RTK/surveyed tripod coordinates, camera height, independently measured
-yaw/pitch/roll or boresight, timestamps, and independent visible-peak/occlusion annotations. Do not
-derive orientation truth from the same mountain correspondences used for grading. Split and
-bootstrap by location group, not by near-duplicate image. Before Phase 3, register a
-location-clustered power/sample-size plan for the target effect and false-accept rate. GeoPose
-remains a weak-real external set with per-sample compatibility and reference-disagreement fields.
+### Truth protocol v0
+
+The first truth slice is deliberately narrower than a general synthetic-data framework or a large
+field campaign. It has three contracts: an independent geometry renderer, a gold-real engineering
+pilot, and a separately frozen prior snapshot. A case is ineligible if any one of those contracts is
+silently reconstructed from defaults or estimator output.
+
+#### Independent synthetic geometry
+
+Gate 2 v0 uses an isolated headless-Chromium WebGL renderer. It receives a neutral, sealed scene
+bundle with explicit local-ENU vertices and triangle indices, camera position plus an explicit
+yaw/pitch/roll and image-axis convention, calibrated K/crop, semantic classes, units, dtypes, byte
+order, and a hash for every blob. It must not directly import or call `SyntheticRenderer`,
+`TerrainViewRenderer`, Peakle projection or
+unprojection helpers, the interactive Three.js terrain/viewer code, or its JavaScript visibility
+rasterizer. The estimator continues to use the Python terrain renderer. This is therefore an
+**independent rasterizer over a shared pinhole/heightfield scene model**, not yet independent
+physical synthetic truth.
+
+The frozen query artifact contains the sealed neutral input scene, RGB, a semantic class mask,
+linear camera-forward depth, camera-coordinate normals, the renderer's public intrinsics and sealed
+camera axes/matrix, and hashes/provenance. Arrays use top-left row order; depth is finite and positive
+only on rendered geometry. The first worker emits sky/terrain; a query-only-occluder ID is added with
+the registered parallax case. Record the browser, WebGL/ANGLE backend, shader, executable and
+software-rasterizer hashes, flags, capabilities, input/output schema versions, source/output hashes,
+seed, runtime, and network policy. Browser-version byte drift is allowed only as a new renderer
+stratum, never silently pooled.
+
+The process order is mandatory:
+
+```text
+sealed scene -> external render -> freeze query artifact
+             -> truth-free estimator request -> freeze estimator output
+             -> load sealed truth -> evaluate
+```
+
+The estimator request may contain only the declared camera model/intrinsics, observation blobs,
+estimator terrain, prior, and compute budget. It may not contain query camera extrinsics or matrix,
+truth mesh/manifests, per-pixel world coordinates or triangle IDs, corruption parameters, a
+truth-selected candidate, or the expected decision.
+
+For WebGL cases this is enforced by a strict, recursively validated JSON request and a fresh Python
+worker process. The worker receives hash-checked semantic/depth observations and a deterministic
+estimator-terrain bundle, writes one canonical candidate archive, and exits. The truth-side process
+then reloads that frozen archive for evaluation. The final transaction retains the sealed scene,
+raw query arrays, exact estimator terrain, request and candidate archive; the request references no
+sealed scene or truth-pose field. A hash-only or same-process hand-off does not satisfy this contract.
+
+Before a scientific case, analytic fixtures must pass camera axes and pixel centres, yaw/pitch/roll,
+off-centre principal point/crop, slanted-plane metric depth, camera-normal direction, triangle
+z-order, diagonal seams, near-plane clipping, top/bottom orientation, semantic IDs, and repeated-run
+determinism. The near-plane fixture is decisive: WebGL clips a crossing triangle, while the current
+Python renderer drops a triangle when a vertex is invalid. A test must also make
+`SyntheticRenderer` raise while the query renderer still succeeds, and a request validator must
+reject every forbidden truth field.
+
+The first registered scene groups are a distinctive multiscale landscape, a parallax/occluder case,
+and a rotationally symmetric abstention control. Run a fixed candidate lattice with exact estimator
+terrain, factor-two coarsening, signed height-datum bias, a nodata wedge, declared crop/FOV changes,
+and misdeclared crop/FOV, one factor at a time. Publish truth rank, recall@K, score margin and aliases
+for skyline, semantic mask, typed outlines, absolute/log depth, camera normals and simple frozen
+combinations. Vegetation, snow, haze, lens distortion and photorealistic appearance do not enter v0;
+they become query-only layers after the geometry/camera contract passes.
+
+#### Gold-real engineering pilot
+
+Gold v0 is 60 independent captures at 20 surveyed location groups, covering at least three
+device/acquisition families and varied directions, peak ranges, terrain and conditions. Freeze 12
+locations for protocol/development, three for validation and five as locked test before method
+tuning. A location group contains the complete station/session across cameras, bursts, crops,
+panoramas and platform derivatives; stations less than 2 km apart are conservatively merged unless
+survey geometry proves independence. This is enough to debug the protocol and expose gross bias; it
+is not enough to claim stable p90/p95 performance. Product-tail calibration waits for at least 200
+captures over 50 locations and five device families plus a registered location-clustered power plan.
+
+Retain the original image and raw metadata before editing. Each record carries immutable asset,
+metadata and truth hashes; capture, sequence, location and device group IDs; acquisition regime and
+split; timestamps and source dimensions; the exact raw-to-query crop, resize, transpose/rotation and
+projection transform; calibrated intrinsics/distortion and uncertainty; RTK/PPK or surveyed camera
+coordinates with CRS, vertical datum and covariance; surveyed ground altitude and measured lens
+height; and independently measured boresight/orientation with its convention and uncertainty.
+Orientation truth may come from a surveyed target, total station, calibrated sensor/target process,
+or surveyed fixed camera, but never the mountain correspondences used for grading.
+
+A case enters gold pose metrics only when 95% horizontal truth uncertainty is at most 0.25 m,
+vertical at most 0.5 m, yaw at most 0.1°, calibrated FOV at most 0.25°, and intrinsics reprojection
+RMS at most 0.5 px; the heading reference/image-axis,
+altitude datum and full crop history must be known. Missing fields remain null. They are never
+replaced by a default FOV, zero yaw, terrain-derived altitude, or another sample. Split-leakage,
+duplicate-lineage, CRS, angle wrapping, magnetic/true-heading, altitude-reference, focal/FOV and
+crop-transform checks are release gates.
+
+Visible summits and occlusions are image annotations, not projections copied from Peakle. A terrain
+projection at the sealed surveyed pose may generate review candidates, but two reviewers must check
+identity against independent topographic sources and mark the apex/occlusion state on the original
+image without seeing estimator output or each other's review. Freeze every gazetteer summit
+projected within the calibrated frame plus a 5% margin and 80 km range, plus reviewer-added missing
+summits, so the denominator is not visible-only. Use stable summit IDs and exactly these states:
+`visible`, `terrain_occluded`, `surface_occluded`, `cloud_or_atmosphere_obscured`,
+`outside_usable_crop`, `identity_ambiguous`, and `not_a_summit`. The anchor is the summit apex, never
+the laid-out label position. Matching states and visible anchors within the larger of 4 px or their
+recorded uncertainty may pass automatically; all other disagreements go to a blinded adjudicator.
+Unresolved items remain `identity_ambiguous` in coverage accounting and leave hard identity/anchor
+scoring. Freeze the verified gazetteer, independent reviews and adjudication before any localization
+score.
+
+The immutable flat artifact contains `manifest.json`, `samples.jsonl`, `gazetteer.jsonl`,
+`peak_reviews.jsonl`, and `adjudicated_peaks.jsonl`, plus content-addressed image, survey and
+calibration resources. The manifest records protocol/tool revisions, split method, location groups,
+source/license policy and every file hash. Sample rows contain source lineage, eligibility and typed
+exclusion reasons, exact image transform, calibrated camera, surveyed pose/covariance, terrain
+references and condition strata. Review rows are append-only and record reviewer pseudonym,
+blindness policy, round, timestamp, state, apex/uncertainty, confidence, occluder and evidence
+hashes. Adjudication freezes one verdict per sample/summit with its source reviews and score
+eligibility.
+
+Nothing currently on disk satisfies this contract. GT-v2's 364 complete cases include 175
+MANUAL+CLEAN rows, but `manual` is GeoPose's flag; there are no Peakle peak reviews, raw originals,
+crop/lens calibration, survey covariance or independent boresight. GT-v2 pose/quality was polished
+against PFM/photo/DEM evidence. It is compatibility-labelled weak real, not a shortcut to gold.
+
+#### Empirical prior snapshot
+
+The raw GPS/compass/lens record is captured before any image or terrain inference and kept separate
+from independent truth. Preserve latitude/longitude and accuracy, altitude plus reference/datum and
+accuracy, provider and timestamps, heading plus true/magnetic reference and image-axis convention,
+focal/sensor/lens/device fields, digital zoom, EXIF orientation, and all missingness flags. Preserve
+the exact query transform and effective principal point. Derived residuals include signed ENU,
+horizontal magnitude, wrapped yaw, FOV/log-focal, normalized crop/principal-point shift, rotation,
+absolute-altitude and camera-clearance errors; altitude and lens height remain different variables.
+
+The current GeoPose corpus cannot calibrate this distribution. Its 3,111 crops retain no usable
+EXIF; original metadata has position, altitude and FOV but no compass or crop transform, while the
+comparison pose is image/model-refined. The least-incompatible diagnostic subset is 161 MANUAL
+Flickr samples: absolute refined-minus-original correction has horizontal p50/p75/p90/p95 of about
+95/220/492/799 m, altitude 15/40/88/158 m and FOV 1.5/3.1/6.3/15.4°. These joint tuples may seed
+stress tests only. They are not GPS/FOV accuracy, empirical priors, or grading truth. Compass and crop
+remain registered designed sweeps until gold capture supplies them. AUTO/grid samples, GT-v2
+corrections, compatibility crop shifts/clearance, solver-to-original errors and hard-coded benchmark
+perturbations are forbidden as empirical-prior distributions.
+
+GeoPose therefore remains a weak-real external set with every competing reference and disagreement
+field preserved. Fit, validation and test partitions—and all bootstrap intervals—are grouped by
+location, never by image.
 
 ## Benchmark contract
 
 ### Shared rules
 
-- Estimator inputs contain no numeric truth, truth-derived masks/depth, success flags, or
-  truth-selected candidates.
+- Estimator inputs contain no numeric query pose, evaluation truth, success flags, or
+  truth-selected candidates. A preregistered independent-synthetic perfect-observation channel may
+  supply truth-pose-rendered mask/depth/normals as explicitly analysis-only query evidence; its
+  generating extrinsics, scene manifest and expected result remain sealed from the estimator.
 - Freeze and hash estimator output before evaluation; reload it through a strict schema.
 - Register the dataset split, code commit, config, model/checkpoint hashes, resource hashes, network
   policy, random seeds, and parent artifact hashes.
@@ -529,6 +667,44 @@ If a perfect modality cannot rank the correct basin, it is not trained or sent t
 may check the metric implementation but remains a labelled diagnostic oracle, never the independent
 query generator.
 
+#### Registered geometry pilot v1
+
+The first causal pilot is fixed before its clean run: WebGL query renderer; terrain seeds 7 and 23;
+two rugged views per seed; the rotationally symmetric control; exact and moderate priors; exact
+estimator terrain only; 160×90 images; 97×73 terrain; render stride one; and a 5×5 position by
+seven-yaw lattice (175 candidates per archive). This is four rugged observations plus one control,
+each repeated under two priors: ten archives, not ten independent samples. The moderate prior is
+100 m east, 100 m south and 10° in yaw, so the numerical truth remains inside the lattice. Wide and
+coarse lanes are deferred: the old wide prior put truth on two search boundaries, while coarse
+terrain also changes candidate camera height and would confound resolution with vertical datum.
+
+The clean run uses explicit flags rather than the legacy shared-renderer defaults:
+
+```bash
+uv run python -m peakle.scripts.bench_synthetic_pipeline \
+  --output local/output/20260715-independent-webgl-geometry-pilot-v1 \
+  --query-renderer webgl --seeds 7,23 --views-per-scene 2 \
+  --prior-regimes exact,moderate --estimator-terrain-variants exact \
+  --image-width 160 --image-height 90 \
+  --terrain-grid-width 97 --terrain-grid-height 73 --render-stride 1 \
+  --position-spacing-m 100 --position-radius-steps 2 \
+  --yaw-spacing-deg 5 --yaw-radius-steps 3
+```
+
+Scores are frozen before evaluation. For each method publish the loose target-basin rank separately
+from the deterministic numerical-truth candidate rank, truth-score regret to the winner, top-K
+recall, and the best candidate at least 50 m from the numerical-truth candidate. Alias margin is
+`alias score - numerical-truth score`, so positive favors truth. Rank ties are candidate-ID ordered;
+zero regret means a rank greater than one is a tie, not a demonstrated misranking.
+
+The calibration criterion is strict: absolute metric depth must rank the numerical-truth candidate
+first with zero regret on all four rugged exact-prior cases. Failure stops expansion and returns to
+camera/depth-contract debugging. Every method in both radial-control archives must abstain; any
+selection is a control/threshold failure. Moderate-prior outcomes are descriptive per view and
+modality, not a new pass threshold. This pilot cannot complete Gate 2: it lacks normals ranking,
+query-only occluders, height bias, nodata, crop/FOV mismatch, directional sweeps and an independent
+physical scene model.
+
 ### Gate 3 — exact-pose representation × matcher screen
 
 At the exact render position and heading, compare these render lanes under the same image scale and
@@ -631,19 +807,30 @@ branch per experiment.
    144 nonblank lines and adds no solver, UI method, dependency, or untyped persisted boundary. The
    atomic-directory publisher also replaces seven duplicated production lines in the older
    synthetic runner. No second experiment CLI may copy this machinery.
-4. Let Gate 3 drive the next extraction: one exact-pose screen should reuse the current matcher
+4. **Independent-query foundation and firewall — implemented.** A raw WebGL2 worker, typed adapter,
+   sealed scene/query payload, strict estimator request, subprocess worker and frozen candidate
+   archive add an independent rasterizer without npm, a dependency, or another experiment CLI.
+   Renderer-specific evidence contracts and post-freeze truth-rank/regret/alias metrics repair the
+   old harness rather than creating a parallel evaluator. The combined slice is net +1,567 nonblank
+   production lines (+1,758 including blanks) against a revised 1,600-nonblank cap; every new Python
+   module remains below 500 physical lines. The original 950-line estimate covered the rasterizer
+   only. It was revised before canonical evidence because review found that a same-process live-array
+   hand-off and hash-only scene record violated the registered truth firewall; the final increment
+   enforces the existing paired-prior reporting rule. No more Gate-2 feature code enters before this
+   pilot decides what to retain and the next consumer drives consolidation.
+5. Let Gate 3 drive the next extraction: one exact-pose screen should reuse the current matcher
    worker and render/lift contracts. Extract only duplicated experiment transaction/metrics needed
    by a second new study; do not create another standalone 1,000-line CLI.
-5. When the second new study exists, collapse shared pose error, evaluated candidate, top-K,
+6. When the second new study exists, collapse shared pose error, evaluated candidate, top-K,
    canonical hashing, provenance, and freeze/reload code behind typed contracts. Keep legacy readers
    as frozen adapters rather than rewriting their schemas.
-6. Split `strategy_bench.py`, `render_match_pnp.py`, `pnp.py`, and the large PnP test only along a
+7. Split `strategy_bench.py`, `render_match_pnp.py`, `pnp.py`, and the large PnP test only along a
    responsibility boundary that removes duplication or reduces test coupling; file movement alone
    is not consolidation.
-7. Audit external/public use before promoting or deleting the older `peakle.pipeline`,
+8. Audit external/public use before promoting or deleting the older `peakle.pipeline`,
    `peakle.matching`, and `localize.fg_check` paths. A previous first-class compatibility decision
    means test-only internal references are not sufficient evidence for deletion.
-8. Configure content-addressed remote transport and dashboard projection after the new experiment
+9. Configure content-addressed remote transport and dashboard projection after the new experiment
    contract is stable; neither blocks local causal tests.
 
 ### Guardrails
@@ -761,10 +948,11 @@ coverage, and the UI never presents an uncalibrated pose as confirmed.
 
 ## Current decision queue
 
-1. Specify the independent synthetic forward renderer and gold-real v0 protocol, including verified
-   peaks and the empirical GPS/compass/FOV prior distribution.
-2. Run perfect-observation surfaces, then use the exact-pose render-modality screen as the second
-   consumer that triggers only genuinely shared experiment extraction.
+1. Run and interpret registered geometry pilot v1. The WebGL fixtures, serialized estimator
+   firewall, protocol v0, gold-real v0 and prior snapshot are complete; GeoPose corrections remain
+   stress-only.
+2. Use the exact-pose render-modality screen as the second consumer that triggers only genuinely
+   shared experiment extraction.
 3. Reproduce LandscapeAR's released descriptor on its published protocol; keep the legacy runtime
    outside the core environment.
 4. Advance at most two pairs into restricted capture and use the measured, annotation-conditioned

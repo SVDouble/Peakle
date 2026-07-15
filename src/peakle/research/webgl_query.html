@@ -1,0 +1,271 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'">
+<pre id="peakle-result"></pre>
+<script>
+"use strict";
+
+const SCENE = __PEAKLE_SCENE_JSON__;
+
+function decodeBase64(value, Type) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Type(bytes.buffer);
+}
+
+function encodeBase64(array) {
+  const bytes = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function flipRows(source, width, height, channels) {
+  const output = new source.constructor(source.length);
+  const rowSize = width * channels;
+  for (let row = 0; row < height; row += 1) {
+    output.set(source.subarray(row * rowSize, (row + 1) * rowSize), (height - row - 1) * rowSize);
+  }
+  return output;
+}
+
+function compile(gl, kind, source) {
+  const shader = gl.createShader(kind);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+  return shader;
+}
+
+function link(gl, vertexSource, fragmentSource) {
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragmentSource));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  return program;
+}
+
+function cross(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+function normalize(a) {
+  const length = Math.hypot(...a);
+  if (!(length > 0)) throw new Error("zero-length vector");
+  return a.map((value) => value / length);
+}
+
+function cameraAxes(camera) {
+  const yaw = camera.yaw_deg * Math.PI / 180;
+  const pitch = camera.pitch_deg * Math.PI / 180;
+  const roll = camera.roll_deg * Math.PI / 180;
+  const forward = normalize([Math.sin(yaw) * Math.cos(pitch), Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch)]);
+  const right0 = normalize([Math.cos(yaw), -Math.sin(yaw), 0]);
+  const down0 = normalize(cross(forward, right0));
+  const cosine = Math.cos(roll);
+  const sine = Math.sin(roll);
+  return {
+    right: normalize(right0.map((value, index) => cosine * value + sine * down0[index])),
+    down: normalize(down0.map((value, index) => cosine * value - sine * right0[index])),
+    forward,
+  };
+}
+
+function vertexNormals(positions, triangles) {
+  const normals = new Float32Array(positions.length);
+  for (let offset = 0; offset < triangles.length; offset += 3) {
+    const ia = triangles[offset] * 3;
+    const ib = triangles[offset + 1] * 3;
+    const ic = triangles[offset + 2] * 3;
+    const ab = [positions[ib] - positions[ia], positions[ib + 1] - positions[ia + 1], positions[ib + 2] - positions[ia + 2]];
+    const ac = [positions[ic] - positions[ia], positions[ic + 1] - positions[ia + 1], positions[ic + 2] - positions[ia + 2]];
+    const face = cross(ab, ac);
+    for (const index of [ia, ib, ic]) {
+      normals[index] += face[0];
+      normals[index + 1] += face[1];
+      normals[index + 2] += face[2];
+    }
+  }
+  for (let offset = 0; offset < normals.length; offset += 3) {
+    const unit = normalize([normals[offset], normals[offset + 1], normals[offset + 2]]);
+    normals.set(unit, offset);
+  }
+  return normals;
+}
+
+function texture(gl, internalFormat, format, type, width, height) {
+  const result = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, result);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, null);
+  return result;
+}
+
+function render() {
+  const width = SCENE.intrinsics.width_px;
+  const height = SCENE.intrinsics.height_px;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const gl = canvas.getContext("webgl2", {alpha: true, antialias: false, depth: true, premultipliedAlpha: false});
+  if (!gl) throw new Error("WebGL2 unavailable");
+  if (!gl.getExtension("EXT_color_buffer_float")) throw new Error("EXT_color_buffer_float unavailable");
+
+  const positions = decodeBase64(SCENE.mesh.positions_f32le_base64, Float32Array);
+  const triangles = decodeBase64(SCENE.mesh.triangles_u32le_base64, Uint32Array);
+  const normals = vertexNormals(positions, triangles);
+  const axes = cameraAxes(SCENE.camera);
+  const vertexSource = `#version 300 es
+    precision highp float;
+    layout(location=0) in vec3 worldPosition;
+    layout(location=1) in vec3 worldNormal;
+    uniform vec3 cameraPosition;
+    uniform vec3 cameraRight;
+    uniform vec3 cameraDown;
+    uniform vec3 cameraForward;
+    uniform vec4 projection; // 2fx/W, 2fy/H, x offset, y offset
+    uniform float nearPlane;
+    out vec3 cameraNormal;
+    out vec3 worldPoint;
+    out float forwardDepth;
+    void main() {
+      vec3 delta = worldPosition - cameraPosition;
+      vec3 cameraPoint = vec3(dot(delta, cameraRight), dot(delta, cameraDown), dot(delta, cameraForward));
+      forwardDepth = cameraPoint.z;
+      cameraNormal = vec3(dot(worldNormal, cameraRight), dot(worldNormal, cameraDown), dot(worldNormal, cameraForward));
+      worldPoint = worldPosition;
+      gl_Position = vec4(
+        projection.x * cameraPoint.x + projection.z * cameraPoint.z,
+        -projection.y * cameraPoint.y + projection.w * cameraPoint.z,
+        2.0 * nearPlane - cameraPoint.z,
+        cameraPoint.z
+      );
+    }`;
+  const fragmentSource = `#version 300 es
+    precision highp float;
+    in vec3 cameraNormal;
+    in vec3 worldPoint;
+    in float forwardDepth;
+    uniform vec2 elevationRange;
+    layout(location=0) out vec4 rgbOutput;
+    layout(location=1) out vec4 geometryOutput;
+    layout(location=2) out vec4 classOutput;
+    void main() {
+      vec3 normal = normalize(cameraNormal);
+      float span = max(elevationRange.y - elevationRange.x, 1.0);
+      float altitude = clamp((worldPoint.z - elevationRange.x) / span, 0.0, 1.0);
+      vec3 low = vec3(0.22, 0.30, 0.18);
+      vec3 high = vec3(0.68, 0.65, 0.55);
+      float light = 0.45 + 0.55 * max(dot(normalize(vec3(0.35, -0.45, -0.82)), normal), 0.0);
+      rgbOutput = vec4(mix(low, high, altitude) * light, 1.0);
+      geometryOutput = vec4(normal, forwardDepth);
+      classOutput = vec4(1.0 / 255.0, 0.0, 0.0, 1.0);
+    }`;
+  const program = link(gl, vertexSource, fragmentSource);
+  gl.useProgram(program);
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  for (const [location, values] of [[0, positions], [1, normals]]) {
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, values, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(location);
+    gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 0, 0);
+  }
+  const indexBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, triangles, gl.STATIC_DRAW);
+
+  const framebuffer = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+  const rgbTexture = texture(gl, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, width, height);
+  const geometryTexture = texture(gl, gl.RGBA32F, gl.RGBA, gl.FLOAT, width, height);
+  const classTexture = texture(gl, gl.R8, gl.RED, gl.UNSIGNED_BYTE, width, height);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rgbTexture, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, geometryTexture, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, classTexture, 0);
+  const depthTexture = texture(gl, gl.DEPTH_COMPONENT32F, gl.DEPTH_COMPONENT, gl.FLOAT, width, height);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthTexture, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("incomplete framebuffer");
+
+  const {focal_length_px: focal, principal_x_px: cx, principal_y_px: cy} = SCENE.intrinsics;
+  gl.uniform3fv(gl.getUniformLocation(program, "cameraPosition"), SCENE.camera.position_enu_m);
+  gl.uniform3fv(gl.getUniformLocation(program, "cameraRight"), axes.right);
+  gl.uniform3fv(gl.getUniformLocation(program, "cameraDown"), axes.down);
+  gl.uniform3fv(gl.getUniformLocation(program, "cameraForward"), axes.forward);
+  gl.uniform4f(gl.getUniformLocation(program, "projection"), 2 * focal / width, 2 * focal / height,
+    2 * (cx + 0.5) / width - 1, 1 - 2 * (cy + 0.5) / height);
+  gl.uniform1f(gl.getUniformLocation(program, "nearPlane"), SCENE.camera.near_clip_m);
+  gl.uniform2f(gl.getUniformLocation(program, "elevationRange"), SCENE.mesh.elevation_min_m, SCENE.mesh.elevation_max_m);
+
+  gl.viewport(0, 0, width, height);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.GREATER);
+  gl.clearDepth(0.0);
+  gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0.46, 0.65, 0.82, 1.0]));
+  gl.clearBufferfv(gl.COLOR, 1, new Float32Array([0, 0, 0, 0]));
+  gl.clearBufferfv(gl.COLOR, 2, new Float32Array([0, 0, 0, 0]));
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.drawElements(gl.TRIANGLES, triangles.length, gl.UNSIGNED_INT, 0);
+  gl.finish();
+
+  const rgb = new Uint8Array(width * height * 4);
+  const geometry = new Float32Array(width * height * 4);
+  const classes = new Uint8Array(width * height);
+  gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+  gl.readBuffer(gl.COLOR_ATTACHMENT0);
+  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgb);
+  gl.readBuffer(gl.COLOR_ATTACHMENT1);
+  gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, geometry);
+  gl.readBuffer(gl.COLOR_ATTACHMENT2);
+  gl.readPixels(0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, classes);
+
+  const debug = gl.getExtension("WEBGL_debug_renderer_info");
+  return {
+    schema: "peakle_independent_webgl_query_output_v1",
+    width_px: width,
+    height_px: height,
+    row_order: "top_to_bottom",
+    byte_order: new Uint8Array(new Uint16Array([1]).buffer)[0] === 1 ? "little" : "big",
+    rgb_rgba8_base64: encodeBase64(flipRows(rgb, width, height, 4)),
+    normal_xyz_depth_f32le_base64: encodeBase64(flipRows(geometry, width, height, 4)),
+    semantic_u8_base64: encodeBase64(flipRows(classes, width, height, 1)),
+    camera_world_axes: axes,
+    camera_world_from_rdf_matrix_col_major: [
+      ...axes.right, 0,
+      ...axes.down, 0,
+      ...axes.forward, 0,
+      ...SCENE.camera.position_enu_m, 1,
+    ],
+    capabilities: {
+      version: gl.getParameter(gl.VERSION),
+      shading_language_version: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+      vendor: gl.getParameter(gl.VENDOR),
+      renderer: gl.getParameter(gl.RENDERER),
+      unmasked_vendor: debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : null,
+      unmasked_renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
+      max_texture_size: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+      max_color_attachments: gl.getParameter(gl.MAX_COLOR_ATTACHMENTS),
+      max_draw_buffers: gl.getParameter(gl.MAX_DRAW_BUFFERS),
+      ext_color_buffer_float: true,
+    },
+  };
+}
+
+try {
+  document.getElementById("peakle-result").textContent = JSON.stringify({ok: true, result: render()});
+} catch (error) {
+  document.getElementById("peakle-result").textContent = JSON.stringify({ok: false, error: String(error?.stack || error)});
+}
+for (const script of document.querySelectorAll("script")) script.remove();
+</script>

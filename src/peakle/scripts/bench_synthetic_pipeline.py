@@ -1,4 +1,4 @@
-"""Run the custom-pinhole shared-renderer synthetic stage upper-bound."""
+"""Run the synthetic stage ceiling with shared or independent query rendering."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import math
 import platform
 import subprocess
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,14 +16,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from peakle.config import load_settings
+from peakle.config import AppSettings, load_settings
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import EARTH_RADIUS_M, LocalPoint
 from peakle.domain.terrain import TerrainMap
 from peakle.io.artifacts import fsync_directory as _fsync_directory
 from peakle.io.artifacts import publish_directory_once as _publish_directory_once
 from peakle.io.artifacts import write_once_bytes as _write_once
-from peakle.localize.extract import best_skyline_candidate, extract_candidates
 from peakle.localize.paths import BASE
 from peakle.localize.synthetic_pipeline_bench import (
     DEFAULT_PRIOR_REGIMES,
@@ -34,11 +34,14 @@ from peakle.localize.synthetic_pipeline_bench import (
     canonical_json_bytes,
     controlled_prior,
     evaluate_synthetic_candidate_archive,
-    extraction_quality,
-    haze_image,
 )
-from peakle.rendering.rasterizer import SyntheticRenderer
 from peakle.rendering.terrain_view import terrain_fingerprint
+from peakle.research.synthetic_estimator import ImmutableArtifact, run_synthetic_estimator
+from peakle.research.synthetic_query import (
+    build_synthetic_query_observations,
+    observation_track_contract,
+    renderer_contract,
+)
 from peakle.scene.state import place_cameras
 from peakle.terrain.generator import TerrainGenerator
 from peakle.terrain.peak_detection import PeakDetector
@@ -74,7 +77,12 @@ def main() -> None:
     )
     started_at = datetime.now(UTC)
     started = time.perf_counter()
+    settings = load_settings()
     cases: list[dict[str, Any]] = []
+    observation_records: dict[str, dict[str, Any]] = {}
+    artifact_files: dict[str, bytes] = {}
+    query_artifact_manifest: list[dict[str, Any]] = []
+    estimator_artifact_manifest: dict[str, dict[str, Any]] = {}
     scenes = _rugged_scenes(
         seeds,
         views_per_scene=args.views_per_scene,
@@ -83,6 +91,7 @@ def main() -> None:
         terrain_grid_width=args.terrain_grid_width,
         terrain_grid_height=args.terrain_grid_height,
         eye_height_m=config.eye_height_m,
+        settings=settings,
     )
     if not args.no_radial_control:
         scenes.append(
@@ -92,45 +101,112 @@ def main() -> None:
                 terrain_grid_width=args.terrain_grid_width,
                 terrain_grid_height=args.terrain_grid_height,
                 eye_height_m=config.eye_height_m,
+                settings=settings,
             )
         )
     total = len(scenes) * len(prior_regimes) * len(estimator_terrain_variants)
     print(
-        f"Custom-pinhole shared-renderer stage upper-bound: {len(scenes)} scene/view(s), "
+        f"Synthetic {args.query_renderer} query stage ceiling: {len(scenes)} scene/view(s), "
         f"{len(prior_regimes)} prior regime(s), {len(estimator_terrain_variants)} estimator terrain variant(s), "
         f"{total} candidate archives",
         flush=True,
     )
     for scene_index, scene in enumerate(scenes, start=1):
-        observations = _observations(scene, intrinsics, config)
+        observations = build_synthetic_query_observations(
+            scene,
+            intrinsics,
+            config,
+            query_renderer=args.query_renderer,
+            chromium_path=args.chromium_path,
+        )
+        for filename, content in observations.artifact_files.items():
+            if filename in artifact_files:
+                raise RuntimeError(f"duplicate frozen query artifact filename: {filename}")
+            artifact_files[filename] = content
+        query_artifact_manifest.extend(record.model_dump(mode="json") for record in observations.artifact_manifest)
+        observation_records[str(scene["scene_id"])] = {
+            "observation_id": scene["scene_id"],
+            "query_renderer": args.query_renderer,
+            "query_provenance": observations.query_provenance,
+            "tracks": observations.metadata,
+            "query_artifacts": [record.model_dump(mode="json") for record in observations.artifact_manifest],
+        }
+        semantic_record = next(
+            (record for record in observations.artifact_manifest if record.role == "semantic_u8"),
+            None,
+        )
+        geometry_record = next(
+            (record for record in observations.artifact_manifest if record.role == "normal_xyz_depth_f32le"),
+            None,
+        )
         for variant in estimator_terrain_variants:
             estimator_terrain, terrain_record = _estimator_terrain(
                 scene["terrain"],
                 scene["truth"],
                 variant=variant,
                 coarse_factor=args.coarse_factor,
+                query_renderer=args.query_renderer,
             )
             for regime in prior_regimes:
                 case_started = time.perf_counter()
+                case_id = f"{scene['scene_id']}--{variant}--{regime.name}"
                 prior = controlled_prior(estimator_terrain, scene["truth"], regime, config)
-                archive = build_synthetic_candidate_archive(
-                    estimator_terrain,
-                    intrinsics,
-                    prior,
-                    observations["profiles"],
-                    observations["reference_depth_oracle"],
-                    config=config,
-                )
+                estimator_transaction: dict[str, Any] | None = None
+                if args.query_renderer == "webgl":
+                    if semantic_record is None or geometry_record is None:
+                        raise RuntimeError("WebGL estimator requires frozen semantic and geometry query artifacts")
+                    estimator_run = run_synthetic_estimator(
+                        estimator_terrain,
+                        intrinsics,
+                        prior,
+                        config,
+                        semantic_u8=artifact_files[semantic_record.filename],
+                        geometry_f32le=artifact_files[geometry_record.filename],
+                        terrain_filename=f"estimator-terrain-{scene['scene_id']}-{variant}.json",
+                        semantic_filename=semantic_record.filename,
+                        geometry_filename=geometry_record.filename,
+                        request_filename=f"estimator-request-{case_id}.json",
+                        output_filename=f"candidate-archive-{case_id}.json",
+                    )
+                    archive = estimator_run.archive
+                    for role, artifact in (
+                        ("estimator_terrain", estimator_run.terrain_artifact),
+                        ("estimator_request", estimator_run.request_artifact),
+                        ("frozen_candidate_archive", estimator_run.archive_artifact),
+                    ):
+                        _register_estimator_artifact(
+                            artifact_files,
+                            estimator_artifact_manifest,
+                            artifact,
+                            role=role,
+                            case_id=case_id,
+                        )
+                    estimator_transaction = {
+                        "execution": "isolated_python_subprocess",
+                        "truth_fields_in_request": False,
+                        "request": estimator_run.request_artifact.ref.model_dump(mode="json"),
+                        "estimator_terrain": estimator_run.terrain_artifact.ref.model_dump(mode="json"),
+                        "candidate_archive": estimator_run.archive_artifact.ref.model_dump(mode="json"),
+                    }
+                else:
+                    archive = build_synthetic_candidate_archive(
+                        estimator_terrain,
+                        intrinsics,
+                        prior,
+                        observations.profiles,
+                        observations.reference_depth_oracle,
+                        config=config,
+                    )
                 evaluation = evaluate_synthetic_candidate_archive(
                     archive,
                     scene["truth"],
-                    observations["quality"],
-                    observations["expected_actions"],
+                    observations.quality,
+                    observations.expected_actions,
                     expected_pose_ambiguity=bool(scene["expected_pose_ambiguity"]),
                 )
                 cases.append(
                     {
-                        "case_id": f"{scene['scene_id']}--{variant}--{regime.name}",
+                        "case_id": case_id,
                         "observation_id": scene["scene_id"],
                         "scene": {
                             "scene_id": scene["scene_id"],
@@ -142,8 +218,9 @@ def main() -> None:
                         },
                         "estimator_terrain": terrain_record,
                         "prior_regime": regime.to_record(config),
-                        "observation_tracks": observations["metadata"],
+                        "observation_tracks": observations.metadata,
                         "archive": archive,
+                        "estimator_transaction": estimator_transaction,
                         "evaluation": evaluation,
                         "runtime_s": round(time.perf_counter() - case_started, 4),
                     }
@@ -158,6 +235,12 @@ def main() -> None:
         "schema": SYNTHETIC_BENCHMARK_SCHEMA,
         "run_id": output.name,
         "contract": {
+            "truth_class": "independent_synthetic" if args.query_renderer == "webgl" else "diagnostic_oracle",
+            "independence_class": (
+                "independent_rasterizer_same_scene_model"
+                if args.query_renderer == "webgl"
+                else "shared_python_renderer_inverse_crime"
+            ),
             "purpose": ("custom pinhole upper-bound stage harness; never a replacement for the real-photo benchmark"),
             "production_atlas_scope": {
                 "production_pipeline_coverage": False,
@@ -184,16 +267,14 @@ def main() -> None:
                 "production_eligible": False,
                 "must_not_be_called_photo_or_pfm_evidence": True,
             },
-            "renderer_family": (
-                "authoritative observations and estimator candidates use SyntheticRenderer; "
-                "this benchmark does not claim independent-renderer validation"
-            ),
+            "renderer_family": renderer_contract(args.query_renderer),
             "terrain_mismatch_axis": (
                 "coarse deterministically subsamples the authoritative grid before candidate rendering"
             ),
             "expected_ambiguity_control": "radially symmetric terrain must cause pose-mode abstention",
         },
         "config": {
+            "query_renderer": args.query_renderer,
             "search": config.to_record(),
             "terrain_seeds": list(seeds),
             "views_per_rugged_scene": args.views_per_scene,
@@ -208,11 +289,19 @@ def main() -> None:
                 "grid_width": args.terrain_grid_width,
                 "grid_height": args.terrain_grid_height,
             },
-            "observation_tracks": {
-                "oracle_mask": "exact rendered terrain mask; diagnostic extraction ceiling",
-                "rgb_color": "current deterministic colour-mask extractor on the synthetic RGB render",
-                "rgb_haze": "same extractor after deterministic low-contrast/cloud corruption",
-            },
+            "observation_tracks": observation_track_contract(args.query_renderer),
+            "scene_generation_settings": settings.model_dump(mode="json"),
+        },
+        "observations": observation_records,
+        "query_artifacts": {
+            "frozen_before_estimator": args.query_renderer == "webgl",
+            "file_count": len(query_artifact_manifest),
+            "files": query_artifact_manifest,
+        },
+        "estimator_artifacts": {
+            "subprocess_boundary_used": args.query_renderer == "webgl",
+            "file_count": len(estimator_artifact_manifest),
+            "files": list(estimator_artifact_manifest.values()),
         },
         "cases": cases,
         "aggregates": aggregate_synthetic_cases(cases),
@@ -225,6 +314,8 @@ def main() -> None:
         summary,
         started_at=started_at,
         finished_at=finished_at,
+        query_renderer=args.query_renderer,
+        extra_files=artifact_files,
     )
     print(f"Wrote {output}", flush=True)
 
@@ -237,6 +328,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prior-regimes", default="exact,wide")
     parser.add_argument("--estimator-terrain-variants", default="exact,coarse")
     parser.add_argument("--coarse-factor", type=int, default=2)
+    parser.add_argument("--query-renderer", choices=("shared-python", "webgl"), default="shared-python")
+    parser.add_argument("--chromium-path", help="optional Chromium executable for --query-renderer webgl")
     parser.add_argument("--no-radial-control", action="store_true")
     parser.add_argument("--image-width", type=int, default=160)
     parser.add_argument("--image-height", type=int, default=90)
@@ -264,10 +357,11 @@ def _rugged_scenes(
     terrain_grid_width: int,
     terrain_grid_height: int,
     eye_height_m: float,
+    settings: AppSettings | None = None,
 ) -> list[dict[str, Any]]:
     if views_per_scene < 1:
         raise SystemExit("--views-per-scene must be positive")
-    settings = load_settings()
+    settings = settings or load_settings()
     scenes: list[dict[str, Any]] = []
     for seed in seeds:
         spec = settings.terrain.model_copy(
@@ -315,8 +409,9 @@ def _radial_control_scene(
     terrain_grid_width: int,
     terrain_grid_height: int,
     eye_height_m: float,
+    settings: AppSettings | None = None,
 ) -> dict[str, Any]:
-    settings = load_settings()
+    settings = settings or load_settings()
     spec = settings.terrain.model_copy(
         update={
             "seed": 0,
@@ -368,6 +463,7 @@ def _estimator_terrain(
     *,
     variant: str,
     coarse_factor: int,
+    query_renderer: str = "shared-python",
 ) -> tuple[TerrainMap, dict[str, Any]]:
     """Build one declared estimator surface without changing query evidence."""
 
@@ -404,8 +500,10 @@ def _estimator_terrain(
             else "take every Nth authoritative row/column and retain final boundaries; no interpolation"
         ),
         "downsample_factor": factor,
-        "shared_renderer_family": "SyntheticRenderer",
-        "independent_renderer_used": False,
+        "shared_renderer_family": "SyntheticRenderer" if query_renderer == "shared-python" else None,
+        "query_renderer_family": ("SyntheticRenderer" if query_renderer == "shared-python" else "chromium_webgl2_raw"),
+        "candidate_renderer_family": "SyntheticRenderer",
+        "independent_renderer_used": query_renderer == "webgl",
         "authoritative": terrain_fingerprint(authoritative),
         "estimator": terrain_fingerprint(estimator),
         "ground_elevation_delta_at_truth_xy_m": round(estimator_ground - authoritative_ground, 8),
@@ -419,102 +517,27 @@ def _stride_indices(size: int, factor: int) -> NDArray[np.int64]:
     return indices
 
 
-def _observations(
-    scene: dict[str, Any],
-    intrinsics: CameraIntrinsics,
-    config: SyntheticSearchConfig,
-) -> dict[str, Any]:
-    renderer = SyntheticRenderer()
-    render = renderer.render(scene["terrain"], intrinsics, scene["truth"], stride=config.render_stride)
-    geometry = renderer.geometry(scene["terrain"], intrinsics, scene["truth"], stride=config.render_stride)
-    oracle = np.asarray(render.skyline_profile, dtype=np.float64)
-    rgb = np.asarray(render.image, dtype=np.uint8)
-    profiles: dict[str, NDArray[np.float64]] = {"oracle_mask": oracle}
-    quality: dict[str, dict[str, Any]] = {
-        "oracle_mask": extraction_quality(
-            oracle,
-            oracle,
-            extractor_name="exact_terrain_mask",
-            coverage=1.0,
-            agreement=1.0,
-            config=config,
-        )
-    }
-    metadata: dict[str, Any] = {
-        "oracle_mask": {
-            "source": "exact reference-pose terrain mask",
-            "analysis_only": True,
-            "production_eligible": False,
-            "quality": quality["oracle_mask"],
-            "expected_action": "select",
-            "expected_action_source": "predeclared_case_design",
-        }
-    }
-    expected_actions = {
-        "oracle_mask": "select",
-        "rgb_color": "select",
-        "rgb_haze": "abstain",
-    }
-    for track, track_rgb in (
-        ("rgb_color", rgb),
-        ("rgb_haze", haze_image(rgb, seed=_stable_seed(scene["scene_id"]))),
-    ):
-        selected = best_skyline_candidate(extract_candidates(track_rgb, backend="color"))
-        if selected is None:
-            extractor_name = "none"
-            extracted = np.full(intrinsics.width_px, np.nan, dtype=np.float64)
-            coverage = 0.0
-            agreement = 0.0
-        else:
-            extractor_name, candidate = selected
-            extracted = np.asarray(candidate.rows, dtype=np.float64)
-            coverage = candidate.coverage
-            agreement = candidate.agreement
-        profiles[track] = extracted
-        quality[track] = extraction_quality(
-            extracted,
-            oracle,
-            extractor_name=extractor_name,
-            coverage=coverage,
-            agreement=agreement,
-            config=config,
-        )
-        metadata[track] = {
-            "source": "synthetic RGB render" if track == "rgb_color" else "deterministically hazed RGB render",
-            "analysis_only": True,
-            "production_eligible": False,
-            "production_analogue": "current deterministic colour-mask skyline extractor",
-            "quality": quality[track],
-            "expected_action": expected_actions[track],
-            "expected_action_source": "predeclared_case_design",
-        }
-    return {
-        "profiles": profiles,
-        "quality": quality,
-        "metadata": metadata,
-        "expected_actions": expected_actions,
-        "reference_depth_oracle": np.asarray(geometry.forward_depth_m, dtype=np.float64),
-    }
-
-
 def _summary_markdown(results: dict[str, Any]) -> str:
     aggregate = results["aggregates"]
     proposal = aggregate["proposal_recall"]
+    query_renderer = results.get("config", {}).get("query_renderer", "shared-python")
     lines = [
-        "# Synthetic custom-pinhole shared-renderer stage upper-bound",
+        f"# Synthetic {query_renderer} query stage ceiling",
         "",
         "This is a stage-isolation benchmark, not a real-photo leaderboard. Reference-rendered depth is oracle-only.",
         "",
         f"Full proposal-pool recall before ranking: {proposal['reached']}/{proposal['cases']} ({proposal['rate']}).",
         "",
         "| track | method | role | n | selected pose reaches target* | decision accuracy | abstain | "
-        "raw top-1 | selection coverage | median target rank | median pos m | median yaw deg |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "raw top-1 | selection coverage | median target rank | median numerical-truth rank† | "
+        "median truth regret | median alias margin‡ | median pos m | median yaw deg |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in aggregate["candidate_ranking"]:
         lines.append(
             "| {track} | {method} | {role} | {cases} | {success} | {decision} | {abstentions} | "
-            "{raw_top1} | {coverage} | {rank} | {position} | {yaw} |".format(
+            "{raw_top1} | {coverage} | {rank} | {truth_rank} | {regret} | {alias_margin} | "
+            "{position} | {yaw} |".format(
                 track=row["track"],
                 method=row["method"],
                 role=row["evidence_role"],
@@ -525,6 +548,9 @@ def _summary_markdown(results: dict[str, Any]) -> str:
                 raw_top1=row["raw_top1_target_hit_rate"],
                 coverage=row["selection_coverage"],
                 rank=row["median_first_target_rank"],
+                truth_rank=row["median_numerical_truth_candidate_rank"],
+                regret=row["median_numerical_truth_score_regret_to_winner"],
+                alias_margin=row["median_geographic_alias_margin"],
                 position=row["median_winner_position_error_m"],
                 yaw=row["median_winner_yaw_error_deg"],
             )
@@ -533,9 +559,39 @@ def _summary_markdown(results: dict[str, Any]) -> str:
         [
             "",
             "\\* A target hit is an identity check, not benchmark success; expected-ambiguity cases must abstain. "
-            "Decision accuracy is the contract metric.",
+            "Decision accuracy is the contract metric. † The numerical-truth candidate is selected post-freeze by "
+            "pose error and can be off-grid; rank ties are candidate-ID ordered, so read rank with regret. "
+            "‡ Alias score minus numerical-truth score: positive favors truth, negative favors a distant alias.",
         ]
     )
+    lines.extend(
+        [
+            "",
+            "## Paired against the unchanged input prior",
+            "",
+            "Negative deltas improve on the prior. Decision deltas are zero when the method abstains "
+            "and leaves the prior unchanged.",
+            "",
+            "| track | method | n | raw joint wins | raw joint regressions | raw Δpos m | raw Δyaw deg | "
+            "decision Δpos m | decision Δyaw deg |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in aggregate["candidate_ranking"]:
+        lines.append(
+            "| {track} | {method} | {cases} | {wins} | {regressions} | {raw_position} | {raw_yaw} | "
+            "{decision_position} | {decision_yaw} |".format(
+                track=row["track"],
+                method=row["method"],
+                cases=row["cases"],
+                wins=row["winner_prior_improvements"],
+                regressions=row["winner_prior_regressions"],
+                raw_position=row["median_winner_position_error_delta_vs_prior_m"],
+                raw_yaw=row["median_winner_yaw_error_delta_vs_prior_deg"],
+                decision_position=row["median_decision_position_error_delta_vs_prior_m"],
+                decision_yaw=row["median_decision_yaw_error_delta_vs_prior_deg"],
+            )
+        )
     lines.extend(
         [
             "",
@@ -570,6 +626,32 @@ def _summary_markdown(results: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _register_estimator_artifact(
+    files: dict[str, bytes],
+    manifest: dict[str, dict[str, Any]],
+    artifact: ImmutableArtifact,
+    *,
+    role: str,
+    case_id: str,
+) -> None:
+    filename = artifact.ref.filename
+    existing_content = files.get(filename)
+    if existing_content is not None and existing_content != artifact.content:
+        raise RuntimeError(f"conflicting immutable estimator artifact: {filename}")
+    files[filename] = artifact.content
+    existing_record = manifest.get(filename)
+    if existing_record is None:
+        manifest[filename] = {
+            **artifact.ref.model_dump(mode="json"),
+            "role": role,
+            "case_ids": [case_id],
+        }
+    else:
+        if existing_record["role"] != role or existing_record["sha256"] != artifact.ref.sha256:
+            raise RuntimeError(f"conflicting estimator artifact manifest: {filename}")
+        existing_record["case_ids"].append(case_id)
+
+
 def _commit_artifact(
     output: Path,
     results: dict[str, Any],
@@ -577,6 +659,8 @@ def _commit_artifact(
     *,
     started_at: datetime,
     finished_at: datetime,
+    query_renderer: str = "shared-python",
+    extra_files: Mapping[str, bytes] | None = None,
 ) -> None:
     result_bytes = canonical_json_bytes(results)
     summary_bytes = summary.encode()
@@ -589,34 +673,60 @@ def _commit_artifact(
         "case_count": len(results["cases"]),
         "results_sha256": hashlib.sha256(result_bytes).hexdigest(),
         "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
-        "code": _code_provenance(),
+        "code": _code_provenance(query_renderer),
         "environment": {
             "python": platform.python_version(),
             "platform": platform.platform(),
             "numpy": np.__version__,
         },
     }
+    files = {
+        "results.json": result_bytes,
+        "summary.md": summary_bytes,
+        "run.json": canonical_json_bytes(run),
+    }
+    for name, content in (extra_files or {}).items():
+        if name in files:
+            raise ValueError(f"extra artifact file collides with the benchmark transaction: {name}")
+        files[name] = content
     _publish_directory_once(
         output,
-        {
-            "results.json": result_bytes,
-            "summary.md": summary_bytes,
-            "run.json": canonical_json_bytes(run),
-        },
+        files,
         write_bytes=_write_once,
         sync_directory=_fsync_directory,
     )
 
 
-def _code_provenance() -> dict[str, Any]:
-    paths = (
+def _code_provenance(query_renderer: str = "shared-python") -> dict[str, Any]:
+    paths = [
+        BASE / "uv.lock",
+        BASE / "src/peakle/config.py",
+        BASE / "src/peakle/default_settings.yaml",
+        BASE / "src/peakle/domain/camera.py",
+        BASE / "src/peakle/domain/coordinates.py",
+        BASE / "src/peakle/domain/projection.py",
+        BASE / "src/peakle/domain/terrain.py",
         BASE / "src/peakle/localize/synthetic_pipeline_bench.py",
         Path(__file__),
         BASE / "src/peakle/localize/extract.py",
         BASE / "src/peakle/localize/typed_outlines.py",
         BASE / "src/peakle/rendering/rasterizer.py",
+        BASE / "src/peakle/rendering/pinhole.py",
+        BASE / "src/peakle/rendering/skyline.py",
+        BASE / "src/peakle/research/synthetic_query.py",
+        BASE / "src/peakle/research/webgl_contract.py",
+        BASE / "src/peakle/scene/state.py",
         BASE / "src/peakle/terrain/generator.py",
-    )
+        BASE / "src/peakle/terrain/peak_detection.py",
+    ]
+    if query_renderer == "webgl":
+        paths.extend(
+            (
+                BASE / "src/peakle/research/webgl_query.py",
+                BASE / "src/peakle/research/webgl_query.html",
+                BASE / "src/peakle/research/synthetic_estimator.py",
+            )
+        )
     implementation = []
     for path in paths:
         implementation.append(
@@ -658,10 +768,6 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _stable_seed(value: str) -> int:
-    return int(hashlib.sha256(value.encode()).hexdigest()[:16], 16)
 
 
 def _csv_ints(value: str, label: str) -> tuple[int, ...]:
