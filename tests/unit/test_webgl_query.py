@@ -12,7 +12,7 @@ from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import GeoPoint, LocalPoint
 from peakle.domain.terrain import TerrainMap, TerrainSpec
 from peakle.localize.synthetic_pipeline_bench import SyntheticSearchConfig
-from peakle.rendering.rasterizer import SyntheticRenderer
+from peakle.rendering.rasterizer import HeightfieldGrid, SyntheticRenderer
 from peakle.research import synthetic_query
 from peakle.research.synthetic_query import build_synthetic_query_observations
 from peakle.research.webgl_contract import QueryArtifactFile, freeze_webgl_query_artifact
@@ -276,10 +276,31 @@ def test_webgl_query_slanted_plane_has_analytic_depth_and_camera_normal() -> Non
 
 @pytest.mark.skipif(not CHROMIUM_AVAILABLE, reason="system Chromium is an optional research runtime")
 def test_webgl_query_clips_a_triangle_crossing_the_near_plane() -> None:
-    positions = np.asarray(((-4.0, 0.5, -4.0), (4.0, 5.0, -4.0), (0.0, 5.0, 4.0)), dtype=np.float32)
-    triangles = np.asarray(((0, 1, 2),), dtype=np.uint32)
+    surface = HeightfieldGrid(
+        x_m=np.asarray((-4.0, 4.0)),
+        y_m=np.asarray((0.5, 5.0)),
+        elevation_m=np.asarray(((-4.0, -4.0), (4.0, 4.0))),
+    )
+    x_grid, y_grid = np.meshgrid(surface.x_m, surface.y_m)
+    positions = np.column_stack((x_grid.ravel(), y_grid.ravel(), surface.elevation_m.ravel())).astype(np.float32)
+    triangles = np.asarray(((0, 1, 2), (1, 3, 2)), dtype=np.uint32)
 
     rendered = render_webgl_mesh_query(positions, triangles, _intrinsics(), _camera())
+    software_inverse_depth = np.full((7, 9), -np.inf, dtype=np.float64)
+    SyntheticRenderer()._rasterize_heightfield_into_buffer(
+        surface,
+        _intrinsics(),
+        _camera(),
+        stride=1,
+        inverse_depth_buffer=software_inverse_depth,
+    )
+    software_mask = np.isfinite(software_inverse_depth)
+    software_depth = np.full_like(software_inverse_depth, np.nan)
+    software_depth[software_mask] = 1.0 / software_inverse_depth[software_mask]
 
     assert rendered.terrain_mask.any()
     assert np.nanmin(rendered.forward_depth_m) >= 1.0
+    assert np.array_equal(software_mask, rendered.terrain_mask)
+    # The two rasterizers agree to sub-percent depth. Small float32 differences
+    # are amplified because clipping creates screen-space vertices at 1 m.
+    assert np.allclose(software_depth, rendered.forward_depth_m, rtol=5e-3, equal_nan=True)

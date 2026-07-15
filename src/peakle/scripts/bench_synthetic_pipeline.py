@@ -10,6 +10,7 @@ import subprocess
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
@@ -678,6 +679,8 @@ def _commit_artifact(
             "python": platform.python_version(),
             "platform": platform.platform(),
             "numpy": np.__version__,
+            "pydantic": distribution_version("pydantic"),
+            "scipy": distribution_version("scipy"),
         },
     }
     files = {
@@ -699,6 +702,7 @@ def _commit_artifact(
 
 def _code_provenance(query_renderer: str = "shared-python") -> dict[str, Any]:
     paths = [
+        BASE / "pyproject.toml",
         BASE / "uv.lock",
         BASE / "src/peakle/config.py",
         BASE / "src/peakle/default_settings.yaml",
@@ -727,25 +731,26 @@ def _code_provenance(query_renderer: str = "shared-python") -> dict[str, Any]:
                 BASE / "src/peakle/research/synthetic_estimator.py",
             )
         )
-    implementation = []
+    implementation_subset = []
     for path in paths:
-        implementation.append(
+        implementation_subset.append(
             {
                 "path": str(path.relative_to(BASE)),
                 "sha256": _file_sha256(path),
             }
         )
-    relative_paths = tuple(str(path.relative_to(BASE)) for path in paths)
-    status = _git("status", "--porcelain", "--", *relative_paths)
-    diff = _git("diff", "--binary", "HEAD", "--", *relative_paths)
+    status = _git("status", "--porcelain", "--untracked-files=all")
+    diff = _git("diff", "--binary", "HEAD")
     return {
         "git_sha": _git("rev-parse", "HEAD"),
+        "git_tree_sha": _git("rev-parse", "HEAD^{tree}"),
         "dirty": bool(status) if status is not None else None,
-        "scope": "listed_implementation_paths_only",
-        "implementation_status": status,
-        "implementation_status_sha256": hashlib.sha256((status or "").encode()).hexdigest(),
-        "implementation_diff_sha256": hashlib.sha256((diff or "").encode()).hexdigest(),
-        "implementation": implementation,
+        "scope": "whole_worktree",
+        "worktree_status": status,
+        "worktree_status_sha256": hashlib.sha256((status or "").encode()).hexdigest(),
+        "worktree_diff_sha256": hashlib.sha256((diff or "").encode()).hexdigest(),
+        "implementation_subset_role": "causal_files_for_human_review",
+        "implementation_subset": implementation_subset,
     }
 
 

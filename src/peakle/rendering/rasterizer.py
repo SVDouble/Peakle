@@ -12,7 +12,13 @@ from pydantic import BaseModel, ConfigDict
 
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.terrain import TerrainMap
-from peakle.rendering.pinhole import camera_axes, project_points
+from peakle.rendering.pinhole import (
+    DEFAULT_NEAR_CLIP_M,
+    camera_axes,
+    camera_coordinates,
+    project_camera_points,
+    project_points,
+)
 from peakle.rendering.skyline import interpolate_profile
 
 RASTER_EPSILON = 1e-8
@@ -111,6 +117,14 @@ class _ScreenVertex(NamedTuple):
     v_px: float
     inverse_depth: float
     valid: bool
+
+
+class _CameraVertex(NamedTuple):
+    """Triangle vertex in camera right/down/forward coordinates."""
+
+    right_m: float
+    down_m: float
+    forward_m: float
 
 
 class _RasterizedTerrain(BaseModel):
@@ -330,15 +344,17 @@ class SyntheticRenderer:
         x_grid, y_grid = np.meshgrid(sampled.x_m, sampled.y_m)
         z_grid = sampled.elevation_m
         points = np.column_stack((x_grid.ravel(), y_grid.ravel(), z_grid.ravel())).astype(np.float64)
-        u_px, v_px, _depth, valid = project_points(points, intrinsics, extrinsics)
+        camera_points = camera_coordinates(points, extrinsics)
+        u_px, v_px, depth, valid = project_camera_points(camera_points, intrinsics)
 
         grid_height, grid_width = z_grid.shape
         u_grid = u_px.reshape(grid_height, grid_width)
         v_grid = v_px.reshape(grid_height, grid_width)
         finite_point = np.all(np.isfinite(points), axis=1)
-        valid &= finite_point & np.isfinite(u_px) & np.isfinite(v_px) & np.isfinite(_depth)
+        valid &= finite_point & np.isfinite(u_px) & np.isfinite(v_px) & np.isfinite(depth)
         valid_grid = valid.reshape(grid_height, grid_width)
-        depth_grid = _depth.reshape(grid_height, grid_width)
+        camera_grid = camera_points.reshape(grid_height, grid_width, 3)
+        depth_grid = depth.reshape(grid_height, grid_width)
         inverse_depth_grid = np.zeros_like(u_grid, dtype=np.float64)
         finite_depth = valid_grid & (depth_grid > 0.0)
         inverse_depth_grid[finite_depth] = 1.0 / depth_grid[finite_depth]
@@ -349,13 +365,19 @@ class SyntheticRenderer:
                 top_right = self._screen_vertex(row, col + 1, u_grid, v_grid, inverse_depth_grid, valid_grid)
                 bottom_left = self._screen_vertex(row + 1, col, u_grid, v_grid, inverse_depth_grid, valid_grid)
                 bottom_right = self._screen_vertex(row + 1, col + 1, u_grid, v_grid, inverse_depth_grid, valid_grid)
-                self._rasterize_triangle(
+                self._rasterize_heightfield_triangle(
                     inverse_depth_buffer,
                     (top_left, top_right, bottom_left),
+                    camera_grid,
+                    ((row, col), (row, col + 1), (row + 1, col)),
+                    intrinsics,
                 )
-                self._rasterize_triangle(
+                self._rasterize_heightfield_triangle(
                     inverse_depth_buffer,
                     (top_right, bottom_right, bottom_left),
+                    camera_grid,
+                    ((row, col + 1), (row + 1, col + 1), (row + 1, col)),
+                    intrinsics,
                 )
 
     def _unproject_buffer_xy(
@@ -501,6 +523,35 @@ class SyntheticRenderer:
             valid=bool(valid_grid[row, col]),
         )
 
+    def _rasterize_heightfield_triangle(
+        self,
+        inverse_depth_buffer: NDArray[np.float64],
+        screen_vertices: tuple[_ScreenVertex, _ScreenVertex, _ScreenVertex],
+        camera_grid: NDArray[np.float64],
+        grid_indices: tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
+        intrinsics: CameraIntrinsics,
+    ) -> None:
+        """Rasterize a heightfield triangle, clipping it only when necessary."""
+
+        if all(vertex.valid for vertex in screen_vertices):
+            self._rasterize_triangle(inverse_depth_buffer, screen_vertices)
+            return
+        camera_values = np.asarray([camera_grid[row, col] for row, col in grid_indices], dtype=np.float64)
+        if not np.all(np.isfinite(camera_values)) or np.max(camera_values[:, 2]) < DEFAULT_NEAR_CLIP_M:
+            return
+        camera_vertices = (
+            _CameraVertex(*map(float, camera_values[0])),
+            _CameraVertex(*map(float, camera_values[1])),
+            _CameraVertex(*map(float, camera_values[2])),
+        )
+        clipped = _clip_polygon_to_near_plane(camera_vertices)
+        projected = tuple(_project_camera_vertex(vertex, intrinsics) for vertex in clipped)
+        for index in range(1, len(projected) - 1):
+            self._rasterize_triangle(
+                inverse_depth_buffer,
+                (projected[0], projected[index], projected[index + 1]),
+            )
+
     def _rasterize_triangle(
         self,
         inverse_depth_buffer: NDArray[np.float64],
@@ -634,6 +685,45 @@ def _stride_indices(size: int, stride: int) -> NDArray[np.int64]:
     if indices.size == 0 or indices[-1] != size - 1:
         indices = np.append(indices, np.int64(size - 1))
     return indices
+
+
+def _clip_polygon_to_near_plane(
+    vertices: tuple[_CameraVertex, _CameraVertex, _CameraVertex],
+    near_clip_m: float = DEFAULT_NEAR_CLIP_M,
+) -> tuple[_CameraVertex, ...]:
+    """Clip one camera-space triangle to `forward >= near` in winding order."""
+
+    clipped: list[_CameraVertex] = []
+    previous = vertices[-1]
+    previous_inside = previous.forward_m >= near_clip_m
+    for current in vertices:
+        current_inside = current.forward_m >= near_clip_m
+        if current_inside != previous_inside:
+            fraction = (near_clip_m - previous.forward_m) / (current.forward_m - previous.forward_m)
+            clipped.append(
+                _CameraVertex(
+                    right_m=previous.right_m + fraction * (current.right_m - previous.right_m),
+                    down_m=previous.down_m + fraction * (current.down_m - previous.down_m),
+                    forward_m=near_clip_m,
+                )
+            )
+        if current_inside:
+            clipped.append(current)
+        previous = current
+        previous_inside = current_inside
+    return tuple(clipped)
+
+
+def _project_camera_vertex(vertex: _CameraVertex, intrinsics: CameraIntrinsics) -> _ScreenVertex:
+    """Project a finite camera-space vertex known to lie on/in front of the near plane."""
+
+    inverse_depth = 1.0 / vertex.forward_m
+    return _ScreenVertex(
+        u_px=intrinsics.focal_length_px * vertex.right_m * inverse_depth + intrinsics.principal_x_px,
+        v_px=intrinsics.focal_length_px * vertex.down_m * inverse_depth + intrinsics.principal_y_px,
+        inverse_depth=inverse_depth,
+        valid=True,
+    )
 
 
 def _finite_triangle_support(

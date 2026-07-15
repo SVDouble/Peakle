@@ -510,14 +510,17 @@ def test_aggregates_deduplicate_observations_and_report_depth_once_per_archive()
     assert "identity check, not benchmark success" in summary
 
 
-def test_code_provenance_is_scoped_to_implementation_not_user_settings() -> None:
+def test_code_provenance_covers_the_worktree_and_lists_the_implementation_subset() -> None:
     provenance = _code_provenance()
     webgl_provenance = _code_provenance("webgl")
 
-    assert provenance["scope"] == "listed_implementation_paths_only"
-    assert ".vscode/settings.json" not in str(provenance["implementation_status"])
-    assert all(not item["path"].startswith(".vscode/") for item in provenance["implementation"])
-    webgl_paths = {item["path"] for item in webgl_provenance["implementation"]}
+    assert provenance["scope"] == "whole_worktree"
+    assert provenance["git_tree_sha"]
+    assert provenance["worktree_status_sha256"]
+    assert provenance["worktree_diff_sha256"]
+    assert provenance["implementation_subset_role"] == "causal_files_for_human_review"
+    assert all(not item["path"].startswith(".vscode/") for item in provenance["implementation_subset"])
+    webgl_paths = {item["path"] for item in webgl_provenance["implementation_subset"]}
     assert "src/peakle/research/synthetic_query.py" in webgl_paths
     assert "src/peakle/research/webgl_contract.py" in webgl_paths
     assert "src/peakle/research/webgl_query.py" in webgl_paths
@@ -525,6 +528,7 @@ def test_code_provenance_is_scoped_to_implementation_not_user_settings() -> None
     assert "src/peakle/research/synthetic_estimator.py" in webgl_paths
     assert "src/peakle/rendering/pinhole.py" in webgl_paths
     assert "src/peakle/default_settings.yaml" in webgl_paths
+    assert "pyproject.toml" in webgl_paths
     assert "uv.lock" in webgl_paths
 
 

@@ -1,11 +1,19 @@
 """Synthetic rasterizer tests."""
 
 import numpy as np
+import pytest
 
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import GeoPoint, LocalPoint
 from peakle.domain.terrain import TerrainMap, TerrainSpec
-from peakle.rendering.rasterizer import HeightfieldGrid, SyntheticRenderer, _ScreenVertex, _stride_indices
+from peakle.rendering.rasterizer import (
+    HeightfieldGrid,
+    SyntheticRenderer,
+    _CameraVertex,
+    _clip_polygon_to_near_plane,
+    _ScreenVertex,
+    _stride_indices,
+)
 
 
 def _flat_terrain(elevation_m: float) -> TerrainMap:
@@ -70,6 +78,21 @@ def test_rasterizer_prefers_nearer_triangle_for_overlapping_pixels() -> None:
 def test_strided_mesh_keeps_the_exact_terrain_boundaries() -> None:
     assert _stride_indices(8, 3).tolist() == [0, 3, 6, 7]
     assert _stride_indices(7, 3).tolist() == [0, 3, 6]
+
+
+def test_near_plane_clipping_retains_the_visible_part_of_a_triangle() -> None:
+    clipped = _clip_polygon_to_near_plane(
+        (
+            _CameraVertex(right_m=-4.0, down_m=4.0, forward_m=0.5),
+            _CameraVertex(right_m=4.0, down_m=4.0, forward_m=5.0),
+            _CameraVertex(right_m=0.0, down_m=-4.0, forward_m=5.0),
+        )
+    )
+
+    assert len(clipped) == 4
+    assert [vertex.forward_m for vertex in clipped] == [1.0, 1.0, 5.0, 5.0]
+    assert clipped[0].right_m == pytest.approx(-3.5555555556)
+    assert clipped[1].right_m == pytest.approx(-3.1111111111)
 
 
 def test_lower_native_surface_authoritatively_replaces_higher_regional_depth() -> None:

@@ -784,6 +784,11 @@ def test_invalid_render_matches_cannot_consume_the_post_lift_budget(
     invalid_surface: str,
 ) -> None:
     pose = _placed_pose(scene)
+    if invalid_surface == "sky":
+        # Keep this budget test independent of near-plane behavior: the base
+        # pose is intentionally close to a coarse terrain cell and may fill
+        # the frame once crossing triangles are clipped correctly.
+        pose = pose.model_copy(update={"pitch_deg": 25.0})
     bundle = TerrainViewRenderer().render(
         scene.terrain,
         scene.intrinsics,

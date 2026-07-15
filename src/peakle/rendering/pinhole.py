@@ -11,6 +11,8 @@ from scipy.spatial.transform import Rotation
 from peakle.domain.camera import CameraExtrinsics, CameraIntrinsics
 from peakle.domain.coordinates import LocalPoint
 
+DEFAULT_NEAR_CLIP_M = 1.0
+
 
 def camera_axes(
     extrinsics: CameraExtrinsics,
@@ -49,7 +51,7 @@ def project_points(
     points: NDArray[np.float64],
     intrinsics: CameraIntrinsics,
     extrinsics: CameraExtrinsics,
-    near_clip_m: float = 1.0,
+    near_clip_m: float = DEFAULT_NEAR_CLIP_M,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]]:
     """Projects local 3D points into image coordinates.
 
@@ -63,17 +65,36 @@ def project_points(
         Tuple of arrays `(u_px, v_px, depth_m, valid)` with length `N`.
     """
 
+    camera_points = camera_coordinates(points, extrinsics)
+    return project_camera_points(camera_points, intrinsics, near_clip_m=near_clip_m)
+
+
+def camera_coordinates(
+    points: NDArray[np.float64],
+    extrinsics: CameraExtrinsics,
+) -> NDArray[np.float64]:
+    """Transforms world ENU points into camera right/down/forward coordinates."""
+
     right, down, forward = camera_axes(extrinsics)
     position = np.array(extrinsics.position.as_tuple(), dtype=np.float64)
     vectors = points - position
+    return vectors @ np.column_stack((right, down, forward))
 
-    x_camera = vectors @ right
-    y_camera = vectors @ down
-    depth = vectors @ forward
-    valid = depth > near_clip_m
 
-    u_px = np.full(points.shape[0], np.nan, dtype=np.float64)
-    v_px = np.full(points.shape[0], np.nan, dtype=np.float64)
+def project_camera_points(
+    camera_points: NDArray[np.float64],
+    intrinsics: CameraIntrinsics,
+    near_clip_m: float = DEFAULT_NEAR_CLIP_M,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]]:
+    """Projects right/down/forward camera coordinates into image coordinates."""
+
+    x_camera = camera_points[:, 0]
+    y_camera = camera_points[:, 1]
+    depth = camera_points[:, 2]
+    valid = np.all(np.isfinite(camera_points), axis=1) & (depth >= near_clip_m)
+
+    u_px = np.full(camera_points.shape[0], np.nan, dtype=np.float64)
+    v_px = np.full(camera_points.shape[0], np.nan, dtype=np.float64)
     u_px[valid] = intrinsics.focal_length_px * (x_camera[valid] / depth[valid])
     u_px[valid] += intrinsics.principal_x_px
     v_px[valid] = intrinsics.focal_length_px * (y_camera[valid] / depth[valid])
