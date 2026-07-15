@@ -4,7 +4,7 @@
 
 **Last reviewed:** 2026-07-15
 
-**Current phase:** Phase 0C — registered independent-rasterizer geometry pilot
+**Current phase:** Phase 0C — exact-pose representation × matcher screen
 
 This document is the sole normative source for Peakle's research goal, interpretation of accepted
 evidence, benchmark contracts, technical direction, and current roadmap. Its adjacent
@@ -36,6 +36,16 @@ photo-to-render matchers can form internally coherent correspondences at a pose 
 the published GeoPose reference, and the current same-family holdout can falsely accept that pose.
 Those are ranking, observability, truth, and validation problems—not evidence that another local
 optimizer or a larger beam will solve the task.
+
+The independent-rasterizer pilot now sharpens that diagnosis. With exact estimator terrain,
+perfect WebGL metric and relative depth each rank the numerical truth first on all four rugged
+views under both exact and moderate priors. The first run failed because the Python estimator
+dropped terrain triangles crossing its near plane; after clipping parity was repaired, exact-pose
+depth disagreement and the ranking failures collapsed. This is an observability ceiling, not an
+image localizer. Typed depth outlines and their fixed fusion still violate the preregistered
+abstention criterion on a discretely non-invariant control, while skyline contains no pose
+information in an all-terrain view. The next bottleneck is
+therefore obtaining geographically correct photo↔terrain evidence at the exact pose.
 
 The first annotation diagnostic also falsifies a single distance-only pose target. At 640 px, the
 same 200 m displacement produces roughly 7 px median-of-view p90 anchor error along the viewing
@@ -88,11 +98,11 @@ The program is therefore changed as follows:
    or training data are correlated. The requirement is evidence not reused for fitting plus measured
    conditional value and risk/coverage—not an unsupported claim that heads are independent.
 
-These changes intentionally reduce the next experiment. The annotation-sensitivity diagnostic and
-truth protocol v0 are complete. The independent-renderer calibration and serialized estimator
-firewall are implemented; the immediate target is the registered perfect-observation pilot,
-followed by a small exact-pose modality
-screen—not another end-to-end solver or a run of all 32 verifier candidates.
+These changes intentionally reduce the next experiment. The annotation-sensitivity diagnostic,
+truth protocol v0, independent-renderer calibration, serialized estimator firewall and first
+perfect-observation pilot are complete. Metric and relative depth survive the pilot; typed outlines
+and their fixed fusion stop at the ambiguity control. The immediate target is a small exact-pose
+modality screen—not another end-to-end solver or a run of all 32 verifier candidates.
 
 ## Mission and task boundaries
 
@@ -151,6 +161,8 @@ mean:
 | RGB geometry verifier, `local/output/20260714-three-photo-photo-geometry-verifier-v1/results.json`, SHA `a55235964989131d00b515eceffb4b5b98341e30940f4e39d41c6a81a33c7f9b` | Truth-blind DexiNed, monocular depth, and skyline evidence over 1,323 candidates per photo | Top one is 0/3, median 359.7 m; it abstains 3/3. A diverse beam of 32 contains a target for 2/3, both at beam rank 12. | **Experimental negative.** Abstention is safer than a false claim, but the verifier is not a useful selector yet. |
 | MINIMA heldout validation, `local/output/20260714-heldout-candidate-validation-minima-img4948-geopose-bench/results.json`, SHA `ecfd52bc375305987aaeea8c0244209a2621e31706440cbab9b316479bbfe14d` | Three controlled perturbations of IMG4948 against prior-centred orthophoto renders; all cases ranking-ineligible | The gate abstains twice and returns one pose 215.0 m / 0.98° from the refined reference, for 0/3 successes. The matcher saw the complete query before the spatial holdout. | **Experimental / negative.** Plumbing works, but this same-family holdout cannot certify the ambiguous alternative pose. |
 | Synthetic pinhole stage ceiling, `local/output/20260714-synthetic-pinhole-stage-upper-bound-v2/results.json`, SHA `bf813d184d4b6c99be00ff6c0b75c3e8d4b7c5115478d932cd77638209f180a8` | Five observations, two priors, exact/coarse estimator terrain; shared custom renderer | Proposal recall is 20/20 by construction. Exact-mask skyline top-one falls from 8/10 to 3/10 after factor-two terrain coarsening; RGB skyline falls from 2/10 to 0/10. | **Diagnostic ceiling.** It isolates terrain/extraction sensitivity; it is not an independent end-to-end result. |
+| Independent WebGL geometry pilot v1, `local/output/20260715-independent-webgl-geometry-pilot-v1/results.json`, SHA `ddc5373f8beef4fbf1fbede11d9e1c8a8f94ff6a5cabcf22be95da43284f2657` | Five independent-rasterizer observations, exact terrain, two priors and ten frozen 175-candidate archives | Metric depth meets strict numerical-truth rank/regret calibration on only 2/4 rugged exact-prior views; only skyline abstains in both ambiguity-control archives. | **Negative harness calibration.** Seed-7 WebGL depths of metres were compared with kilometre-scale Python renders because near-plane-crossing terrain was dropped. Do not interpret the method ranking. |
+| Corrective independent WebGL geometry pilot v2, `local/output/20260715-independent-webgl-geometry-pilot-v2-near-clip/results.json`, SHA `7a5a7200441116e76c4df38272b82279d25e29480d61af021c7e4c9b60ffa64a` | Same sealed queries, terrain, requests, priors and candidate poses as v1; corrected estimator clipping; clean whole-worktree provenance | Metric and relative depth rank the unique numerical truth first with zero regret on 4/4 rugged exact-prior and 8/8 all-prior cases. Skyline, metric and relative depth abstain in both controls; typed outlines and fixed fusion violate the registered criterion on the discretely non-invariant fixture. | **Diagnostic ceiling / partial gate pass.** Translation is observable from perfect depth under exact terrain. Retain metric/relative ceilings, keep skyline as a control, and stop typed/fixed-fusion lanes rather than tune them. |
 | Annotation sensitivity diagnostic, `local/output/20260715-annotation-sensitivity-diagnostic-v2/results.json`, SHA `a7153733e636a830f60b89d643fefab1c05102bf2a6689ac0afab2bd2ed44221` | Four seed-13 synthetic pinhole views, 49 controlled perturbations per view; same terrain/renderer/labeler on both sides, no estimator | Exact pose has 24 physically eligible peak exposures and 14 displayed labels at 4.1–14.7 km. Median-of-view p90 anchor error is 13.0 px for 100 m lateral, 26.0 px for 200 m lateral, but 7.6 px for 200 m along-view; ±1° yaw is 11.9 px and ±1° FOV is 4.6 px at 640 px width. | **Diagnostic ceiling.** Pose utility is direction- and peak-distance-conditioned. Seed 13 was selected from 1–24 using exact-pose eligibility only; shared-renderer and fixture-selection bias prohibit a product claim. |
 | Six-photo GT↔DEM compatibility, `local/output/20260714-high-compute-six-photo-compatibility-v2-geopose-bench/results.json`, SHA `a2937e7ad1464dbfa59ad8cead798bda64be2d06e2a9cea57d30c977dee80488` | Reference PFM and metadata, evaluation-only | Produces two MAP_A, two MAP_B, and two MAP_C cases, but tiers change in nearby seeded runs around hard thresholds. | **Experimental dataset audit.** Useful as a continuous covariate, not yet as a calibrated eligibility gate. |
 | Legacy GT alignment audit, `local/output/20260709-155112-gt-alignment-audit/audit.json`, SHA `bc7ce33733e4893f832257fb1fa594869ef7d41500a9744651dd22239abc598f` | 364 refined-pose-era records, without a modern run manifest | 192 CLEAN, 172 SUSPECT, including 126 photo/PFM registration mismatches. | **Superseded diagnostic.** Supports caution about the corpus but cannot grade the reset benchmark. |
@@ -299,8 +311,10 @@ sealed scene or truth-pose field. A hash-only or same-process hand-off does not 
 Before a scientific case, analytic fixtures must pass camera axes and pixel centres, yaw/pitch/roll,
 off-centre principal point/crop, slanted-plane metric depth, camera-normal direction, triangle
 z-order, diagonal seams, near-plane clipping, top/bottom orientation, semantic IDs, and repeated-run
-determinism. The near-plane fixture is decisive: WebGL clips a crossing triangle, while the current
-Python renderer drops a triangle when a vertex is invalid. A test must also make
+determinism. The first pilot made the near-plane fixture decisive: WebGL clipped a crossing
+triangle while the Python estimator dropped the whole facet. The estimator now clips in camera
+space, and the cross-renderer fixture requires identical coverage and sub-percent depth agreement.
+A test must also make
 `SyntheticRenderer` raise while the query renderer still succeeds, and a request validator must
 reject every forbidden truth field.
 
@@ -470,6 +484,7 @@ deployability.
 | Skyline-only translation / CMA-ES and other local optimizers | 0.5 | 0/3 and 0/5 position recovery; even source-PFM skyline scoring selects displaced basins | Stop active development; retain only frozen baselines/ablations |
 | Dense skyline atlas | 3 as harness; 0.5 as selector | Reference-near grid cells exist, while blind top one is 0/6 across PFM/photo tracks; coverage mostly follows enumeration | Keep for recall@K, observability, and beam tests; freeze the skyline scorer |
 | PFM geometry rerank | 4 diagnostic; 0 deployable | Its fixed fusion finds 18.5–52.0 m poses on three cases, but reference-position source depth encodes unavailable evidence | Keep as a perturbable oracle specification or training target only |
+| Independent perfect depth | 4 diagnostic; 0 deployable | After near-plane repair, metric and relative depth each rank truth first on 8/8 rugged archives; exact terrain and perfect query depth make this an upper bound | Retain as the observability target for representation tests; do not add another handcrafted fusion |
 | RGB geometry verifier v1 | 1 selector; 3 interface | Top one is 0/3 and all cases abstain; its selected skyline defines the mask used by ridge and depth cues | Freeze v1; retain beam/abstention contracts; run one independent-mask kill test before deleting the scorer |
 | Render/lift/PnP core | 4 local stage | Geometry works in controlled tests; the sole real learned-matcher case is truth-ambiguous and can false-accept a coherent basin | Keep and simplify; grade correspondence geography before PnP |
 | SIFT | 1 | Positive mainly on identity/same-render plumbing; real cross-domain use usually abstains | Hermetic regression control only |
@@ -478,7 +493,7 @@ deployability.
 | LandscapeAR descriptor + PnP | 4 | Closest released mountain method; 30%≤100 m and 54%≤300 m, but its main renders start at truth and known FOV | Highest-priority task-B reproduction in an isolated environment |
 | NormalLoc-style RGB↔normal training | 3.5 concept | Large gains over generic matchers on low-detail textureless CAD/urban models; no mountain test or official code | Promote normals to the exact-pose screen; train only after that signal exists |
 | Segmentation / ridge extraction | 3.5 enabler; 1 direct translation | Large oracle/RGB orientation gap, but better boundaries do not create translation parallax | Build a manually labelled observation benchmark; defer LingBot Giant |
-| Independent synthetic causal tests | 4 | Exact truth can isolate observability and terrain mismatch; sim-to-real remains the main uncertainty | Invest in a different forward renderer; do not use shared-renderer accuracy as a headline |
+| Independent synthetic causal tests | 4 | A different rasterizer isolated a real near-plane defect and perfect-depth observability; shared scene physics and sim-to-real remain the main uncertainty | Keep bounded one-factor tests; the next consumer is exact-pose representation, not another synthetic solver |
 | Current `contourdb` / `global` | 0.5 | They search at most a massif-centred ring or a 20×20 grid in a supplied terrain window, not a published no-prior protocol | Remove from active method selection; preserve historical results |
 | Baatz/Saurer skyline retrieval | 3 coarse retrieval | Reported 76–88% top-one within 1 km, with correction/circular-truth caveats and catastrophic outliers | Classical task-C baseline only |
 | CrossLocate depth retrieval | 4 regional; 1 fine pose | 38.66% R@1 and 72.62% R@100 within 1 km over a held-out Alps region; known FOV and no metric refinement | Primary task-C baseline, after or separate from local capture |
@@ -705,6 +720,40 @@ modality, not a new pass threshold. This pilot cannot complete Gate 2: it lacks 
 query-only occluders, height bias, nodata, crop/FOV mismatch, directional sweeps and an independent
 physical scene model.
 
+#### Recorded pilot outcome and method decision
+
+Pilot v1 at clean revision `87e5c59` failed the metric calibration on seed-7 views: numerical-truth
+ranks were 98 and 3 with regrets 0.06072 and 0.09108. Its frozen WebGL queries had median depths of
+4.95 m and 14.87 m while the exact-pose Python renders had medians of 2.60 km and 1.34 km. The
+artifact is retained as a negative harness result, not method evidence. Its own provenance covered
+only a listed implementation subset; the source commit was subsequently audited, but the artifact
+cannot prove whole-worktree cleanliness by itself.
+
+Revision `6d9ffcf` added camera-space near-plane clipping, an analytic cross-renderer regression and
+whole-worktree Git provenance. The unchanged corrective v2 run records run SHA
+`8c35e7ac3f9f88116645a6cd9a683267b819e781013b57aa1ce01f8506fea926` and result SHA
+`7a5a7200441116e76c4df38272b82279d25e29480d61af021c7e4c9b60ffa64a`.
+All query blobs, estimator terrains, requests, candidate IDs/poses, score formulas and post-freeze
+evaluation logic are unchanged from v1; only estimator candidate rendering and provenance were
+corrected. The seed-7 exact-pose Python medians become 4.94 m and 14.86 m, and metric
+depth then has rank 1, zero regret and a unique top score on all four rugged exact-prior views.
+Metric, relative depth and fixed fusion are also rank 1 on all eight rugged prior/view archives;
+typed outlines remain rank 3 on both seed-23-view-2 archives, and skyline correctly has a 175-way
+tie in the all-terrain seed-7-view-1 image.
+
+An independent integrity audit rehashed all 48 files, reconstructed all ten complete 5×5×7
+candidate pools and replayed the formerly failing seed-7-view-1 archive byte-identically. Its
+sorted-file manifest SHA is `919fc770b66adca0ba3fef86b44dab03a221172d2b29a38ee2e271d796a23a0e`;
+the replay archive SHA is `3f118aed3d9d99014f9c3d886acbed4cfcc5a2427291d280827ebe5232b1afca`.
+
+The all-method ambiguity criterion still fails. Skyline, metric depth and relative depth abstain in
+both control archives; typed outlines and fixed fusion select in both. The sampled rectangular
+heightfield is not continuously rotation-invariant, but this does not rescue the two lanes: typed
+outlines also add no rugged-case value that metric/relative depth lack, and fusion inherits their
+failure. Freeze both rather than tune the control or weights. Advance metric and relative depth only
+as perfect-observation targets, retain skyline as an abstention/orientation control, and keep Gate 2
+open for mismatch/normal tests driven by a successful image representation.
+
 ### Gate 3 — exact-pose representation × matcher screen
 
 At the exact render position and heading, compare these render lanes under the same image scale and
@@ -726,6 +775,66 @@ unregularized pose is useful under Gate 1's annotation budget; inlier count alon
 LandscapeAR is reproduced first in an isolated legacy environment on its published true-position,
 known-FOV protocol. Only the descriptor/inference boundary is adapted into Peakle; its dependency
 stack is not ported into the core package.
+
+#### Registered exact-pose screen v1
+
+This screen asks one question: with exact estimator terrain, pose and FOV supplied, can an existing
+matcher produce geographically correct and spatially distributed photo↔terrain correspondences?
+If not, PnP and a wider pose search are not the current bottleneck.
+
+Before any learned matching, freeze four independent WebGL queries from terrain seeds 31 and 47,
+two deterministic views per seed. Use the exact 97×73 estimator heightfield at stride 1, 55° FOV
+and 320×180 pixels. Report the four views as two terrain clusters, not four independent samples.
+The positive render is the Python estimator at the exact query pose. The two declared negative
+controls cross `rugged-s31-v01` with the exact `rugged-s47-v01` render and vice versa. There is no
+radial fixture, position/yaw lattice, prior, orthophoto or hidden appearance resource in this test.
+The query files must be immutable before matcher construction. A matcher receives only query RGB
+and candidate RGB; WebGL depth, semantic mask, camera and scene are opened only after its match
+outputs are frozen.
+
+Compare exactly these existing matcher paths:
+
+- SIFT as the hermetic floor, plus query-to-identical-query calibration on every positive case;
+- the pinned offline RoMa worker; and
+- the pinned offline MINIMA checkpoint through the same worker contract.
+
+Compare exactly three estimator representations: hillshade, relative depth and
+**camera-coordinate** normals. The existing world-normal RGB must not be relabelled as camera
+normals. Defer orthophoto until a declared appearance raster exists; do not add silhouette, typed
+outlines, fixed fusion, MatchAnything, model training or another matcher in this slice.
+
+Freeze raw/worker-selected match coordinates and confidences before truth-side grading. For each
+matcher × modality × case publish raw and selected counts, render-lift validity, geographic
+correctness count and precision, correct-match occupancy in a fixed 4×4 query grid, horizontal and
+vertical spans, confidence distribution, runtime, peak memory and complete model/worker provenance.
+A selected correspondence is geographically correct only when both endpoints are valid terrain,
+the lifted render point reprojects within 5 px of the query endpoint, and its 3D distance from the
+WebGL query-depth point is at most `max(25 m, 1% of query range)`. Truth may grade frozen matches;
+it must never filter inputs to PnP.
+
+Harness calibration precedes any method decision. Identical-query SIFT must return at least 12
+matches, at least 95% within 1 px and cover at least four 4×4 cells. For every positive exact-pose
+pair, cross-render mask IoU must be at least 0.99 and p95 absolute log-depth disagreement at most
+0.01. A positive matcher/modality case passes only with at least 24 selected matches, lift validity
+at least 0.80, at least 18 geographically correct matches, precision at least 0.70, at least six
+occupied 4×4 cells, horizontal span at least 40% and vertical span at least 15%.
+
+A matcher/modality pair survives only if it passes at least three of four positives, including a
+view from each seed, and neither negative control reaches that gate. Run the existing
+projection-aware RANSAC/PnP only for survivors, with prior and ground residual weights zero and no
+truth-side match filtering. The exact render pose is a declared numerical initializer, not evidence
+of capture. A pair advances only if its unregularized fit remains within 50 m horizontal and 1° yaw
+on at least three positives and both seeds, no negative control solves, and its median correct-match
+coverage beats SIFT without losing more than 0.05 precision. Advance at most two pairs. If none
+survives, freeze the negative result and reproduce LandscapeAR rather than tuning thresholds,
+fusion or PnP.
+
+The experiment-specific implementation is capped at 400 nonblank production lines plus a 120-line
+thin CLI. Extract the rugged scene generator rather than copy it. Add a hash-validating typed loader
+for frozen WebGL observations and reuse `TerrainViewRenderer`, `lift_render_pixels`, `DenseMatcher`,
+`SiftMatcher`, `WorkerMatcher` and `fit_pose_ransac`. Because this is the second experiment consumer,
+shared canonical hashing, whole-worktree provenance and immutable run publication may be extracted
+only while deleting the private copies they replace; that consolidation must be net-negative.
 
 ### Gate 4 — restricted capture surfaces
 
@@ -811,8 +920,10 @@ branch per experiment.
    sealed scene/query payload, strict estimator request, subprocess worker and frozen candidate
    archive add an independent rasterizer without npm, a dependency, or another experiment CLI.
    Renderer-specific evidence contracts and post-freeze truth-rank/regret/alias metrics repair the
-   old harness rather than creating a parallel evaluator. The combined slice is net +1,567 nonblank
-   production lines (+1,758 including blanks) against a revised 1,600-nonblank cap; every new Python
+   old harness rather than creating a parallel evaluator. Before the pilot, the combined slice was
+   net +1,567 nonblank production lines (+1,758 including blanks). The pilot-required near-plane
+   correctness repair and whole-worktree provenance closure bring it to +1,666 nonblank lines
+   against a corrective 1,700-line cap; every new Python
    module remains below 500 physical lines. The original 950-line estimate covered the rasterizer
    only. It was revised before canonical evidence because review found that a same-process live-array
    hand-off and hash-only scene record violated the registered truth firewall; the final increment
@@ -948,16 +1059,13 @@ coverage, and the UI never presents an uncalibrated pose as confirmed.
 
 ## Current decision queue
 
-1. Run and interpret registered geometry pilot v1. The WebGL fixtures, serialized estimator
-   firewall, protocol v0, gold-real v0 and prior snapshot are complete; GeoPose corrections remain
-   stress-only.
-2. Use the exact-pose render-modality screen as the second consumer that triggers only genuinely
+1. Use the exact-pose render-modality screen as the second consumer that triggers only genuinely
    shared experiment extraction.
-3. Reproduce LandscapeAR's released descriptor on its published protocol; keep the legacy runtime
+2. Reproduce LandscapeAR's released descriptor on its published protocol; keep the legacy runtime
    outside the core environment.
-4. Advance at most two pairs into restricted capture and use the measured, annotation-conditioned
+3. Advance at most two pairs into restricted capture and use the measured, annotation-conditioned
    boundary to decide whether the frozen 32-mode beam is worth the full render/PnP cost.
-5. Reproduce CrossLocate/Baatz only as task-C baselines once local capture is useful, or explicitly
+4. Reproduce CrossLocate/Baatz only as task-C baselines once local capture is useful, or explicitly
    label an earlier run as a standalone retrieval study.
 
 The question for every future proposal is: **which failed gate does this test, what observation
